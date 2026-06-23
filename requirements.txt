@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pandas
+numpy
+requests
+tushare
+akshare
+yfinance
+pytest
+pytest-cov
+python-dotenv
+pydantic-settings
+

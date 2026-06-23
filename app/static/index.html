@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>跨市场组合回测</title>
+    <link rel="stylesheet" href="static/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="panel controls">
+        <h1>组合回测</h1>
+        <label>
+          初始资金
+          <input id="initialCapital" type="number" min="10000" step="10000" />
+        </label>
+        <div class="date-row">
+          <label>
+            开始日期
+            <input id="startDate" type="date" />
+          </label>
+          <label>
+            结束日期
+            <input id="endDate" type="date" />
+          </label>
+        </div>
+        <label>
+          再平衡频率
+          <select id="rebalanceFrequency">
+            <option value="yearly">每年</option>
+            <option value="semiannual">每半年</option>
+          </select>
+        </label>
+        <label>
+          容忍带 <span id="bandValue"></span>
+          <input id="rebalanceBand" type="range" min="0" max="0.1" step="0.005" />
+        </label>
+        <label>
+          每月消费
+          <input id="monthlySpend" type="number" min="0" step="500" />
+        </label>
+        <section>
+          <h2>资产权重</h2>
+          <div id="assetControls"></div>
+          <div class="repo-weight">国债逆回购：<strong id="repoWeight">0%</strong></div>
+          <label>
+            逆回购期限
+            <select id="repoSymbol"></select>
+          </label>
+        </section>
+        <details>
+          <summary>费用设置</summary>
+          <label>境内基金佣金率 <input id="cnCommission" type="number" min="0" step="0.00001" /></label>
+          <label>美国券商费率类型
+            <select id="ibkrPlan">
+              <option value="pro_fixed">固定费率</option>
+              <option value="pro_tiered">阶梯费率</option>
+              <option value="lite">免佣类型</option>
+            </select>
+          </label>
+          <label>出金和购汇点差（基点） <input id="fxOutBps" type="number" min="0" step="1" /></label>
+          <label>入金和结汇点差（基点） <input id="fxInBps" type="number" min="0" step="1" /></label>
+          <label>美国分红税率 <input id="usDividendTax" type="number" min="0" max="0.3" step="0.01" /></label>
+        </details>
+        <div class="button-row">
+          <button id="runBtn">运行回测</button>
+        </div>
+        <div id="message" class="message"></div>
+      </aside>
+      <section class="content">
+        <section class="summary-grid" id="summaryGrid"></section>
+        <section class="chart-grid">
+          <div class="chart-panel"><div id="assetChart" class="chart"></div></div>
+          <div class="chart-panel"><div id="returnChart" class="chart"></div></div>
+          <div class="chart-panel"><div id="drawdownChart" class="chart"></div></div>
+          <div class="chart-panel"><div id="weightChart" class="chart"></div></div>
+          <div class="chart-panel wide-chart"><div id="comparisonChart" class="chart"></div></div>
+        </section>
+        <section class="table-grid">
+          <div class="panel">
+            <h2>数据状态</h2>
+            <table id="statusTable"></table>
+          </div>
+          <div class="panel">
+            <h2>再平衡记录</h2>
+            <table id="rebalanceTable"></table>
+          </div>
+          <div class="panel wide">
+            <h2>交易流水</h2>
+            <table id="tradesTable"></table>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="static/app.js"></script>
+  </body>
+</html>
