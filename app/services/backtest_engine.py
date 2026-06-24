@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+import hashlib
+import json
 import math
 import uuid
 from typing import Any
@@ -58,6 +60,32 @@ class PortfolioState:
 
 class BacktestError(ValueError):
     pass
+
+
+def canonical_config_hash(config: dict[str, Any]) -> str:
+    canonical = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def get_cached_backtest_run(conn, user_config: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    config = normalize_config(user_config)
+    config_hash = canonical_config_hash(config)
+    row = conn.execute(
+        """
+        SELECT run_id, summary_json FROM backtest_runs
+        WHERE config_hash=?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (config_hash,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "run_id": row["run_id"],
+        "summary": json.loads(row["summary_json"]),
+        "cache": {"hit": True, "mode": "参数一致"},
+    }
 
 
 def load_price_map(conn, symbols: list[str], start: str, end: str) -> dict[str, dict[str, float]]:
@@ -696,6 +724,10 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     errors = validate_config(config)
     if errors:
         raise BacktestError("; ".join(errors))
+    config_hash = canonical_config_hash(config)
+    cached = get_cached_backtest_run(conn, config)
+    if cached:
+        return cached
 
     start = config["start_date"]
     end = config["end_date"]
@@ -884,6 +916,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
                         "weights": {key: value / total if total else 0.0 for key, value in values.items()},
                         "targets": targets,
                         "unrealized_pnl_cny": unrealized,
+                        "benchmark_value": latest_prices.get(benchmark_symbol),
                         "repo_lots": len(state.repo_lots),
                     }
                 ),
@@ -948,12 +981,12 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     }
 
     conn.execute(
-        "INSERT INTO backtest_runs(run_id, created_at, config_json, summary_json) VALUES(?,?,?,?)",
-        (run_id, utc_now(), json_dumps(config), json_dumps(summary)),
+        "INSERT INTO backtest_runs(run_id, created_at, config_hash, config_json, summary_json) VALUES(?,?,?,?,?)",
+        (run_id, utc_now(), config_hash, json_dumps(config), json_dumps(summary)),
     )
     insert_many(conn, "portfolio_daily", daily_rows)
     for trade in trades:
         trade["run_id"] = run_id
     insert_many(conn, "trades", trades)
     insert_many(conn, "rebalance_events", rebalance_rows)
-    return {"run_id": run_id, "summary": summary}
+    return {"run_id": run_id, "summary": summary, "cache": {"hit": False, "mode": "重新计算"}}

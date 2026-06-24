@@ -9,6 +9,7 @@ from app.services.data_sync import (
     eastmoney_secid,
     from_tushare_date,
     merge_rows_by_trade_date,
+    missing_date_ranges,
     parse_sohu_jsonp,
     required_data_missing,
     select_best_datasrc_price_rows,
@@ -66,6 +67,23 @@ class DbAndSyncTests(unittest.TestCase):
             missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"], "204007")
         self.assertIn("repo_rates:204001", missing)
         self.assertNotIn("repo_rates:204007", missing)
+
+    def test_missing_date_ranges_only_returns_database_gaps(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date IN ('2020-01-03','2020-01-06')")
+            gaps = missing_date_ranges(conn, "prices", "symbol", "VOO", "trade_date", "2020-01-01", "2020-01-10")
+        self.assertEqual(gaps, [("2020-01-03", "2020-01-06")])
+
+    def test_sync_all_keeps_existing_real_rows_when_no_gap(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        with db_session(db_path) as conn:
+            before = conn.execute("SELECT COUNT(*) AS count FROM prices WHERE symbol='VOO'").fetchone()["count"]
+            result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], allow_network=False)
+            after = conn.execute("SELECT COUNT(*) AS count FROM prices WHERE symbol='VOO'").fetchone()["count"]
+        self.assertEqual(before, after)
+        self.assertEqual(result["inserted"]["prices"], 0)
+        self.assertNotIn("prices:VOO", result["missing_data"])
 
     def test_json_and_row_helpers(self) -> None:
         db_path = temp_db_path()

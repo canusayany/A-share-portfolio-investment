@@ -48,6 +48,7 @@ class ApiTests(unittest.TestCase):
     def test_run_and_read_backtest_sections(self) -> None:
         result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
         run_id = result["run_id"]
+        self.assertFalse(result["cache"]["hit"])
         self.assertGreater(result["summary"]["final_asset_cny"], 0)
         detail = http_json(f"{self.base_url}/api/backtest/{run_id}")
         series = http_json(f"{self.base_url}/api/backtest/{run_id}/series")
@@ -56,9 +57,14 @@ class ApiTests(unittest.TestCase):
         positions = http_json(f"{self.base_url}/api/backtest/{run_id}/positions?limit=2")
         self.assertEqual(detail["run_id"], run_id)
         self.assertGreater(len(series["series"]), 20)
+        self.assertNotIn("cumulative_return", series["series"][0])
+        self.assertIn("benchmark_value", series["series"][0]["payload"])
         self.assertGreaterEqual(len(rebalance["rebalance"]), 1)
         self.assertGreater(len(trades["trades"]), 0)
         self.assertLessEqual(len(positions["positions"]), 2)
+        cached = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        self.assertEqual(cached["run_id"], run_id)
+        self.assertTrue(cached["cache"]["hit"])
 
     def test_static_index_is_served(self) -> None:
         opener = request.build_opener(request.ProxyHandler({}))

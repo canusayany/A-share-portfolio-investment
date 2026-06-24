@@ -68,6 +68,9 @@ class CalendarAndConfigTests(unittest.TestCase):
         bad["assets"] = [{**bad["assets"][0], "target_weight": 1.2}]
         self.assertTrue(validate_config(bad))
 
+    def test_default_end_date_uses_current_day(self) -> None:
+        self.assertEqual(default_config()["end_date"], date.today().isoformat())
+
     def test_dotenv_loader_sets_missing_values_only(self) -> None:
         path = Path(tempfile.mkdtemp(prefix="dotenv_test_")) / ".env"
         path.write_text("A_TOKEN=abc\nEXISTING_TOKEN=file\n", encoding="utf-8")

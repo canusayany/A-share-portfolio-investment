@@ -31,6 +31,7 @@ class BacktestEngineTests(unittest.TestCase):
             daily = rows_to_dicts(conn.execute("SELECT * FROM portfolio_daily WHERE run_id=? ORDER BY trade_date", (run_id,)))
             trades = rows_to_dicts(conn.execute("SELECT * FROM trades WHERE run_id=?", (run_id,)))
             rebalances = rows_to_dicts(conn.execute("SELECT * FROM rebalance_events WHERE run_id=?", (run_id,)))
+            cached = run_backtest(conn, cfg)
         self.assertGreater(result["summary"]["final_asset_cny"], 900000)
         self.assertEqual(result["summary"]["total_spend_cny"], 15000)
         self.assertGreaterEqual(result["summary"]["rebalance_count"], 1)
@@ -50,6 +51,8 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertIn("return", rebalance_payload["asset_performance"]["REPO"])
         self.assertIn("period_max_drawdown", rebalance_payload)
         self.assertLessEqual(rebalance_payload["period_max_drawdown"], 0)
+        self.assertEqual(cached["run_id"], run_id)
+        self.assertTrue(cached["cache"]["hit"])
 
     def test_disabled_asset_weight_flows_to_repo(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")

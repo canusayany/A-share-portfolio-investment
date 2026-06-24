@@ -163,7 +163,9 @@ def get_settings(db_path: str | Path | None = None) -> Settings:
 
 
 def default_config() -> dict[str, Any]:
-    return deepcopy(DEFAULT_CONFIG)
+    config = deepcopy(DEFAULT_CONFIG)
+    config["end_date"] = date.today().isoformat()
+    return config
 
 
 def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:

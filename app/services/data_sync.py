@@ -12,7 +12,7 @@ import time
 from typing import Any
 from app.config import DEFAULT_ASSETS
 from app.db import insert_many, upsert_assets
-from app.services.calendar import parse_date
+from app.services.calendar import business_days, parse_date
 
 
 TUSHARE_URL = "http://api.tushare.pro"
@@ -78,6 +78,46 @@ def _has_generated_rows(conn, table: str, code_col: str, codes: list[str], date_
         (*codes, start, end),
     ).fetchone()
     return bool(row and row["count"])
+
+
+def missing_date_ranges(
+    conn,
+    table: str,
+    code_col: str,
+    code: str,
+    date_col: str,
+    start: str,
+    end: str,
+) -> list[tuple[str, str]]:
+    expected = business_days(start, end)
+    if not expected:
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT {date_col} AS trade_date FROM {table}
+        WHERE {code_col}=?
+          AND {date_col} BETWEEN ? AND ?
+          AND source NOT LIKE 'generated:%'
+        """,
+        (code, start, end),
+    ).fetchall()
+    existing = {row["trade_date"] for row in rows}
+    ranges: list[tuple[str, str]] = []
+    range_start = None
+    range_end = None
+    for day in expected:
+        day_text = day.isoformat()
+        if day_text not in existing:
+            if range_start is None:
+                range_start = day
+            range_end = day
+        elif range_start is not None and range_end is not None:
+            ranges.append((range_start.isoformat(), range_end.isoformat()))
+            range_start = None
+            range_end = None
+    if range_start is not None and range_end is not None:
+        ranges.append((range_start.isoformat(), range_end.isoformat()))
+    return ranges
 
 
 def required_data_missing(
@@ -872,68 +912,87 @@ def sync_all(
     upsert_assets(conn, [benchmark])
     symbols = [asset["symbol"] for asset in assets] + ["000300.SH"]
     placeholders = ",".join("?" for _ in symbols)
-    conn.execute(f"DELETE FROM prices WHERE symbol IN ({placeholders}) AND trade_date BETWEEN ? AND ?", (*symbols, start, end))
-    conn.execute(f"DELETE FROM fund_dividends WHERE symbol IN ({placeholders}) AND ex_date BETWEEN ? AND ?", (*symbols, start, end))
-    conn.execute(f"DELETE FROM adj_factors WHERE symbol IN ({placeholders}) AND trade_date BETWEEN ? AND ?", (*symbols, start, end))
-    conn.execute("DELETE FROM fx_rates WHERE pair='USD/CNY' AND trade_date BETWEEN ? AND ?", (start, end))
-    conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ?", (repo_symbol, start, end))
+    conn.execute(
+        f"DELETE FROM prices WHERE symbol IN ({placeholders}) AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'",
+        (*symbols, start, end),
+    )
+    conn.execute(
+        f"DELETE FROM fund_dividends WHERE symbol IN ({placeholders}) AND ex_date BETWEEN ? AND ? AND source LIKE 'generated:%'",
+        (*symbols, start, end),
+    )
+    conn.execute(
+        f"DELETE FROM adj_factors WHERE symbol IN ({placeholders}) AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'",
+        (*symbols, start, end),
+    )
+    conn.execute("DELETE FROM fx_rates WHERE pair='USD/CNY' AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'", (start, end))
+    conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'", (repo_symbol, start, end))
     if repo_symbol != "204001":
-        conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ?", ("204001", start, end))
+        conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'", ("204001", start, end))
 
     inserted = {"prices": 0, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "fx_rates": 0}
+    asset_price_ranges: dict[str, list[tuple[str, str]]] = {}
+    for asset in assets:
+        symbol = asset["symbol"]
+        inception = asset.get("inception_date") or start
+        fetch_start = max(parse_date(start), parse_date(inception)).isoformat()
+        asset_price_ranges[symbol] = missing_date_ranges(conn, "prices", "symbol", symbol, "trade_date", fetch_start, end)
+
     def fetch_asset_bundle(asset: dict[str, Any]) -> dict[str, Any]:
         asset_warnings: list[str] = []
         asset_missing: list[str] = []
         symbol = asset["symbol"]
-        inception = asset.get("inception_date") or start
-        fetch_start = max(parse_date(start), parse_date(inception)).isoformat()
+        price_ranges = asset_price_ranges[symbol]
         prices: list[dict[str, Any]] = []
         tushare_asset_available = True
-        try:
-            if not allow_network:
-                raise SyncWarning("network disabled for deterministic sync")
-            if asset.get("market") == "CN":
-                prices = fetch_cn_fund_prices(token, symbol, fetch_start, end)
-            else:
-                prices = fetch_yahoo_prices(symbol, fetch_start, end, asset.get("currency", "USD"))
-        except SyncWarning as exc:
-            asset_warnings.append(str(exc))
-            if asset.get("market") == "CN":
-                tushare_asset_available = False
-            if allow_network and asset.get("market") == "CN":
-                try:
-                    prices = merge_rows_by_trade_date(fetch_datasrc_market_prices(symbol, fetch_start, end, "CNY"), prices)
-                except SyncWarning as datasrc_exc:
-                    asset_warnings.append(str(datasrc_exc))
-            if allow_network and asset.get("market") == "CN":
-                try:
-                    prices = merge_rows_by_trade_date(prices, fetch_sohu_prices(symbol, fetch_start, end, "CNY", "sohu:hisHq"))
-                except SyncWarning as public_exc:
-                    asset_warnings.append(str(public_exc))
-            if allow_network and asset.get("market") == "CN" and not prices:
-                try:
-                    prices = fetch_eastmoney_prices(symbol, fetch_start, end, "CNY", "eastmoney:fund_kline")
-                except SyncWarning as public_exc:
-                    asset_warnings.append(str(public_exc))
-            elif allow_network and not prices:
-                try:
-                    prices = fetch_stooq_prices(symbol, fetch_start, end)
-                except SyncWarning as public_exc:
-                    asset_warnings.append(str(public_exc))
-            if not prices:
+        for range_start, range_end in price_ranges:
+            range_prices: list[dict[str, Any]] = []
+            try:
+                if not allow_network:
+                    raise SyncWarning("network disabled for deterministic sync")
+                if asset.get("market") == "CN":
+                    range_prices = fetch_cn_fund_prices(token, symbol, range_start, range_end)
+                else:
+                    range_prices = fetch_yahoo_prices(symbol, range_start, range_end, asset.get("currency", "USD"))
+            except SyncWarning as exc:
+                asset_warnings.append(str(exc))
+                if asset.get("market") == "CN":
+                    tushare_asset_available = False
+                if allow_network and asset.get("market") == "CN":
+                    try:
+                        range_prices = merge_rows_by_trade_date(fetch_datasrc_market_prices(symbol, range_start, range_end, "CNY"), range_prices)
+                    except SyncWarning as datasrc_exc:
+                        asset_warnings.append(str(datasrc_exc))
+                if allow_network and asset.get("market") == "CN":
+                    try:
+                        range_prices = merge_rows_by_trade_date(range_prices, fetch_sohu_prices(symbol, range_start, range_end, "CNY", "sohu:hisHq"))
+                    except SyncWarning as public_exc:
+                        asset_warnings.append(str(public_exc))
+                if allow_network and asset.get("market") == "CN" and not range_prices:
+                    try:
+                        range_prices = fetch_eastmoney_prices(symbol, range_start, range_end, "CNY", "eastmoney:fund_kline")
+                    except SyncWarning as public_exc:
+                        asset_warnings.append(str(public_exc))
+                elif allow_network and not range_prices:
+                    try:
+                        range_prices = fetch_stooq_prices(symbol, range_start, range_end)
+                    except SyncWarning as public_exc:
+                        asset_warnings.append(str(public_exc))
+            if not range_prices:
                 asset_missing.append(f"prices:{symbol}")
+            prices = merge_rows_by_trade_date(prices, range_prices)
         dividends: list[dict[str, Any]] = []
         adj: list[dict[str, Any]] = []
-        if asset.get("market") == "CN":
+        if asset.get("market") == "CN" and price_ranges:
             if allow_network and tushare_asset_available:
-                try:
-                    dividends = fetch_fund_dividends(token, symbol, fetch_start, end)
-                except SyncWarning as exc:
-                    asset_warnings.append(str(exc))
-                try:
-                    adj = fetch_adj_factors(token, symbol, fetch_start, end)
-                except SyncWarning as exc:
-                    asset_warnings.append(str(exc))
+                for range_start, range_end in price_ranges:
+                    try:
+                        dividends.extend(fetch_fund_dividends(token, symbol, range_start, range_end))
+                    except SyncWarning as exc:
+                        asset_warnings.append(str(exc))
+                    try:
+                        adj = merge_rows_by_trade_date(adj, fetch_adj_factors(token, symbol, range_start, range_end))
+                    except SyncWarning as exc:
+                        asset_warnings.append(str(exc))
             else:
                 asset_warnings.append(f"skip Tushare dividend/adj for {symbol} because primary Tushare price source is unavailable")
         return {"prices": prices, "dividends": dividends, "adj": adj, "warnings": asset_warnings, "missing": asset_missing}
@@ -950,49 +1009,52 @@ def sync_all(
             inserted["adj_factors"] += insert_many(conn, "adj_factors", bundle["adj"])
 
     index_prices: list[dict[str, Any]] = []
-    try:
-        if not allow_network:
-            raise SyncWarning("network disabled for deterministic sync")
-        index_prices = fetch_index_prices(token, "000300.SH", start, end)
-    except SyncWarning as exc:
-        warnings.append(str(exc))
-        if allow_network:
-            try:
-                index_prices = fetch_datasrc_market_prices("000300.SH", start, end, "CNY")
-            except SyncWarning as datasrc_exc:
-                warnings.append(str(datasrc_exc))
-        if allow_network:
-            try:
-                index_prices = merge_rows_by_trade_date(index_prices, fetch_sohu_prices("000300.SH", start, end, "CNY", "sohu:hisHq"))
-            except SyncWarning as public_exc:
-                warnings.append(str(public_exc))
-        if allow_network and not index_prices:
-            try:
-                index_prices = fetch_eastmoney_prices("000300.SH", start, end, "CNY", "eastmoney:index_kline")
-            except SyncWarning as public_exc:
-                warnings.append(str(public_exc))
-        if not index_prices:
+    for range_start, range_end in missing_date_ranges(conn, "prices", "symbol", "000300.SH", "trade_date", start, end):
+        range_prices: list[dict[str, Any]] = []
+        try:
+            if not allow_network:
+                raise SyncWarning("network disabled for deterministic sync")
+            range_prices = fetch_index_prices(token, "000300.SH", range_start, range_end)
+        except SyncWarning as exc:
+            warnings.append(str(exc))
+            if allow_network:
+                try:
+                    range_prices = fetch_datasrc_market_prices("000300.SH", range_start, range_end, "CNY")
+                except SyncWarning as datasrc_exc:
+                    warnings.append(str(datasrc_exc))
+            if allow_network:
+                try:
+                    range_prices = merge_rows_by_trade_date(range_prices, fetch_sohu_prices("000300.SH", range_start, range_end, "CNY", "sohu:hisHq"))
+                except SyncWarning as public_exc:
+                    warnings.append(str(public_exc))
+            if allow_network and not range_prices:
+                try:
+                    range_prices = fetch_eastmoney_prices("000300.SH", range_start, range_end, "CNY", "eastmoney:index_kline")
+                except SyncWarning as public_exc:
+                    warnings.append(str(public_exc))
+        if not range_prices:
             missing_data.append("prices:000300.SH")
+        index_prices = merge_rows_by_trade_date(index_prices, range_prices)
     inserted["prices"] += insert_many(conn, "prices", index_prices)
-    def fetch_repo_bundle(symbol: str) -> list[dict[str, Any]]:
+    def fetch_repo_bundle(symbol: str, range_start: str, range_end: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         try:
-            rows = fetch_datasrc_repo_rates(symbol, start, end)
+            rows = fetch_datasrc_repo_rates(symbol, range_start, range_end)
         except SyncWarning as exc:
             warnings.append(str(exc))
         if not rows:
             try:
-                rows = fetch_sohu_repo_rates(symbol, start, end)
+                rows = fetch_sohu_repo_rates(symbol, range_start, range_end)
             except SyncWarning as exc:
                 warnings.append(str(exc))
         if not rows:
             try:
-                rows = fetch_akshare_repo_rates(symbol, start, end)
+                rows = fetch_akshare_repo_rates(symbol, range_start, range_end)
             except SyncWarning as exc:
                 warnings.append(str(exc))
         if not rows:
             try:
-                rows = fetch_eastmoney_repo_rates(symbol, start, end)
+                rows = fetch_eastmoney_repo_rates(symbol, range_start, range_end)
             except SyncWarning as eastmoney_exc:
                 warnings.append(str(eastmoney_exc))
         if not rows:
@@ -1000,38 +1062,52 @@ def sync_all(
         return rows
 
     repo_rows: list[dict[str, Any]] = []
+    repo_range_map = {
+        current_repo_symbol: missing_date_ranges(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, end)
+        for current_repo_symbol in sorted({"204001", repo_symbol})
+    }
     if not allow_network:
         warnings.append("network disabled for deterministic sync")
+        for current_repo_symbol, ranges in repo_range_map.items():
+            if ranges:
+                missing_data.append(f"repo_rates:{current_repo_symbol}")
     else:
-        for current_repo_symbol in sorted({"204001", repo_symbol}):
-            repo_rows.extend(fetch_repo_bundle(current_repo_symbol))
-    if not repo_rows and not allow_network:
-        missing_data.append(f"repo_rates:{repo_symbol}")
+        for current_repo_symbol, ranges in repo_range_map.items():
+            for range_start, range_end in ranges:
+                repo_rows = merge_rows_by_trade_date(repo_rows, fetch_repo_bundle(current_repo_symbol, range_start, range_end))
     inserted["repo_rates"] += insert_many(conn, "repo_rates", repo_rows)
     fx_rows: list[dict[str, Any]] = []
+    fx_missing_ranges = missing_date_ranges(conn, "fx_rates", "pair", "USD/CNY", "trade_date", start, end)
     if not allow_network:
         warnings.append("network disabled for deterministic sync")
+        if fx_missing_ranges:
+            missing_data.append("fx_rates:USD/CNY")
     else:
-        try:
-            fx_rows = fetch_datasrc_fx_rates(start, end)
-        except SyncWarning as exc:
-            warnings.append(str(exc))
-        if not fx_rows:
+        for range_start, range_end in fx_missing_ranges:
+            range_fx_rows: list[dict[str, Any]] = []
             try:
-                fx_rows = fetch_yahoo_fx_rates(start, end)
+                range_fx_rows = fetch_datasrc_fx_rates(range_start, range_end)
             except SyncWarning as exc:
                 warnings.append(str(exc))
-        if not fx_rows:
-            try:
-                fx_rows = fetch_frankfurter_fx_rates(start, end)
-            except SyncWarning as public_exc:
-                warnings.append(str(public_exc))
-        if not fx_rows:
-            try:
-                fx_rows = fetch_stooq_fx_rates(start, end)
-            except SyncWarning as public_exc:
-                warnings.append(str(public_exc))
-    if not fx_rows:
+            if not range_fx_rows:
+                try:
+                    range_fx_rows = fetch_yahoo_fx_rates(range_start, range_end)
+                except SyncWarning as exc:
+                    warnings.append(str(exc))
+            if not range_fx_rows:
+                try:
+                    range_fx_rows = fetch_frankfurter_fx_rates(range_start, range_end)
+                except SyncWarning as public_exc:
+                    warnings.append(str(public_exc))
+            if not range_fx_rows:
+                try:
+                    range_fx_rows = fetch_stooq_fx_rates(range_start, range_end)
+                except SyncWarning as public_exc:
+                    warnings.append(str(public_exc))
+            if not range_fx_rows:
+                missing_data.append("fx_rates:USD/CNY")
+            fx_rows = merge_rows_by_trade_date(fx_rows, range_fx_rows)
+    if allow_network and fx_missing_ranges and not fx_rows:
         missing_data.append("fx_rates:USD/CNY")
     inserted["fx_rates"] += insert_many(conn, "fx_rates", fx_rows)
     return {"inserted": inserted, "warnings": sorted(set(warnings)), "missing_data": sorted(set(missing_data))}

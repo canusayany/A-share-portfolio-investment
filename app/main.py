@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from app.config import STATIC_DIR, default_config, get_settings, normalize_config
 from app.db import data_status, db_session, init_db, json_loads, rows_to_dicts
-from app.services.backtest_engine import BacktestError, run_backtest
+from app.services.backtest_engine import BacktestError, get_cached_backtest_run, run_backtest
 from app.services.data_sync import required_data_missing, sync_all
 
 
@@ -122,6 +122,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/backtest/run":
                 config = normalize_config(payload.get("config") or payload)
                 with db_session(self.settings.db_path) as conn:
+                    cached = get_cached_backtest_run(conn, config)
+                    if cached:
+                        cached["data_sync"] = {"triggered": False, "missing_before": [], "result": None}
+                        cached["status"] = data_status(conn)
+                        self.send_json(HTTPStatus.OK, cached)
+                        return
                     missing_before = required_data_missing(conn, config["start_date"], config["end_date"], config["assets"], config["repo_symbol"])
                     sync_result = None
                     if missing_before:
@@ -180,7 +186,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 rows = rows_to_dicts(
                     conn.execute(
                         """
-                        SELECT trade_date,total_asset_cny,flow_cny,daily_return,cumulative_return,drawdown,benchmark_return,payload_json
+                        SELECT trade_date,total_asset_cny,flow_cny,payload_json
                         FROM portfolio_daily WHERE run_id=? ORDER BY trade_date
                         """,
                         (run_id,),

@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS trading_calendar (
 CREATE TABLE IF NOT EXISTS backtest_runs (
   run_id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
+  config_hash TEXT,
   config_json TEXT NOT NULL,
   summary_json TEXT NOT NULL
 );
@@ -167,6 +168,19 @@ def db_session(db_path: str | Path) -> Iterator[sqlite3.Connection]:
 def init_db(db_path: str | Path) -> None:
     with db_session(db_path) as conn:
         conn.executescript(SCHEMA)
+        ensure_schema_migrations(conn)
+
+
+def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
+    backtest_run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(backtest_runs)").fetchall()}
+    if "config_hash" not in backtest_run_cols:
+        conn.execute("ALTER TABLE backtest_runs ADD COLUMN config_hash TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_backtest_runs_config_hash_created
+        ON backtest_runs(config_hash, created_at DESC)
+        """
+    )
 
 
 def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:

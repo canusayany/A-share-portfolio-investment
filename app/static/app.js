@@ -235,6 +235,66 @@ function renderSummary(summary) {
   $("summaryGrid").innerHTML = items.map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join("");
 }
 
+function daysBetween(start, end) {
+  const startTime = new Date(`${start}T00:00:00`).getTime();
+  const endTime = new Date(`${end}T00:00:00`).getTime();
+  return Math.max((endTime - startTime) / 86400000, 0);
+}
+
+function stdDev(values) {
+  if (!values.length) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+function computeSeriesMetrics(rows) {
+  let strategyNav = 1;
+  let strategyPeak = 1;
+  let previousTotal = null;
+  let benchmarkBase = null;
+  let latestBenchmark = null;
+  return rows.map((row) => {
+    const payload = row.payload || {};
+    const total = Number(row.total_asset_cny || 0);
+    const flow = Number(row.flow_cny || 0);
+    const dailyReturn = previousTotal && previousTotal !== 0 ? (total - previousTotal - flow) / previousTotal : 0;
+    strategyNav *= 1 + dailyReturn;
+    strategyPeak = Math.max(strategyPeak, strategyNav);
+    const drawdown = strategyPeak ? strategyNav / strategyPeak - 1 : 0;
+    const rawBenchmark = payload.benchmark_value;
+    if (rawBenchmark != null && Number(rawBenchmark) > 0) {
+      latestBenchmark = Number(rawBenchmark);
+      if (benchmarkBase == null) benchmarkBase = latestBenchmark;
+    }
+    previousTotal = total;
+    return {
+      ...row,
+      payload,
+      daily_return: dailyReturn,
+      cumulative_return: strategyNav - 1,
+      drawdown,
+      benchmark_return: benchmarkBase && latestBenchmark ? latestBenchmark / benchmarkBase - 1 : 0,
+    };
+  });
+}
+
+function deriveSummary(summary, series) {
+  if (!series.length) return summary;
+  const last = series.at(-1);
+  const totalReturn = last.cumulative_return || 0;
+  const years = Math.max(daysBetween(series[0].trade_date, last.trade_date) / 365.25, 1 / 365.25);
+  return {
+    ...summary,
+    final_asset_cny: last.total_asset_cny,
+    total_return: totalReturn,
+    annualized_return: (1 + totalReturn) ** (1 / years) - 1,
+    max_drawdown: Math.min(...series.map((row) => row.drawdown ?? 0)),
+    volatility: stdDev(series.slice(1).map((row) => row.daily_return || 0)) * Math.sqrt(252),
+    comparison_final_asset_cny: last.payload?.comparison?.total_asset_cny ?? summary.comparison_final_asset_cny,
+  };
+}
+
 function ensureChart(id) {
   if (!charts[id]) charts[id] = echarts.init($(id));
   return charts[id];
@@ -451,13 +511,14 @@ async function runBacktest() {
     const result = await api("/api/backtest/run", { method: "POST", body: JSON.stringify({ config: readConfig() }) });
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
-    renderSummary(result.summary);
     const [series, rebalance, trades] = await Promise.all([
       api(`/api/backtest/${currentRunId}/series`),
       api(`/api/backtest/${currentRunId}/rebalance`),
       api(`/api/backtest/${currentRunId}/trades`),
     ]);
-    renderCharts(series.series || []);
+    const computedSeries = computeSeriesMetrics(series.series || []);
+    renderSummary(deriveSummary(result.summary, computedSeries));
+    renderCharts(computedSeries);
     const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || []);
     renderTable("rebalanceTable", rebalanceTable.columns, rebalanceTable.rows);
     renderTable(
@@ -475,7 +536,9 @@ async function runBacktest() {
         原因: REASON_NAMES[row.reason] || row.reason,
       })),
     );
-    if (result.data_sync?.triggered) {
+    if (result.cache?.hit) {
+      setMessage("参数一致，已直接读取历史回测结果");
+    } else if (result.data_sync?.triggered) {
       const quality = summarizeDataQuality(result.status || []);
       setMessage(`数据已自动补足，回测完成：${quality.real} 项真实/公开源`);
     } else {
