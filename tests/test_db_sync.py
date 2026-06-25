@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import unittest
 
 from app.config import normalize_config
-from app.db import data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
+from app.db import connect, data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
+import app.services.data_sync as data_sync_module
 from app.services.data_sync import (
     chunk_date_ranges,
     eastmoney_secid,
+    fetch_digrin_dividends,
+    fetch_nasdaq_prices,
     from_tushare_date,
+    mark_sync_coverage,
     merge_rows_by_trade_date,
+    missing_coverage_ranges,
     missing_date_ranges,
+    missing_tail_date_ranges,
     parse_sohu_jsonp,
     required_data_missing,
     select_best_datasrc_price_rows,
@@ -51,6 +58,73 @@ class DbAndSyncTests(unittest.TestCase):
             conn.execute("DELETE FROM repo_rates WHERE symbol='204001'")
             self.assertIn("repo_rates:204001", required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"]))
 
+    def test_required_data_missing_detects_end_date_gaps_without_tolerance(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date='2020-02-28'")
+            conn.execute("DELETE FROM prices WHERE symbol='000300.SH' AND trade_date='2020-02-28'")
+            conn.execute("DELETE FROM fx_rates WHERE pair='USD/CNY' AND trade_date='2020-02-28'")
+            conn.execute("DELETE FROM repo_rates WHERE symbol='204001' AND trade_date='2020-02-28'")
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+        self.assertIn("prices:VOO", missing)
+        self.assertIn("prices:000300.SH", missing)
+        self.assertIn("fx_rates:USD/CNY", missing)
+        self.assertIn("repo_rates:204001", missing)
+
+    def test_us_price_for_today_uses_previous_completed_business_day(self) -> None:
+        db_path, cfg = build_synced_db("2026-06-15", "2026-06-25")
+        original_datetime = data_sync_module.datetime
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 6, 25, tzinfo=timezone.utc)
+
+        try:
+            data_sync_module.datetime = FixedDateTime
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date='2026-06-25'")
+                missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+                conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date='2026-06-24'")
+                missing_previous_day = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+        finally:
+            data_sync_module.datetime = original_datetime
+
+        self.assertNotIn("prices:VOO", missing)
+        self.assertIn("prices:VOO", missing_previous_day)
+
+    def test_cn_series_for_today_before_close_use_previous_completed_business_day(self) -> None:
+        db_path, cfg = build_synced_db("2026-06-15", "2026-06-25")
+        original_datetime = data_sync_module.datetime
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 6, 25, 2, 0, tzinfo=timezone.utc)
+
+        try:
+            data_sync_module.datetime = FixedDateTime
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol IN ('000300.SH','510300.SH') AND trade_date='2026-06-25'")
+                conn.execute("DELETE FROM fx_rates WHERE pair='USD/CNY' AND trade_date='2026-06-25'")
+                conn.execute("DELETE FROM repo_rates WHERE symbol='204001' AND trade_date='2026-06-25'")
+                missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+                conn.execute("DELETE FROM prices WHERE symbol IN ('000300.SH','510300.SH') AND trade_date='2026-06-24'")
+                conn.execute("DELETE FROM fx_rates WHERE pair='USD/CNY' AND trade_date='2026-06-24'")
+                conn.execute("DELETE FROM repo_rates WHERE symbol='204001' AND trade_date='2026-06-24'")
+                missing_previous_day = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+        finally:
+            data_sync_module.datetime = original_datetime
+
+        self.assertNotIn("prices:000300.SH", missing)
+        self.assertNotIn("prices:510300.SH", missing)
+        self.assertNotIn("fx_rates:USD/CNY", missing)
+        self.assertNotIn("repo_rates:204001", missing)
+        self.assertIn("prices:000300.SH", missing_previous_day)
+        self.assertIn("prices:510300.SH", missing_previous_day)
+        self.assertIn("fx_rates:USD/CNY", missing_previous_day)
+        self.assertIn("repo_rates:204001", missing_previous_day)
+
     def test_required_data_missing_detects_early_core_series_gap(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
         cfg["start_date"] = "2005-01-01"
@@ -75,6 +149,27 @@ class DbAndSyncTests(unittest.TestCase):
             gaps = missing_date_ranges(conn, "prices", "symbol", "VOO", "trade_date", "2020-01-01", "2020-01-10")
         self.assertEqual(gaps, [("2020-01-03", "2020-01-06")])
 
+    def test_missing_tail_date_ranges_ignores_historical_internal_holes(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date='2020-01-03'")
+            gaps = missing_tail_date_ranges(conn, "prices", "symbol", "VOO", "trade_date", "2020-01-01", "2020-01-10")
+            conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date='2020-01-10'")
+            tail_gaps = missing_tail_date_ranges(conn, "prices", "symbol", "VOO", "trade_date", "2020-01-01", "2020-01-10")
+        self.assertEqual(gaps, [])
+        self.assertEqual(tail_gaps, [("2020-01-10", "2020-01-10")])
+
+    def test_dividend_coverage_ranges_are_merged(self) -> None:
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            mark_sync_coverage(conn, "dividends", "VOO", "2020-01-01", "2020-01-31", "test")
+            mark_sync_coverage(conn, "dividends", "VOO", "2020-02-01", "2020-02-29", "test")
+            rows = conn.execute("SELECT start_date, end_date FROM sync_coverage WHERE kind='dividends' AND symbol='VOO'").fetchall()
+            gaps = missing_coverage_ranges(conn, "dividends", "VOO", "2020-01-01", "2020-03-31")
+        self.assertEqual([dict(row) for row in rows], [{"start_date": "2020-01-01", "end_date": "2020-02-29"}])
+        self.assertEqual(gaps, [("2020-03-01", "2020-03-31")])
+
     def test_sync_all_keeps_existing_real_rows_when_no_gap(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         with db_session(db_path) as conn:
@@ -85,6 +180,196 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(result["inserted"]["prices"], 0)
         self.assertNotIn("prices:VOO", result["missing_data"])
 
+    def test_dividend_sync_is_independent_from_price_gaps(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        original_fetch = data_sync_module.fetch_yahoo_dividends
+
+        def fake_fetch_yahoo_dividends(symbol, start, end, currency):
+            self.assertEqual(symbol, "VOO")
+            return [
+                {
+                    "symbol": symbol,
+                    "ann_date": "2020-06-20",
+                    "record_date": "2020-06-20",
+                    "ex_date": "2020-06-20",
+                    "pay_date": "2020-06-20",
+                    "div_cash": 1.23,
+                    "currency": currency,
+                    "source": "test:yahoo:dividend",
+                }
+            ]
+
+        try:
+            data_sync_module.fetch_yahoo_dividends = fake_fetch_yahoo_dividends
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM fund_dividends WHERE symbol='VOO'")
+                conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='VOO'")
+                self.assertEqual(missing_date_ranges(conn, "prices", "symbol", "VOO", "trade_date", "2020-01-01", "2020-12-31"), [])
+                self.assertTrue(missing_coverage_ranges(conn, "dividends", "VOO", "2020-01-01", "2020-12-31"))
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"])
+                dividend_count = conn.execute("SELECT COUNT(*) AS count FROM fund_dividends WHERE symbol='VOO'").fetchone()["count"]
+                coverage_count = conn.execute("SELECT COUNT(*) AS count FROM sync_coverage WHERE kind='dividends' AND symbol='VOO'").fetchone()["count"]
+        finally:
+            data_sync_module.fetch_yahoo_dividends = original_fetch
+
+        self.assertEqual(result["inserted"]["prices"], 0)
+        self.assertEqual(result["inserted"]["dividends"], 1)
+        self.assertEqual(dividend_count, 1)
+        self.assertGreaterEqual(coverage_count, 1)
+
+    def test_digrin_dividend_parser_reads_table_rows(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        html = """
+        <table><tbody>
+          <tr>
+            <td>2026-03-27</td>
+            <td>2026-03-31</td>
+            <td>1.8724 USD <span>ignored</span></td>
+            <td>594.92 USD</td>
+          </tr>
+          <tr>
+            <td>2025-12-22</td>
+            <td>2025-12-24</td>
+            <td>1.7710 USD</td>
+          </tr>
+        </tbody></table>
+        """
+
+        try:
+            data_sync_module.fetch_text = lambda *_args, **_kwargs: html
+            rows = fetch_digrin_dividends("VOO", "2026-01-01", "2026-12-31", "USD")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "symbol": "VOO",
+                    "ann_date": "2026-03-27",
+                    "record_date": "2026-03-27",
+                    "ex_date": "2026-03-27",
+                    "pay_date": "2026-03-31",
+                    "div_cash": 1.8724,
+                    "currency": "USD",
+                    "source": "digrin:html:dividend",
+                }
+            ],
+        )
+
+    def test_digrin_dividend_parser_allows_empty_requested_range(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        html = """
+        <table><tbody>
+          <tr><td>2026-03-27</td><td>2026-03-31</td><td>1.8724 USD</td></tr>
+        </tbody></table>
+        """
+
+        try:
+            data_sync_module.fetch_text = lambda *_args, **_kwargs: html
+            rows = fetch_digrin_dividends("VOO", "2026-06-25", "2026-06-25", "USD")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual(rows, [])
+
+    def test_nasdaq_price_parser_reads_rows(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        payload = {
+            "data": {
+                "symbol": "VOO",
+                "tradesTable": {
+                    "rows": [
+                        {
+                            "date": "06/24/2026",
+                            "close": "$675.69",
+                            "volume": "9,676,956",
+                            "open": "677.68",
+                            "high": "682.07",
+                            "low": "673.68",
+                        },
+                        {
+                            "date": "06/23/2026",
+                            "close": "676.34",
+                            "volume": "17,581,730",
+                            "open": "676.355",
+                            "high": "681.7288",
+                            "low": "675.02",
+                        },
+                    ]
+                },
+            }
+        }
+
+        try:
+            data_sync_module.fetch_text = lambda *_args, **_kwargs: data_sync_module.json.dumps(payload)
+            rows = fetch_nasdaq_prices("VOO", "2026-06-23", "2026-06-24", "USD")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual([row["trade_date"] for row in rows], ["2026-06-23", "2026-06-24"])
+        self.assertEqual(rows[0]["close"], 676.34)
+        self.assertEqual(rows[1]["volume"], 9676956.0)
+        self.assertEqual(rows[1]["source"], "nasdaq:historical")
+
+    def test_targeted_dividend_sync_does_not_fetch_missing_prices(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        original_fetch_prices = data_sync_module.fetch_yahoo_prices
+        original_fetch_dividends = data_sync_module.fetch_yahoo_dividends
+
+        def fail_fetch_prices(*_args, **_kwargs):
+            raise AssertionError("price fetch should not run for dividend-only sync")
+
+        def fake_fetch_yahoo_dividends(symbol, start, end, currency):
+            return [
+                {
+                    "symbol": symbol,
+                    "ann_date": start,
+                    "record_date": start,
+                    "ex_date": start,
+                    "pay_date": start,
+                    "div_cash": 1.0,
+                    "currency": currency,
+                    "source": "test:yahoo:dividend",
+                }
+            ]
+
+        try:
+            data_sync_module.fetch_yahoo_prices = fail_fetch_prices
+            data_sync_module.fetch_yahoo_dividends = fake_fetch_yahoo_dividends
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date >= '2020-06-01'")
+                conn.execute("DELETE FROM fund_dividends WHERE symbol='VOO'")
+                conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='VOO'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["dividends:VOO"])
+        finally:
+            data_sync_module.fetch_yahoo_prices = original_fetch_prices
+            data_sync_module.fetch_yahoo_dividends = original_fetch_dividends
+
+        self.assertEqual(result["inserted"]["prices"], 0)
+        self.assertEqual(result["inserted"]["dividends"], 1)
+
+    def test_targeted_price_sync_uses_tail_ranges(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        original_fetch_prices = data_sync_module.fetch_yahoo_prices
+        requested_ranges: list[tuple[str, str]] = []
+
+        def fake_fetch_yahoo_prices(symbol, start, end, currency):
+            requested_ranges.append((start, end))
+            return fixture_price_series(symbol, start, end, currency, 280.0)
+
+        try:
+            data_sync_module.fetch_yahoo_prices = fake_fetch_yahoo_prices
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date IN ('2020-01-03','2020-01-10')")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["prices:VOO"])
+        finally:
+            data_sync_module.fetch_yahoo_prices = original_fetch_prices
+
+        self.assertEqual(requested_ranges, [("2020-01-10", "2020-01-10")])
+        self.assertEqual(result["inserted"]["prices"], 1)
+        self.assertNotIn("prices:VOO", result["missing_data"])
+
     def test_json_and_row_helpers(self) -> None:
         db_path = temp_db_path()
         init_db(db_path)
@@ -93,6 +378,16 @@ class DbAndSyncTests(unittest.TestCase):
         with db_session(db_path) as conn:
             rows = conn.execute("SELECT 1 AS a, 'x' AS b").fetchall()
             self.assertEqual(rows_to_dicts(rows), [{"a": 1, "b": "x"}])
+
+    def test_sqlite_connections_wait_for_busy_writers(self) -> None:
+        db_path = temp_db_path()
+        init_db(db_path)
+        conn = connect(db_path)
+        try:
+            self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+            self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
+        finally:
+            conn.close()
 
     def test_data_source_small_helpers(self) -> None:
         self.assertEqual(tushare_date("2026-06-23"), "20260623")

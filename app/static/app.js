@@ -122,6 +122,10 @@ async function api(path, options = {}) {
   return data;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function setMessage(text, isError = false) {
   $("message").textContent = text || "";
   $("message").className = isError ? "message error" : "message";
@@ -503,12 +507,26 @@ async function loadStatus() {
   renderStatus(data.status || []);
 }
 
+async function waitForBacktestJob(jobId) {
+  let pollCount = 0;
+  while (true) {
+    const job = await api(`/api/backtest/jobs/${jobId}`);
+    if (job.status === "completed") return job.result;
+    if (job.status === "failed") throw new Error(job.error || job.message || "回测失败");
+    setMessage(job.message || (job.status === "running" ? "正在运行回测..." : "回测任务排队中..."));
+    pollCount += 1;
+    await sleep(Math.min(1200 + pollCount * 200, 5000));
+  }
+}
+
 async function runBacktest() {
   const button = $("runBtn");
   button.disabled = true;
-  setMessage("正在检查数据并运行回测...");
+  setMessage("正在提交回测任务...");
   try {
-    const result = await api("/api/backtest/run", { method: "POST", body: JSON.stringify({ config: readConfig() }) });
+    const job = await api("/api/backtest/start", { method: "POST", body: JSON.stringify({ config: readConfig() }) });
+    setMessage(job.message || "回测任务已进入队列");
+    const result = await waitForBacktestJob(job.job_id);
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
     const [series, rebalance, trades] = await Promise.all([

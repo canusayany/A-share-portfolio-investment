@@ -201,6 +201,12 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertGreater(performance["REPO"]["profit_cny"], 0)
         self.assertGreater(performance["REPO"]["return"], 0)
 
+    def test_us_dividends_create_withheld_tax(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+        self.assertGreater(result["summary"]["withheld_tax_cny"], 0)
+
     def test_comparison_assets_roll_risk_weights_into_hs300(self) -> None:
         cfg = normalize_config({})
         assets = comparison_assets(cfg)

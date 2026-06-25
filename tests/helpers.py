@@ -7,6 +7,7 @@ import tempfile
 from app.config import normalize_config
 from app.db import db_session, init_db, insert_many, upsert_assets
 from app.services.calendar import business_days
+from app.services.data_sync import mark_sync_coverage
 
 
 def temp_db_path() -> Path:
@@ -74,7 +75,7 @@ def fixture_fx_rates(start: str, end: str) -> list[dict]:
 def fixture_dividends(symbol: str, start: str, end: str, currency: str) -> list[dict]:
     rows = []
     for year in range(int(start[:4]), int(end[:4]) + 1):
-        ex_date = f"{year}-06-20"
+        ex_date = f"{year}-06-22"
         if start <= ex_date <= end:
             rows.append(
                 {
@@ -111,6 +112,7 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
         fetch_start = max(start, asset.get("inception_date") or start)
         insert_many(conn, "prices", fixture_price_series(asset["symbol"], fetch_start, end, asset["currency"], seeds[asset["symbol"]]))
         insert_many(conn, "fund_dividends", fixture_dividends(asset["symbol"], fetch_start, end, asset["currency"]))
+        mark_sync_coverage(conn, "dividends", asset["symbol"], fetch_start, end, "fixture:dividend")
         if asset["market"] == "CN":
             insert_many(
                 conn,

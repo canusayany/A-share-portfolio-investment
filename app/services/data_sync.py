@@ -5,25 +5,33 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 from app.config import DEFAULT_ASSETS
-from app.db import insert_many, upsert_assets
-from app.services.calendar import business_days, parse_date
+from app.db import insert_many, upsert_assets, utc_now
+from app.services.calendar import business_days, daterange, parse_date
 
 
 TUSHARE_URL = "http://api.tushare.pro"
 HTTP_TIMEOUT_SECONDS = 2
-CURL_TIMEOUT_SECONDS = 2
+CURL_TIMEOUT_SECONDS = 8
 DATASRC_MARKET_APPSETTINGS = Path.home() / "Documents" / "code" / "DataSrc" / "market-data-platform" / "src" / "Market.Api" / "appsettings.json"
 DATASRC_SOURCE_PRIORITY = {"tushare": 0, "akshare": 1, "amazingdata": 2, "tdx": 3}
+logger = logging.getLogger(__name__)
 
 
 class SyncWarning(RuntimeError):
     pass
+
+
+def curl_executable() -> str:
+    return "curl.exe" if os.name == "nt" else "curl"
 
 
 def _coverage_gap(
@@ -120,6 +128,178 @@ def missing_date_ranges(
     return ranges
 
 
+def missing_tail_date_ranges(
+    conn,
+    table: str,
+    code_col: str,
+    code: str,
+    date_col: str,
+    start: str,
+    end: str,
+) -> list[tuple[str, str]]:
+    requested_start = parse_date(start)
+    requested_end = parse_date(end)
+    if requested_start > requested_end:
+        return []
+    row = conn.execute(
+        f"""
+        SELECT MAX({date_col}) AS last_date FROM {table}
+        WHERE {code_col}=?
+          AND {date_col} BETWEEN ? AND ?
+          AND source NOT LIKE 'generated:%'
+        """,
+        (code, start, end),
+    ).fetchone()
+    if not row or not row["last_date"]:
+        return missing_date_ranges(conn, table, code_col, code, date_col, start, end)
+    tail_start = max(parse_date(row["last_date"]) + timedelta(days=1), requested_start)
+    if tail_start > requested_end:
+        return []
+    return missing_date_ranges(conn, table, code_col, code, date_col, tail_start.isoformat(), end)
+
+
+def missing_coverage_ranges(conn, kind: str, symbol: str, start: str, end: str) -> list[tuple[str, str]]:
+    requested_start = parse_date(start)
+    requested_end = parse_date(end)
+    if requested_start > requested_end:
+        return []
+    rows = conn.execute(
+        """
+        SELECT start_date, end_date FROM sync_coverage
+        WHERE kind=? AND symbol=? AND end_date>=? AND start_date<=?
+        """,
+        (kind, symbol, start, end),
+    ).fetchall()
+    intervals: list[tuple[Any, Any]] = []
+    for row in rows:
+        coverage_start = max(parse_date(row["start_date"]), requested_start)
+        coverage_end = min(parse_date(row["end_date"]), requested_end)
+        if coverage_start <= coverage_end:
+            intervals.append((coverage_start, coverage_end))
+
+    if not intervals:
+        return [(start, end)]
+
+    intervals.sort()
+    ranges: list[tuple[str, str]] = []
+    cursor = requested_start
+    for coverage_start, coverage_end in intervals:
+        if coverage_end < cursor:
+            continue
+        if coverage_start > cursor:
+            ranges.append((cursor.isoformat(), (coverage_start - timedelta(days=1)).isoformat()))
+        cursor = max(cursor, coverage_end + timedelta(days=1))
+        if cursor > requested_end:
+            break
+    if cursor <= requested_end:
+        ranges.append((cursor.isoformat(), requested_end.isoformat()))
+    return ranges
+
+
+def mark_sync_coverage(conn, kind: str, symbol: str, start: str, end: str, source: str) -> None:
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    if start_date > end_date:
+        return
+    overlap_start = (start_date - timedelta(days=1)).isoformat()
+    overlap_end = (end_date + timedelta(days=1)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT start_date, end_date FROM sync_coverage
+        WHERE kind=? AND symbol=? AND end_date>=? AND start_date<=?
+        """,
+        (kind, symbol, overlap_start, overlap_end),
+    ).fetchall()
+    for row in rows:
+        start_date = min(start_date, parse_date(row["start_date"]))
+        end_date = max(end_date, parse_date(row["end_date"]))
+    conn.execute(
+        """
+        DELETE FROM sync_coverage
+        WHERE kind=? AND symbol=? AND end_date>=? AND start_date<=?
+        """,
+        (kind, symbol, overlap_start, overlap_end),
+    )
+    conn.execute(
+        """
+        INSERT INTO sync_coverage(kind, symbol, start_date, end_date, source, updated_at)
+        VALUES(?,?,?,?,?,?)
+        """,
+        (kind, symbol, start_date.isoformat(), end_date.isoformat(), source, utc_now()),
+    )
+
+
+def _sync_plan(missing_items: list[str] | None, assets: list[dict[str, Any]], repo_symbol: str) -> dict[str, Any]:
+    asset_symbols = {asset["symbol"] for asset in assets}
+    if missing_items is None or any(item.startswith("generated:") for item in missing_items):
+        return {
+            "asset_prices": set(asset_symbols),
+            "asset_dividends": set(asset_symbols),
+            "index_prices": True,
+            "repo_symbols": set(sorted({"204001", repo_symbol})),
+            "fx_rates": True,
+            "full": True,
+        }
+
+    plan = {
+        "asset_prices": set(),
+        "asset_dividends": set(),
+        "index_prices": False,
+        "repo_symbols": set(),
+        "fx_rates": False,
+        "full": False,
+    }
+    for item in missing_items:
+        if ":" not in item:
+            continue
+        kind, symbol = item.split(":", 1)
+        if kind == "prices" and symbol == "000300.SH":
+            plan["index_prices"] = True
+        elif kind == "prices" and symbol in asset_symbols:
+            plan["asset_prices"].add(symbol)
+        elif kind == "dividends" and symbol in asset_symbols:
+            plan["asset_dividends"].add(symbol)
+        elif kind == "repo_rates":
+            plan["repo_symbols"].add(symbol)
+        elif kind == "fx_rates":
+            plan["fx_rates"] = True
+    if plan["repo_symbols"]:
+        plan["repo_symbols"].add("204001")
+        plan["repo_symbols"].add(repo_symbol)
+    return plan
+
+
+def previous_weekday(day):
+    current = day - timedelta(days=1)
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current
+
+
+def latest_completed_market_day(market: str):
+    now_utc = datetime.now(timezone.utc)
+    if market == "US":
+        now_market = now_utc.astimezone(ZoneInfo("America/New_York"))
+        close_hour = 17
+    else:
+        now_market = now_utc.astimezone(ZoneInfo("Asia/Shanghai"))
+        close_hour = 18
+    today = now_market.date()
+    if today.weekday() >= 5 or now_market.hour < close_hour:
+        return previous_weekday(today)
+    return today
+
+
+def effective_price_end_for_market(market: str, end: str):
+    requested_end = parse_date(end)
+    latest_completed = latest_completed_market_day(market)
+    return min(requested_end, latest_completed)
+
+
+def effective_price_end_for_asset(asset: dict[str, Any], end: str):
+    return effective_price_end_for_market(asset.get("market", "CN"), end)
+
+
 def required_data_missing(
     conn,
     start: str,
@@ -138,16 +318,21 @@ def required_data_missing(
         fetch_start = max(parse_date(start), parse_date(asset.get("inception_date") or start))
         if fetch_start > requested_end:
             continue
-        if _coverage_gap(conn, "prices", "symbol", asset["symbol"], "trade_date", fetch_start.isoformat(), end):
+        price_end = effective_price_end_for_asset(asset, end)
+        if fetch_start <= price_end and _coverage_gap(conn, "prices", "symbol", asset["symbol"], "trade_date", fetch_start.isoformat(), price_end.isoformat(), end_tolerance_days=0):
             missing.add(f"prices:{asset['symbol']}")
+        if missing_coverage_ranges(conn, "dividends", asset["symbol"], fetch_start.isoformat(), end):
+            missing.add(f"dividends:{asset['symbol']}")
 
-    if _coverage_gap(conn, "prices", "symbol", "000300.SH", "trade_date", start, end, require_start=True):
+    cn_data_end = effective_price_end_for_market("CN", end)
+    cn_data_end_text = cn_data_end.isoformat()
+    if parse_date(start) <= cn_data_end and _coverage_gap(conn, "prices", "symbol", "000300.SH", "trade_date", start, cn_data_end_text, require_start=True, end_tolerance_days=0):
         missing.add("prices:000300.SH")
-    if _coverage_gap(conn, "fx_rates", "pair", "USD/CNY", "trade_date", start, end, require_start=True):
+    if parse_date(start) <= cn_data_end and _coverage_gap(conn, "fx_rates", "pair", "USD/CNY", "trade_date", start, cn_data_end_text, require_start=True, end_tolerance_days=0):
         missing.add("fx_rates:USD/CNY")
     repo_symbols = sorted({"204001", repo_symbol})
     for current_repo_symbol in repo_symbols:
-        if _coverage_gap(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, end):
+        if parse_date(start) <= cn_data_end and _coverage_gap(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, cn_data_end_text, end_tolerance_days=0):
             missing.add(f"repo_rates:{current_repo_symbol}")
 
     generated_checks = [
@@ -182,7 +367,7 @@ def tushare_call(token: str, api_name: str, params: dict[str, Any], fields: str 
 
 def tushare_call_with_curl(payload: bytes) -> dict[str, Any]:
     base_cmd = [
-        "curl.exe",
+        curl_executable(),
         "-sS",
         "-L",
         "-A",
@@ -209,7 +394,7 @@ def tushare_call_with_curl(payload: bytes) -> dict[str, Any]:
 
 def run_curl_with_optional_direct_retry(base_cmd: list[str], payload: bytes | None = None) -> bytes:
     errors: list[str] = []
-    for cmd in (base_cmd, ["curl.exe", "-sS", "--noproxy", "*", *base_cmd[2:]]):
+    for cmd in (base_cmd, [curl_executable(), "-sS", "--noproxy", "*", *base_cmd[2:]]):
         try:
             completed = subprocess.run(cmd, input=payload, capture_output=True, check=False, timeout=CURL_TIMEOUT_SECONDS + 3)
         except (OSError, subprocess.SubprocessError) as curl_exc:
@@ -412,7 +597,7 @@ def fetch_text(url: str, timeout: int = HTTP_TIMEOUT_SECONDS, referer: str | Non
 
 
 def fetch_text_with_curl(url: str, timeout: int = HTTP_TIMEOUT_SECONDS, referer: str | None = None) -> str:
-    cmd = ["curl.exe", "-sS", "-L", "-A", "Mozilla/5.0", "--connect-timeout", "2", "--max-time", str(timeout)]
+    cmd = [curl_executable(), "-sS", "-L", "-A", "Mozilla/5.0", "--connect-timeout", "2", "--max-time", str(timeout)]
     if referer:
         cmd.extend(["-e", referer])
     cmd.append(url)
@@ -662,6 +847,50 @@ def fetch_stooq_prices(symbol: str, start: str, end: str) -> list[dict[str, Any]
     return result
 
 
+def parse_market_number(value: Any) -> float:
+    cleaned = re.sub(r"[^0-9.\-]", "", str(value or ""))
+    if not cleaned:
+        return 0.0
+    return float(cleaned)
+
+
+def fetch_nasdaq_prices(symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    url = (
+        f"https://api.nasdaq.com/api/quote/{symbol}/historical?"
+        f"assetclass=etf&fromdate={start}&todate={end}&limit=9999"
+    )
+    try:
+        body = json.loads(fetch_text(url, timeout=20, referer=f"https://www.nasdaq.com/market-activity/etf/{symbol}/historical"))
+    except (json.JSONDecodeError, SyncWarning) as exc:
+        raise SyncWarning(f"Nasdaq price fetch failed for {symbol}: {exc}") from exc
+    rows = (((body.get("data") or {}).get("tradesTable") or {}).get("rows") or [])
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        close = parse_market_number(row.get("close"))
+        if close <= 0:
+            continue
+        trade_date = datetime.strptime(row["date"], "%m/%d/%Y").date().isoformat()
+        result.append(
+            {
+                "symbol": symbol,
+                "trade_date": trade_date,
+                "open": parse_market_number(row.get("open")) or close,
+                "high": parse_market_number(row.get("high")) or close,
+                "low": parse_market_number(row.get("low")) or close,
+                "close": close,
+                "adj_close": close,
+                "volume": parse_market_number(row.get("volume")),
+                "amount": 0.0,
+                "currency": currency,
+                "source": "nasdaq:historical",
+            }
+        )
+    result.sort(key=lambda item: item["trade_date"])
+    if not result:
+        raise SyncWarning(f"Nasdaq returned no price rows for {symbol}")
+    return result
+
+
 def yahoo_period(value: str) -> int:
     dt = datetime.combine(parse_date(value), datetime.min.time(), tzinfo=timezone.utc)
     return int(dt.timestamp())
@@ -706,6 +935,81 @@ def fetch_yahoo_prices(symbol: str, start: str, end: str, currency: str) -> list
     if not rows:
         raise SyncWarning(f"Yahoo returned no usable price rows for {symbol}")
     return rows
+
+
+def fetch_yahoo_dividends(symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        f"?period1={yahoo_period(start)}&period2={yahoo_period(end) + 86400}&interval=1d&events=div"
+    )
+    try:
+        body = json.loads(fetch_text(url, timeout=30))
+    except (json.JSONDecodeError, SyncWarning) as exc:
+        raise SyncWarning(f"Yahoo dividend fetch failed for {symbol}: {exc}") from exc
+    result = ((body.get("chart") or {}).get("result") or [None])[0]
+    if not result:
+        raise SyncWarning(f"Yahoo returned no dividend payload for {symbol}")
+    dividends = ((result.get("events") or {}).get("dividends") or {}).values()
+    rows: list[dict[str, Any]] = []
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    for event in dividends:
+        event_date = event.get("date")
+        amount = event.get("amount")
+        if event_date is None or amount is None:
+            continue
+        ex_date = datetime.fromtimestamp(int(event_date), tz=timezone.utc).date()
+        if not (start_date <= ex_date <= end_date):
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "ann_date": ex_date.isoformat(),
+                "record_date": ex_date.isoformat(),
+                "ex_date": ex_date.isoformat(),
+                "pay_date": ex_date.isoformat(),
+                "div_cash": float(amount),
+                "currency": currency,
+                "source": "yahoo:chart:dividend",
+            }
+        )
+    return sorted(rows, key=lambda row: (row["ex_date"], row["div_cash"]))
+
+
+def fetch_digrin_dividends(symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    url = f"https://www.digrin.com/stocks/detail/{symbol}/"
+    try:
+        body = fetch_text(url, timeout=20)
+    except SyncWarning as exc:
+        raise SyncWarning(f"Digrin dividend fetch failed for {symbol}: {exc}") from exc
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    rows: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"<tr>\s*<td>\s*(\d{4}-\d{2}-\d{2})\s*</td>\s*"
+        r"<td>\s*(\d{4}-\d{2}-\d{2})\s*</td>\s*"
+        r"<td>\s*([0-9][0-9.,]*)\s*([A-Z]{3})",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in pattern.finditer(body):
+        ex_date = match.group(1)
+        pay_date = match.group(2)
+        ex = parse_date(ex_date)
+        if not (start_date <= ex <= end_date):
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "ann_date": ex_date,
+                "record_date": ex_date,
+                "ex_date": ex_date,
+                "pay_date": pay_date,
+                "div_cash": float(match.group(3).replace(",", "")),
+                "currency": match.group(4) or currency,
+                "source": "digrin:html:dividend",
+            }
+        )
+    return sorted(rows, key=lambda row: (row["ex_date"], row["div_cash"]))
 
 
 def fetch_stooq_fx_rates(start: str, end: str) -> list[dict[str, Any]]:
@@ -895,10 +1199,24 @@ def sync_all(
     assets: list[dict[str, Any]] | None = None,
     repo_symbol: str = "204001",
     allow_network: bool = True,
+    missing_items: list[str] | None = None,
 ) -> dict[str, Any]:
+    started_at = time.perf_counter()
     assets = assets or DEFAULT_ASSETS
     warnings: list[str] = []
     missing_data: list[str] = []
+    plan = _sync_plan(missing_items, assets, repo_symbol)
+    logger.info(
+        "sync_all start range=%s..%s missing_items=%s plan_prices=%s plan_dividends=%s plan_index=%s plan_repo=%s plan_fx=%s",
+        start,
+        end,
+        missing_items or ["all"],
+        sorted(plan["asset_prices"]),
+        sorted(plan["asset_dividends"]),
+        plan["index_prices"],
+        sorted(plan["repo_symbols"]),
+        plan["fx_rates"],
+    )
     upsert_assets(conn, [{**asset, "source": "config"} for asset in assets])
     benchmark = {
         "symbol": "000300.SH",
@@ -930,18 +1248,35 @@ def sync_all(
         conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'", ("204001", start, end))
 
     inserted = {"prices": 0, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "fx_rates": 0}
+    price_range_func = missing_date_ranges if plan["full"] else missing_tail_date_ranges
+    cn_data_end = effective_price_end_for_market("CN", end)
+    cn_data_end_text = cn_data_end.isoformat()
     asset_price_ranges: dict[str, list[tuple[str, str]]] = {}
+    asset_dividend_ranges: dict[str, list[tuple[str, str]]] = {}
     for asset in assets:
         symbol = asset["symbol"]
         inception = asset.get("inception_date") or start
-        fetch_start = max(parse_date(start), parse_date(inception)).isoformat()
-        asset_price_ranges[symbol] = missing_date_ranges(conn, "prices", "symbol", symbol, "trade_date", fetch_start, end)
+        fetch_start_date = max(parse_date(start), parse_date(inception))
+        price_end = effective_price_end_for_asset(asset, end)
+        fetch_start = fetch_start_date.isoformat()
+        asset_price_ranges[symbol] = (
+            price_range_func(conn, "prices", "symbol", symbol, "trade_date", fetch_start, price_end.isoformat())
+            if symbol in plan["asset_prices"] and fetch_start_date <= price_end
+            else []
+        )
+        asset_dividend_ranges[symbol] = (
+            missing_coverage_ranges(conn, "dividends", symbol, fetch_start, end)
+            if symbol in plan["asset_dividends"]
+            else []
+        )
 
     def fetch_asset_bundle(asset: dict[str, Any]) -> dict[str, Any]:
+        asset_started_at = time.perf_counter()
         asset_warnings: list[str] = []
         asset_missing: list[str] = []
         symbol = asset["symbol"]
         price_ranges = asset_price_ranges[symbol]
+        dividend_ranges = asset_dividend_ranges[symbol]
         prices: list[dict[str, Any]] = []
         tushare_asset_available = True
         for range_start, range_end in price_ranges:
@@ -974,6 +1309,11 @@ def sync_all(
                         asset_warnings.append(str(public_exc))
                 elif allow_network and not range_prices:
                     try:
+                        range_prices = fetch_nasdaq_prices(symbol, range_start, range_end, asset.get("currency", "USD"))
+                    except SyncWarning as public_exc:
+                        asset_warnings.append(str(public_exc))
+                if allow_network and asset.get("market") != "CN" and not range_prices:
+                    try:
                         range_prices = fetch_stooq_prices(symbol, range_start, range_end)
                     except SyncWarning as public_exc:
                         asset_warnings.append(str(public_exc))
@@ -982,34 +1322,78 @@ def sync_all(
             prices = merge_rows_by_trade_date(prices, range_prices)
         dividends: list[dict[str, Any]] = []
         adj: list[dict[str, Any]] = []
+        dividend_coverage: list[tuple[str, str, str, str]] = []
+        for range_start, range_end in dividend_ranges:
+            try:
+                if not allow_network:
+                    raise SyncWarning("network disabled for deterministic sync")
+                if asset.get("market") == "CN":
+                    range_dividends = fetch_fund_dividends(token, symbol, range_start, range_end)
+                    dividend_source = "tushare:fund_div"
+                else:
+                    try:
+                        range_dividends = fetch_yahoo_dividends(symbol, range_start, range_end, asset.get("currency", "USD"))
+                        dividend_source = "yahoo:chart:dividend"
+                    except SyncWarning as yahoo_exc:
+                        asset_warnings.append(str(yahoo_exc))
+                        range_dividends = fetch_digrin_dividends(symbol, range_start, range_end, asset.get("currency", "USD"))
+                        dividend_source = "digrin:html:dividend"
+                dividends.extend(range_dividends)
+                dividend_coverage.append((symbol, range_start, range_end, dividend_source))
+            except SyncWarning as exc:
+                asset_warnings.append(str(exc))
+                asset_missing.append(f"dividends:{symbol}")
         if asset.get("market") == "CN" and price_ranges:
             if allow_network and tushare_asset_available:
                 for range_start, range_end in price_ranges:
-                    try:
-                        dividends.extend(fetch_fund_dividends(token, symbol, range_start, range_end))
-                    except SyncWarning as exc:
-                        asset_warnings.append(str(exc))
                     try:
                         adj = merge_rows_by_trade_date(adj, fetch_adj_factors(token, symbol, range_start, range_end))
                     except SyncWarning as exc:
                         asset_warnings.append(str(exc))
             else:
-                asset_warnings.append(f"skip Tushare dividend/adj for {symbol} because primary Tushare price source is unavailable")
-        return {"prices": prices, "dividends": dividends, "adj": adj, "warnings": asset_warnings, "missing": asset_missing}
+                asset_warnings.append(f"skip Tushare adj for {symbol} because primary Tushare price source is unavailable")
+        return {
+            "symbol": symbol,
+            "prices": prices,
+            "dividends": dividends,
+            "dividend_coverage": dividend_coverage,
+            "adj": adj,
+            "warnings": asset_warnings,
+            "missing": asset_missing,
+            "seconds": time.perf_counter() - asset_started_at,
+        }
 
     max_workers = min(max(len(assets), 1), 8)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(fetch_asset_bundle, asset) for asset in assets]
         for future in as_completed(futures):
             bundle = future.result()
+            logger.info(
+                "sync asset complete symbol=%s prices=%d dividends=%d adj=%d seconds=%.3f warnings=%d missing=%s",
+                bundle["symbol"],
+                len(bundle["prices"]),
+                len(bundle["dividends"]),
+                len(bundle["adj"]),
+                bundle["seconds"],
+                len(bundle["warnings"]),
+                bundle["missing"],
+            )
             warnings.extend(bundle["warnings"])
             missing_data.extend(bundle["missing"])
             inserted["prices"] += insert_many(conn, "prices", bundle["prices"])
             inserted["dividends"] += insert_many(conn, "fund_dividends", bundle["dividends"])
+            for coverage_symbol, coverage_start, coverage_end, coverage_source in bundle["dividend_coverage"]:
+                mark_sync_coverage(conn, "dividends", coverage_symbol, coverage_start, coverage_end, coverage_source)
             inserted["adj_factors"] += insert_many(conn, "adj_factors", bundle["adj"])
 
     index_prices: list[dict[str, Any]] = []
-    for range_start, range_end in missing_date_ranges(conn, "prices", "symbol", "000300.SH", "trade_date", start, end):
+    index_started_at = time.perf_counter()
+    index_ranges = (
+        price_range_func(conn, "prices", "symbol", "000300.SH", "trade_date", start, cn_data_end_text)
+        if plan["index_prices"] and parse_date(start) <= cn_data_end
+        else []
+    )
+    for range_start, range_end in index_ranges:
         range_prices: list[dict[str, Any]] = []
         try:
             if not allow_network:
@@ -1036,6 +1420,9 @@ def sync_all(
             missing_data.append("prices:000300.SH")
         index_prices = merge_rows_by_trade_date(index_prices, range_prices)
     inserted["prices"] += insert_many(conn, "prices", index_prices)
+    if index_ranges:
+        logger.info("sync index complete ranges=%d rows=%d seconds=%.3f", len(index_ranges), len(index_prices), time.perf_counter() - index_started_at)
+
     def fetch_repo_bundle(symbol: str, range_start: str, range_end: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         try:
@@ -1062,9 +1449,14 @@ def sync_all(
         return rows
 
     repo_rows: list[dict[str, Any]] = []
+    repo_started_at = time.perf_counter()
     repo_range_map = {
-        current_repo_symbol: missing_date_ranges(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, end)
-        for current_repo_symbol in sorted({"204001", repo_symbol})
+        current_repo_symbol: (
+            price_range_func(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, cn_data_end_text)
+            if parse_date(start) <= cn_data_end
+            else []
+        )
+        for current_repo_symbol in sorted(plan["repo_symbols"])
     }
     if not allow_network:
         warnings.append("network disabled for deterministic sync")
@@ -1076,8 +1468,21 @@ def sync_all(
             for range_start, range_end in ranges:
                 repo_rows = merge_rows_by_trade_date(repo_rows, fetch_repo_bundle(current_repo_symbol, range_start, range_end))
     inserted["repo_rates"] += insert_many(conn, "repo_rates", repo_rows)
+    if repo_range_map:
+        logger.info(
+            "sync repo complete ranges=%d rows=%d seconds=%.3f",
+            sum(len(ranges) for ranges in repo_range_map.values()),
+            len(repo_rows),
+            time.perf_counter() - repo_started_at,
+        )
+
     fx_rows: list[dict[str, Any]] = []
-    fx_missing_ranges = missing_date_ranges(conn, "fx_rates", "pair", "USD/CNY", "trade_date", start, end)
+    fx_started_at = time.perf_counter()
+    fx_missing_ranges = (
+        price_range_func(conn, "fx_rates", "pair", "USD/CNY", "trade_date", start, cn_data_end_text)
+        if plan["fx_rates"] and parse_date(start) <= cn_data_end
+        else []
+    )
     if not allow_network:
         warnings.append("network disabled for deterministic sync")
         if fx_missing_ranges:
@@ -1110,4 +1515,9 @@ def sync_all(
     if allow_network and fx_missing_ranges and not fx_rows:
         missing_data.append("fx_rates:USD/CNY")
     inserted["fx_rates"] += insert_many(conn, "fx_rates", fx_rows)
-    return {"inserted": inserted, "warnings": sorted(set(warnings)), "missing_data": sorted(set(missing_data))}
+    if fx_missing_ranges:
+        logger.info("sync fx complete ranges=%d rows=%d seconds=%.3f", len(fx_missing_ranges), len(fx_rows), time.perf_counter() - fx_started_at)
+
+    result = {"inserted": inserted, "warnings": sorted(set(warnings)), "missing_data": sorted(set(missing_data))}
+    logger.info("sync_all complete seconds=%.3f inserted=%s missing=%s warnings=%d", time.perf_counter() - started_at, inserted, result["missing_data"], len(result["warnings"]))
+    return result

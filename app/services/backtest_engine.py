@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from datetime import date
 import hashlib
 import json
+import logging
 import math
+import time
 import uuid
 from typing import Any
 
@@ -26,6 +28,8 @@ from app.services.fees import (
     repo_interest,
     usd_to_cny,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -720,6 +724,7 @@ def _simulate_comparison_series(
 
 
 def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    started_at = time.perf_counter()
     config = normalize_config(user_config)
     errors = validate_config(config)
     if errors:
@@ -727,10 +732,12 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     config_hash = canonical_config_hash(config)
     cached = get_cached_backtest_run(conn, config)
     if cached:
+        logger.info("run_backtest cache hit range=%s..%s seconds=%.3f", config["start_date"], config["end_date"], time.perf_counter() - started_at)
         return cached
 
     start = config["start_date"]
     end = config["end_date"]
+    logger.info("run_backtest start range=%s..%s assets=%s repo=%s", start, end, [asset["symbol"] for asset in config["assets"]], config["repo_symbol"])
     stale_generated = []
     for table, date_col in (
         ("prices", "trade_date"),
@@ -753,11 +760,22 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
 
     symbols = [asset["symbol"] for asset in config["assets"]]
     benchmark_symbol = "000300.SH"
+    load_started_at = time.perf_counter()
     price_maps = load_price_map(conn, symbols + [benchmark_symbol], start, end)
     fx_map = load_fx_map(conn, start, end)
     repo_map = load_repo_map(conn, config["repo_symbol"], start, end)
     one_day_repo_map = load_repo_map(conn, "204001", start, end)
     ex_events, pay_events = load_dividend_events(conn, symbols, start, end)
+    logger.info(
+        "run_backtest data loaded days=%d price_rows=%d fx_rows=%d repo_rows=%d one_day_repo_rows=%d dividend_events=%d seconds=%.3f",
+        len(days),
+        sum(len(values) for values in price_maps.values()),
+        len(fx_map),
+        len(repo_map),
+        len(one_day_repo_map),
+        sum(len(events) for events in ex_events.values()),
+        time.perf_counter() - load_started_at,
+    )
 
     if not fx_map or not repo_map:
         raise BacktestError("missing fx_rates or repo_rates; run data sync first")
@@ -767,6 +785,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     run_id = str(uuid.uuid4())
     trades: list[dict[str, Any]] = []
     daily_rows: list[dict[str, Any]] = []
+    daily_payloads: list[dict[str, Any]] = []
     rebalance_rows: list[dict[str, Any]] = []
     daily_total_assets: list[float] = []
     daily_flows: list[float] = []
@@ -788,6 +807,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     period_external_flows: dict[str, float] = {"REPO": 0.0}
     initial_rebalance_done = False
 
+    loop_started_at = time.perf_counter()
     for idx, day in enumerate(days):
         day_str = day.isoformat()
         flow = 0.0
@@ -899,6 +919,16 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
             symbol: values.get(symbol, 0.0) - pos.cost_basis_cny
             for symbol, pos in state.positions.items()
         }
+        payload = {
+            "cash_cny": state.cash_cny,
+            "values": values,
+            "weights": {key: value / total if total else 0.0 for key, value in values.items()},
+            "targets": targets,
+            "unrealized_pnl_cny": unrealized,
+            "benchmark_value": latest_prices.get(benchmark_symbol),
+            "repo_lots": len(state.repo_lots),
+        }
+        daily_payloads.append(payload)
         daily_rows.append(
             {
                 "run_id": run_id,
@@ -909,23 +939,15 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
                 "cumulative_return": 0.0,
                 "drawdown": 0.0,
                 "benchmark_return": 0.0,
-                "payload_json": json_dumps(
-                    {
-                        "cash_cny": state.cash_cny,
-                        "values": values,
-                        "weights": {key: value / total if total else 0.0 for key, value in values.items()},
-                        "targets": targets,
-                        "unrealized_pnl_cny": unrealized,
-                        "benchmark_value": latest_prices.get(benchmark_symbol),
-                        "repo_lots": len(state.repo_lots),
-                    }
-                ),
+                "payload_json": "",
             }
         )
 
     if not daily_rows:
         raise BacktestError("no daily rows created; check data coverage")
+    logger.info("run_backtest main loop complete rows=%d trades=%d rebalance=%d seconds=%.3f", len(daily_rows), len(trades), len(rebalance_rows), time.perf_counter() - loop_started_at)
 
+    comparison_started_at = time.perf_counter()
     comparison_totals = _simulate_comparison_series(
         config,
         days,
@@ -938,15 +960,16 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         set(monthly_spend_days),
         set(reb_days),
     )
-    for row in daily_rows:
-        payload = __import__("json").loads(row["payload_json"])
+    for row, payload in zip(daily_rows, daily_payloads):
         comparison_total = comparison_totals.get(row["trade_date"])
         payload["comparison"] = {
             "name": "沪深300基金加黄金基金加国债逆回购",
             "total_asset_cny": comparison_total,
         }
         row["payload_json"] = json_dumps(payload)
+    logger.info("run_backtest comparison complete rows=%d seconds=%.3f", len(comparison_totals), time.perf_counter() - comparison_started_at)
 
+    metrics_started_at = time.perf_counter()
     daily_returns, cumulative_returns, drawdowns = compute_metrics(daily_total_assets, daily_flows, benchmark_values)
     bench_returns = benchmark_returns(benchmark_values)
     total_return = cumulative_returns[-1]
@@ -961,7 +984,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         row["drawdown"] = drawdowns[idx]
         row["benchmark_return"] = bench_returns[idx]
 
-    final_payload = __import__("json").loads(daily_rows[-1]["payload_json"])
+    final_payload = daily_payloads[-1]
     summary = {
         "run_id": run_id,
         "start_date": daily_rows[0]["trade_date"],
@@ -979,7 +1002,9 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         "final_unrealized_pnl_cny": sum(final_payload.get("unrealized_pnl_cny", {}).values()),
         "comparison_final_asset_cny": final_payload.get("comparison", {}).get("total_asset_cny"),
     }
+    logger.info("run_backtest metrics complete seconds=%.3f", time.perf_counter() - metrics_started_at)
 
+    persist_started_at = time.perf_counter()
     conn.execute(
         "INSERT INTO backtest_runs(run_id, created_at, config_hash, config_json, summary_json) VALUES(?,?,?,?,?)",
         (run_id, utc_now(), config_hash, json_dumps(config), json_dumps(summary)),
@@ -989,4 +1014,5 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         trade["run_id"] = run_id
     insert_many(conn, "trades", trades)
     insert_many(conn, "rebalance_events", rebalance_rows)
+    logger.info("run_backtest persisted run_id=%s rows=%d trades=%d rebalance=%d seconds=%.3f total_seconds=%.3f", run_id, len(daily_rows), len(trades), len(rebalance_rows), time.perf_counter() - persist_started_at, time.perf_counter() - started_at)
     return {"run_id": run_id, "summary": summary, "cache": {"hit": False, "mode": "重新计算"}}

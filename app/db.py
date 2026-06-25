@@ -90,6 +90,18 @@ CREATE TABLE IF NOT EXISTS trading_calendar (
   PRIMARY KEY (market, trade_date)
 );
 
+CREATE TABLE IF NOT EXISTS sync_coverage (
+  kind TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  source TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_coverage_kind_symbol_dates
+ON sync_coverage(kind, symbol, start_date, end_date);
+
 CREATE TABLE IF NOT EXISTS backtest_runs (
   run_id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
@@ -146,9 +158,11 @@ def utc_now() -> str:
 def connect(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -172,6 +186,24 @@ def init_db(db_path: str | Path) -> None:
 
 
 def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_coverage (
+          kind TEXT NOT NULL,
+          symbol TEXT NOT NULL,
+          start_date TEXT NOT NULL,
+          end_date TEXT NOT NULL,
+          source TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sync_coverage_kind_symbol_dates
+        ON sync_coverage(kind, symbol, start_date, end_date)
+        """
+    )
     backtest_run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(backtest_runs)").fetchall()}
     if "config_hash" not in backtest_run_cols:
         conn.execute("ALTER TABLE backtest_runs ADD COLUMN config_hash TEXT")

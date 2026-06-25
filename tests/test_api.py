@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import time
 from threading import Thread
 import unittest
 from urllib import request
@@ -79,7 +81,7 @@ class ApiTests(unittest.TestCase):
         cfg = normalize_config({"start_date": "2020-01-01", "end_date": "2020-02-28"})
         original_sync_all = main_module.sync_all
 
-        def fake_sync_all(conn, token, start, end, assets, repo_symbol="204001"):
+        def fake_sync_all(conn, token, start, end, assets, repo_symbol="204001", **_kwargs):
             seed_cfg = normalize_config({"start_date": start, "end_date": end, "assets": assets})
             seed_cfg["repo_symbol"] = repo_symbol
             seed_fixture_data(conn, seed_cfg, start, end)
@@ -104,6 +106,52 @@ class ApiTests(unittest.TestCase):
 
         self.assertTrue(result["data_sync"]["triggered"])
         self.assertGreater(result["summary"]["final_asset_cny"], 0)
+
+    def test_concurrent_backtests_are_serialized(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        server = create_server(port=0, db_path=db_path)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+            host, port = server.server_address
+            url = f"http://{host}:{port}/api/backtest/run"
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _idx: http_json(url, {"config": cfg}), range(2)))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(results[0]["run_id"], results[1]["run_id"])
+        self.assertTrue(any(result["cache"]["hit"] for result in results))
+        self.assertFalse(any("error" in result and "database is locked" in result["error"].lower() for result in results))
+
+    def test_async_backtest_job_completes(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        server = create_server(port=0, db_path=db_path)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}"
+            job = http_json(f"{base_url}/api/backtest/start", {"config": cfg})
+            self.assertEqual(job["status"], "queued")
+            for _ in range(40):
+                current = http_json(f"{base_url}/api/backtest/jobs/{job['job_id']}")
+                if current["status"] == "completed":
+                    break
+                if current["status"] == "failed":
+                    self.fail(current.get("error", "job failed"))
+                time.sleep(0.1)
+            else:
+                self.fail("job did not complete")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(current["status"], "completed")
+        self.assertGreater(current["result"]["summary"]["final_asset_cny"], 0)
 
 
 if __name__ == "__main__":
