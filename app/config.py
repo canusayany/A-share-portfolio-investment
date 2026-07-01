@@ -12,6 +12,10 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "app" / "static"
 DEFAULT_DB_PATH = DATA_DIR / "backtest.sqlite3"
+FX_PAIR_BY_CURRENCY = {
+    "USD": "USD/CNY",
+    "HKD": "HKD/CNY",
+}
 
 
 DEFAULT_ASSETS: list[dict[str, Any]] = [
@@ -24,8 +28,24 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "currency": "USD",
         "market": "US",
         "asset_type": "us_etf",
+        "exclusive_group": "sp500",
+        "choice_label": "美股 VOO",
         "inception_date": "2010-09-07",
         "expense_ratio": 0.0003,
+    },
+    {
+        "key": "hk_sp500_connect",
+        "symbol": "03195.HK",
+        "name": "港股通标普500ETF",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "HKD",
+        "market": "HK",
+        "asset_type": "hk_connect_etf",
+        "exclusive_group": "sp500",
+        "choice_label": "港股通 03195",
+        "inception_date": "2015-05-18",
+        "expense_ratio": 0.0079,
     },
     {
         "key": "cn_dividend_low_vol",
@@ -116,6 +136,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "tiered_per_share_usd": 0.0035,
             "tiered_min_usd": 0.35,
             "lite_commission_usd": 0.0,
+            "sec_transaction_fee_rate": 0.0000206,
+            "finra_taf_per_share_usd": 0.000195,
+            "finra_taf_cap_usd": 9.79,
         },
         "fx": {
             "bank_out_spread_bps": 30.0,
@@ -125,9 +148,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "ibkr_auto_fx_markup": 0.0003,
             "use_ibkr_auto_fx": True,
         },
+        "hk_connect_etf": {
+            "broker_commission_rate": 0.0003,
+            "min_broker_commission_hkd": 0.0,
+            "trading_fee_rate": 0.0000565,
+            "transaction_levy_rate": 0.000027,
+            "afrc_transaction_levy_rate": 0.0000015,
+            "stock_settlement_fee_rate": 0.000042,
+            "min_stock_settlement_fee_hkd": 0.0,
+            "max_stock_settlement_fee_hkd": 1_000_000_000.0,
+            "stamp_duty_rate": 0.0,
+            "portfolio_fee_annual_rate": 0.00008,
+            "fx_spread_bps": 20.0,
+            "lot_size": 100.0,
+        },
         "tax": {
             "cn_fund_dividend_tax_rate": 0.0,
-            "us_dividend_withholding_rate": 0.10,
+            "us_dividend_withholding_rate": 0.30,
+            "hk_dividend_withholding_rate": 0.0,
             "us_capital_gain_tax_rate": 0.0,
         },
     },
@@ -168,6 +206,21 @@ def default_config() -> dict[str, Any]:
     return config
 
 
+def fx_pair_for_currency(currency: str) -> str | None:
+    return FX_PAIR_BY_CURRENCY.get((currency or "CNY").upper())
+
+
+def required_fx_pairs_for_assets(assets: list[dict[str, Any]]) -> list[str]:
+    pairs = {
+        pair
+        for asset in assets
+        if asset.get("enabled", True)
+        for pair in [fx_pair_for_currency(asset.get("currency", "CNY"))]
+        if pair
+    }
+    return sorted(pairs)
+
+
 def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:
     config = default_config()
     if not user_config:
@@ -203,6 +256,14 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     )
     if enabled_weight > 1.0000001:
         errors.append("enabled asset target weights cannot exceed 100%")
+    enabled_groups: dict[str, list[str]] = {}
+    for asset in config.get("assets", []):
+        group = asset.get("exclusive_group")
+        if group and asset.get("enabled", True):
+            enabled_groups.setdefault(group, []).append(asset.get("symbol", asset.get("key", group)))
+    for group, symbols in enabled_groups.items():
+        if len(symbols) > 1:
+            errors.append(f"exclusive asset group {group} can enable only one asset")
     if float(config.get("initial_capital_cny", 0)) <= 0:
         errors.append("initial_capital_cny must be positive")
     if config.get("rebalance_frequency") not in {"yearly", "semiannual"}:

@@ -50,7 +50,7 @@
           </label>
         </section>
         <details>
-          <summary>费用设置</summary>
+          <summary>可调整费用假设</summary>
           <label>境内基金佣金率 <input id="cnCommission" type="number" min="0" step="0.00001" /></label>
           <label>美国券商费率类型
             <select id="ibkrPlan">
@@ -61,7 +61,14 @@
           </label>
           <label>出金和购汇点差（基点） <input id="fxOutBps" type="number" min="0" step="1" /></label>
           <label>入金和结汇点差（基点） <input id="fxInBps" type="number" min="0" step="1" /></label>
+          <label>港股通佣金率 <input id="hkCommission" type="number" min="0" step="0.00001" /></label>
+          <label>港股通汇兑点差（基点） <input id="hkFxBps" type="number" min="0" step="1" /></label>
+          <label>港股通组合费年率 <input id="hkPortfolioFee" type="number" min="0" step="0.00001" /></label>
           <label>美国分红税率 <input id="usDividendTax" type="number" min="0" max="0.3" step="0.01" /></label>
+        </details>
+        <details>
+          <summary>固定费率与成本对照</summary>
+          <div id="feeSummary" class="fee-summary"></div>
         </details>
         <div class="button-row">
           <button id="runBtn">运行回测</button>
@@ -73,6 +80,7 @@
         <section class="chart-grid">
           <div class="chart-panel"><div id="assetChart" class="chart"></div></div>
           <div class="chart-panel"><div id="returnChart" class="chart"></div></div>
+          <div class="chart-panel"><div id="dailyReturnChart" class="chart"></div></div>
           <div class="chart-panel"><div id="drawdownChart" class="chart"></div></div>
           <div class="chart-panel"><div id="weightChart" class="chart"></div></div>
           <div class="chart-panel wide-chart"><div id="comparisonChart" class="chart"></div></div>
@@ -93,6 +101,6 @@
         </section>
       </section>
     </main>
-    <script src="static/app.js?v=20260624-async-job"></script>
+    <script src="static/app.js?v=20260701-fee-summary"></script>
   </body>
 </html>

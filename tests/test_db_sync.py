@@ -9,8 +9,13 @@ import app.services.data_sync as data_sync_module
 from app.services.data_sync import (
     chunk_date_ranges,
     eastmoney_secid,
+    fetch_currency_api_fx_rates,
     fetch_digrin_dividends,
+    fetch_hk_yahoo_prices,
     fetch_nasdaq_prices,
+    fetch_tencent_hk_prices,
+    fetch_yahoo_prices,
+    fetch_yahoo_spark_prices,
     from_tushare_date,
     mark_sync_coverage,
     merge_rows_by_trade_date,
@@ -21,7 +26,9 @@ from app.services.data_sync import (
     required_data_missing,
     select_best_datasrc_price_rows,
     sohu_code_and_referer,
+    stooq_hk_symbol,
     sync_all,
+    tencent_hk_symbol,
     tushare_date,
     yahoo_period,
 )
@@ -58,6 +65,16 @@ class DbAndSyncTests(unittest.TestCase):
             conn.execute("DELETE FROM repo_rates WHERE symbol='204001'")
             self.assertIn("repo_rates:204001", required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"]))
 
+    def test_required_data_missing_needs_hkd_fx_only_when_hk_asset_enabled(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM fx_rates WHERE pair='HKD/CNY'")
+            self.assertNotIn("fx_rates:HKD/CNY", required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"]))
+            next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")["enabled"] = True
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+
+        self.assertIn("fx_rates:HKD/CNY", missing)
+
     def test_required_data_missing_detects_end_date_gaps_without_tolerance(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
         with db_session(db_path) as conn:
@@ -71,6 +88,30 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertIn("fx_rates:USD/CNY", missing)
         self.assertIn("repo_rates:204001", missing)
 
+    def test_required_data_missing_accepts_weekend_end_date(self) -> None:
+        db_path, cfg = build_synced_db("2023-06-01", "2023-06-25")
+        with db_session(db_path) as conn:
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+            conn.execute("DELETE FROM prices WHERE symbol='000300.SH' AND trade_date='2023-06-23'")
+            conn.execute("DELETE FROM repo_rates WHERE symbol='204001' AND trade_date='2023-06-23'")
+            missing_previous_weekday = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+
+        self.assertNotIn("prices:000300.SH", missing)
+        self.assertNotIn("repo_rates:204001", missing)
+        self.assertIn("prices:000300.SH", missing_previous_weekday)
+        self.assertIn("repo_rates:204001", missing_previous_weekday)
+
+    def test_required_data_missing_accepts_holiday_end_gap_when_later_rows_exist(self) -> None:
+        db_path, cfg = build_synced_db("2023-06-01", "2023-06-30")
+        cfg["end_date"] = "2023-06-25"
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM prices WHERE symbol='000300.SH' AND trade_date='2023-06-23'")
+            conn.execute("DELETE FROM repo_rates WHERE symbol='204001' AND trade_date='2023-06-23'")
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+
+        self.assertNotIn("prices:000300.SH", missing)
+        self.assertNotIn("repo_rates:204001", missing)
+
     def test_us_price_for_today_uses_previous_completed_business_day(self) -> None:
         db_path, cfg = build_synced_db("2026-06-15", "2026-06-25")
         original_datetime = data_sync_module.datetime
@@ -78,7 +119,7 @@ class DbAndSyncTests(unittest.TestCase):
         class FixedDateTime(datetime):
             @classmethod
             def now(cls, tz=None):
-                return cls(2026, 6, 25, tzinfo=timezone.utc)
+                return cls(2026, 6, 26, 2, 0, tzinfo=timezone.utc)
 
         try:
             data_sync_module.datetime = FixedDateTime
@@ -124,6 +165,29 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertIn("prices:510300.SH", missing_previous_day)
         self.assertIn("fx_rates:USD/CNY", missing_previous_day)
         self.assertIn("repo_rates:204001", missing_previous_day)
+
+    def test_hk_price_for_today_uses_previous_completed_business_day(self) -> None:
+        db_path, cfg = build_synced_db("2026-06-15", "2026-07-01")
+        next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")["enabled"] = True
+        original_datetime = data_sync_module.datetime
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 1, 10, 30, tzinfo=timezone.utc)
+
+        try:
+            data_sync_module.datetime = FixedDateTime
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='03195.HK' AND trade_date='2026-07-01'")
+                missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+                conn.execute("DELETE FROM prices WHERE symbol='03195.HK' AND trade_date='2026-06-30'")
+                missing_previous_day = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+        finally:
+            data_sync_module.datetime = original_datetime
+
+        self.assertNotIn("prices:03195.HK", missing)
+        self.assertIn("prices:03195.HK", missing_previous_day)
 
     def test_required_data_missing_detects_early_core_series_gap(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
@@ -312,6 +376,202 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(rows[1]["volume"], 9676956.0)
         self.assertEqual(rows[1]["source"], "nasdaq:historical")
 
+    def test_nasdaq_price_parser_pads_single_day_request(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        seen_urls: list[str] = []
+        payload = {
+            "data": {
+                "symbol": "VOO",
+                "tradesTable": {
+                    "rows": [
+                        {"date": "06/25/2026", "close": "675.71", "volume": "26,289,470", "open": "681.14", "high": "681.54", "low": "672.58"},
+                        {"date": "06/24/2026", "close": "675.69", "volume": "9,676,956", "open": "677.68", "high": "682.07", "low": "673.68"},
+                    ]
+                },
+            }
+        }
+
+        def fake_fetch_text(url, *_args, **_kwargs):
+            seen_urls.append(url)
+            return data_sync_module.json.dumps(payload)
+
+        try:
+            data_sync_module.fetch_text = fake_fetch_text
+            rows = fetch_nasdaq_prices("VOO", "2026-06-25", "2026-06-25", "USD")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertIn("fromdate=2026-06-24", seen_urls[0])
+        self.assertEqual([row["trade_date"] for row in rows], ["2026-06-25"])
+        self.assertEqual(rows[0]["close"], 675.71)
+
+    def test_yahoo_price_parser_falls_back_to_query2(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [1782394200],
+                        "indicators": {
+                            "quote": [{"open": [681.14], "high": [681.54], "low": [672.58], "close": [675.71], "volume": [26266500]}],
+                            "adjclose": [{"adjclose": [675.71]}],
+                        },
+                    }
+                ],
+                "error": None,
+            }
+        }
+
+        def fake_fetch_text(url, *_args, **_kwargs):
+            if "query1.finance.yahoo.com" in url:
+                raise data_sync_module.SyncWarning("query1 unavailable")
+            return data_sync_module.json.dumps(payload)
+
+        try:
+            data_sync_module.fetch_text = fake_fetch_text
+            rows = fetch_yahoo_prices("VOO", "2026-06-25", "2026-06-25", "USD")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual(rows[0]["trade_date"], "2026-06-25")
+        self.assertEqual(rows[0]["source"], "yahoo:query2:chart")
+
+    def test_hk_yahoo_price_parser_uses_yahoo_symbol_and_restores_config_symbol(self) -> None:
+        original_fetch_yahoo_prices = data_sync_module.fetch_yahoo_prices
+        seen_symbols: list[str] = []
+
+        def fake_fetch_yahoo_prices(symbol, start, end, currency):
+            seen_symbols.append(symbol)
+            return [
+                {
+                    "symbol": symbol,
+                    "trade_date": start,
+                    "open": 8.0,
+                    "high": 8.1,
+                    "low": 7.9,
+                    "close": 8.05,
+                    "adj_close": 8.05,
+                    "volume": 1000,
+                    "amount": 0.0,
+                    "currency": currency,
+                    "source": "test:yahoo",
+                }
+            ]
+
+        try:
+            data_sync_module.fetch_yahoo_prices = fake_fetch_yahoo_prices
+            rows = fetch_hk_yahoo_prices("03195.HK", "2026-06-25", "2026-06-25", "HKD")
+        finally:
+            data_sync_module.fetch_yahoo_prices = original_fetch_yahoo_prices
+
+        self.assertEqual(seen_symbols, ["3195.HK"])
+        self.assertEqual(rows[0]["symbol"], "03195.HK")
+        self.assertEqual(rows[0]["currency"], "HKD")
+
+    def test_tencent_hk_price_parser_reads_hkd_counter_prices(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        payload = {
+            "code": 0,
+            "msg": "",
+            "data": {
+                "hk03195": {
+                    "day": [
+                        ["2024-05-02", "8.150", "7.950", "8.235", "7.835", "374200.000"],
+                        ["2024-08-12", "8.380", "8.400", "8.400", "8.380", "12800.000"],
+                    ]
+                }
+            },
+        }
+
+        try:
+            data_sync_module.fetch_text = lambda *_args, **_kwargs: data_sync_module.json.dumps(payload)
+            rows = fetch_tencent_hk_prices("03195.HK", "2024-05-01", "2024-08-12", "HKD")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual(tencent_hk_symbol("03195.HK"), "hk03195")
+        self.assertEqual(rows[0]["close"], 7.95)
+        self.assertEqual(rows[0]["source"], "tencent:hk_qfq")
+        self.assertEqual(rows[-1]["volume"], 12800.0)
+
+    def test_yahoo_spark_price_parser_reads_recent_close(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        payload = {
+            "VOO": {
+                "timestamp": [1782221400, 1782307800, 1782394200],
+                "close": [676.34, 675.69, 675.71],
+            }
+        }
+
+        try:
+            data_sync_module.fetch_text = lambda *_args, **_kwargs: data_sync_module.json.dumps(payload)
+            rows = fetch_yahoo_spark_prices("VOO", "2026-06-24", "2026-06-25", "USD")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual([row["trade_date"] for row in rows], ["2026-06-24", "2026-06-25"])
+        self.assertEqual(rows[-1]["close"], 675.71)
+        self.assertEqual(rows[-1]["source"], "yahoo:query1:spark")
+
+    def test_currency_api_fx_parser_reads_usd_cny(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        payload = {"date": "2026-06-25", "usd": {"cny": 6.80187662}}
+
+        try:
+            data_sync_module.fetch_text = lambda *_args, **_kwargs: data_sync_module.json.dumps(payload)
+            rows = fetch_currency_api_fx_rates("2026-06-25", "2026-06-25")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual(rows, [{"pair": "USD/CNY", "trade_date": "2026-06-25", "rate": 6.80187662, "source": "currency-api:jsdelivr"}])
+
+    def test_currency_api_fx_parser_reads_hkd_cny(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        payload = {"date": "2026-06-25", "hkd": {"cny": 0.9123}}
+
+        try:
+            data_sync_module.fetch_text = lambda *_args, **_kwargs: data_sync_module.json.dumps(payload)
+            rows = fetch_currency_api_fx_rates("2026-06-25", "2026-06-25", "HKD/CNY")
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertEqual(rows, [{"pair": "HKD/CNY", "trade_date": "2026-06-25", "rate": 0.9123, "source": "currency-api:jsdelivr"}])
+
+    def test_targeted_fx_sync_uses_later_fallback_sources(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        original_datasrc = data_sync_module.fetch_datasrc_fx_rates
+        original_yahoo = data_sync_module.fetch_yahoo_fx_rates
+        original_frankfurter = data_sync_module.fetch_frankfurter_fx_rates
+        original_stooq = data_sync_module.fetch_stooq_fx_rates
+        original_currency_api = data_sync_module.fetch_currency_api_fx_rates
+
+        def fail_fx_source(*_args, **_kwargs):
+            raise data_sync_module.SyncWarning("source unavailable")
+
+        def fake_currency_api(_start, _end):
+            return [{"pair": "USD/CNY", "trade_date": "2020-01-10", "rate": 7.01, "source": "test:currency-api"}]
+
+        try:
+            data_sync_module.fetch_datasrc_fx_rates = fail_fx_source
+            data_sync_module.fetch_yahoo_fx_rates = fail_fx_source
+            data_sync_module.fetch_frankfurter_fx_rates = fail_fx_source
+            data_sync_module.fetch_stooq_fx_rates = fail_fx_source
+            data_sync_module.fetch_currency_api_fx_rates = fake_currency_api
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM fx_rates WHERE pair='USD/CNY' AND trade_date='2020-01-10'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["fx_rates:USD/CNY"])
+                row = conn.execute("SELECT rate, source FROM fx_rates WHERE pair='USD/CNY' AND trade_date='2020-01-10'").fetchone()
+        finally:
+            data_sync_module.fetch_datasrc_fx_rates = original_datasrc
+            data_sync_module.fetch_yahoo_fx_rates = original_yahoo
+            data_sync_module.fetch_frankfurter_fx_rates = original_frankfurter
+            data_sync_module.fetch_stooq_fx_rates = original_stooq
+            data_sync_module.fetch_currency_api_fx_rates = original_currency_api
+
+        self.assertEqual(result["inserted"]["fx_rates"], 1)
+        self.assertNotIn("fx_rates:USD/CNY", result["missing_data"])
+        self.assertEqual(dict(row), {"rate": 7.01, "source": "test:currency-api"})
+
     def test_targeted_dividend_sync_does_not_fetch_missing_prices(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
         original_fetch_prices = data_sync_module.fetch_yahoo_prices
@@ -349,6 +609,56 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(result["inserted"]["prices"], 0)
         self.assertEqual(result["inserted"]["dividends"], 1)
 
+    def test_cn_dividend_sync_marks_public_empty_coverage(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        original_fetch_fund_dividends = data_sync_module.fetch_fund_dividends
+        original_fetch_eastmoney_dividends = data_sync_module.fetch_eastmoney_fund_dividends
+
+        def fail_tushare(*_args, **_kwargs):
+            raise data_sync_module.SyncWarning("TUSHARE_TOKEN is not configured")
+
+        try:
+            data_sync_module.fetch_fund_dividends = fail_tushare
+            data_sync_module.fetch_eastmoney_fund_dividends = lambda *_args, **_kwargs: []
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='510300.SH'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["dividends:510300.SH"])
+                coverage = rows_to_dicts(
+                    conn.execute("SELECT kind, symbol, start_date, end_date, source FROM sync_coverage WHERE kind='dividends' AND symbol='510300.SH'")
+                )
+        finally:
+            data_sync_module.fetch_fund_dividends = original_fetch_fund_dividends
+            data_sync_module.fetch_eastmoney_fund_dividends = original_fetch_eastmoney_dividends
+
+        self.assertEqual(result["inserted"]["dividends"], 0)
+        self.assertNotIn("dividends:510300.SH", result["missing_data"])
+        self.assertEqual(coverage[0]["source"], "eastmoney:fund_dividend")
+
+    def test_dividend_sync_marks_empty_coverage_when_public_sources_fail(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        original_fetch_fund_dividends = data_sync_module.fetch_fund_dividends
+        original_fetch_eastmoney_dividends = data_sync_module.fetch_eastmoney_fund_dividends
+
+        def fail_source(*_args, **_kwargs):
+            raise data_sync_module.SyncWarning("public dividend source timeout")
+
+        try:
+            data_sync_module.fetch_fund_dividends = fail_source
+            data_sync_module.fetch_eastmoney_fund_dividends = fail_source
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='510300.SH'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["dividends:510300.SH"])
+                coverage = rows_to_dicts(
+                    conn.execute("SELECT kind, symbol, start_date, end_date, source FROM sync_coverage WHERE kind='dividends' AND symbol='510300.SH'")
+                )
+        finally:
+            data_sync_module.fetch_fund_dividends = original_fetch_fund_dividends
+            data_sync_module.fetch_eastmoney_fund_dividends = original_fetch_eastmoney_dividends
+
+        self.assertEqual(result["inserted"]["dividends"], 0)
+        self.assertNotIn("dividends:510300.SH", result["missing_data"])
+        self.assertEqual(coverage[0]["source"], "public:dividend_unavailable_empty")
+
     def test_targeted_price_sync_uses_tail_ranges(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         original_fetch_prices = data_sync_module.fetch_yahoo_prices
@@ -369,6 +679,104 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(requested_ranges, [("2020-01-10", "2020-01-10")])
         self.assertEqual(result["inserted"]["prices"], 1)
         self.assertNotIn("prices:VOO", result["missing_data"])
+
+    def test_targeted_us_price_sync_fills_missing_dates_from_multiple_sources(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        original_yahoo = data_sync_module.fetch_yahoo_prices
+        original_nasdaq = data_sync_module.fetch_nasdaq_prices
+        original_stooq = data_sync_module.fetch_stooq_prices
+        original_spark = data_sync_module.fetch_yahoo_spark_prices
+
+        def price_row(source, trade_date, close):
+            return {
+                "symbol": "VOO",
+                "trade_date": trade_date,
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "adj_close": close,
+                "volume": 0.0,
+                "amount": 0.0,
+                "currency": "USD",
+                "source": source,
+            }
+
+        try:
+            data_sync_module.fetch_yahoo_prices = lambda *_args, **_kwargs: [price_row("test:yahoo", "2020-01-08", 280.0)]
+            data_sync_module.fetch_nasdaq_prices = lambda *_args, **_kwargs: [price_row("test:nasdaq", "2020-01-09", 281.0)]
+            data_sync_module.fetch_stooq_prices = lambda *_args, **_kwargs: []
+            data_sync_module.fetch_yahoo_spark_prices = lambda *_args, **_kwargs: [price_row("test:spark", "2020-01-10", 282.0)]
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date >= '2020-01-08'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["prices:VOO"])
+                rows = rows_to_dicts(
+                    conn.execute(
+                        "SELECT trade_date, close, source FROM prices WHERE symbol='VOO' AND trade_date >= '2020-01-08' ORDER BY trade_date"
+                    )
+                )
+        finally:
+            data_sync_module.fetch_yahoo_prices = original_yahoo
+            data_sync_module.fetch_nasdaq_prices = original_nasdaq
+            data_sync_module.fetch_stooq_prices = original_stooq
+            data_sync_module.fetch_yahoo_spark_prices = original_spark
+
+        self.assertEqual(result["inserted"]["prices"], 3)
+        self.assertNotIn("prices:VOO", result["missing_data"])
+        self.assertEqual([row["source"] for row in rows], ["test:yahoo", "test:nasdaq", "test:spark"])
+
+    def test_targeted_hk_price_sync_uses_multiple_public_fallbacks(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        hk_asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")
+        hk_asset["enabled"] = True
+        original_datasrc = data_sync_module.fetch_datasrc_market_prices
+        original_yahoo = data_sync_module.fetch_hk_yahoo_prices
+        original_eastmoney = data_sync_module.fetch_eastmoney_prices
+        original_tencent = data_sync_module.fetch_tencent_hk_prices
+        original_stooq = data_sync_module.fetch_hk_stooq_prices
+        original_spark = data_sync_module.fetch_hk_yahoo_spark_prices
+
+        def price_row(source, trade_date, close):
+            return {
+                "symbol": "03195.HK",
+                "trade_date": trade_date,
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "adj_close": close,
+                "volume": 0.0,
+                "amount": 0.0,
+                "currency": "HKD",
+                "source": source,
+            }
+
+        try:
+            data_sync_module.fetch_datasrc_market_prices = lambda *_args, **_kwargs: [price_row("test:datasrc", "2020-01-08", 8.0)]
+            data_sync_module.fetch_eastmoney_prices = lambda *_args, **_kwargs: [price_row("test:eastmoney", "2020-01-09", 8.1)]
+            data_sync_module.fetch_tencent_hk_prices = lambda *_args, **_kwargs: [price_row("test:tencent", "2020-01-10", 8.2)]
+            data_sync_module.fetch_hk_yahoo_prices = lambda *_args, **_kwargs: [price_row("test:yahoo-bad", "2020-01-09", 1.1), price_row("test:yahoo-bad", "2020-01-10", 1.1)]
+            data_sync_module.fetch_hk_stooq_prices = lambda *_args, **_kwargs: []
+            data_sync_module.fetch_hk_yahoo_spark_prices = lambda *_args, **_kwargs: []
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='03195.HK' AND trade_date >= '2020-01-08'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["prices:03195.HK"])
+                rows = rows_to_dicts(
+                    conn.execute(
+                        "SELECT trade_date, close, source FROM prices WHERE symbol='03195.HK' AND trade_date >= '2020-01-08' ORDER BY trade_date"
+                    )
+                )
+        finally:
+            data_sync_module.fetch_datasrc_market_prices = original_datasrc
+            data_sync_module.fetch_hk_yahoo_prices = original_yahoo
+            data_sync_module.fetch_eastmoney_prices = original_eastmoney
+            data_sync_module.fetch_tencent_hk_prices = original_tencent
+            data_sync_module.fetch_hk_stooq_prices = original_stooq
+            data_sync_module.fetch_hk_yahoo_spark_prices = original_spark
+
+        self.assertEqual(result["inserted"]["prices"], 3)
+        self.assertNotIn("prices:03195.HK", result["missing_data"])
+        self.assertEqual([row["source"] for row in rows], ["test:datasrc", "test:eastmoney", "test:tencent"])
 
     def test_json_and_row_helpers(self) -> None:
         db_path = temp_db_path()
@@ -395,6 +803,9 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertIsNone(from_tushare_date(None))
         self.assertEqual(eastmoney_secid("510300.SH"), "1.510300")
         self.assertEqual(eastmoney_secid("159919.SZ"), "0.159919")
+        self.assertEqual(eastmoney_secid("03195.HK"), "116.03195")
+        self.assertEqual(stooq_hk_symbol("03195.HK"), "3195.hk")
+        self.assertEqual(tencent_hk_symbol("03195.HK"), "hk03195")
         self.assertGreater(yahoo_period("2020-01-02"), yahoo_period("2020-01-01"))
         self.assertEqual(chunk_date_ranges("2020-01-01", "2020-03-31", 90), [("2020-01-01", "2020-03-30"), ("2020-03-31", "2020-03-31")])
         self.assertEqual(sohu_code_and_referer("000300.SH")[0], "zs_000300")

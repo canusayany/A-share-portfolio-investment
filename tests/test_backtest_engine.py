@@ -79,6 +79,30 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertTrue(all(trade["quantity"] % 100 == 0 for trade in cn_buys))
         self.assertTrue(all(trade["currency"] == "USD" for trade in voo_buys))
 
+    def test_hk_connect_etf_uses_hkd_fx_and_board_lot_rules(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-03-31")
+        hk_asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")
+        hk_asset["enabled"] = True
+        hk_asset["target_weight"] = 0.10
+        cfg["assets"][0]["enabled"] = False
+        cfg["assets"][0]["target_weight"] = 0.0
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            trades = rows_to_dicts(conn.execute("SELECT * FROM trades WHERE run_id=? AND symbol='03195.HK'", (result["run_id"],)))
+            final_payload = json.loads(
+                conn.execute(
+                    "SELECT payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date DESC LIMIT 1",
+                    (result["run_id"],),
+                ).fetchone()["payload_json"]
+            )
+
+        hk_buys = [trade for trade in trades if trade["side"] == "BUY"]
+        self.assertTrue(hk_buys)
+        self.assertTrue(all(trade["currency"] == "HKD" for trade in hk_buys))
+        self.assertTrue(all(trade["quantity"] % 100 == 0 for trade in hk_buys))
+        self.assertIn("03195.HK", final_payload["values"])
+        self.assertGreater(result["summary"]["total_fees_cny"], 0)
+
     def test_initial_buy_uses_first_calculable_day_after_missing_start_data(self) -> None:
         db_path, cfg = build_synced_db("2019-01-01", "2020-02-28")
         with db_session(db_path) as conn:

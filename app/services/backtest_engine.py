@@ -12,18 +12,24 @@ from typing import Any
 
 import numpy as np
 
-from app.config import normalize_config, validate_config
+from app.config import fx_pair_for_currency, normalize_config, required_fx_pairs_for_assets, validate_config
 from app.db import insert_many, json_dumps, utc_now
 from app.services.calendar import add_business_days, business_days, first_business_day_by_month, parse_date, rebalance_days, repo_actual_days
 from app.services.fees import (
     CnEtfFeeConfig,
     FxFeeConfig,
+    HkConnectEtfFeeConfig,
     IbkrFeeConfig,
     RepoFeeConfig,
+    cny_cost_for_hkd,
     cn_etf_fee,
     cny_to_usd,
     dict_to_dataclass,
+    hk_connect_etf_trade_fee,
+    hk_connect_portfolio_fee,
+    hkd_to_cny,
     ibkr_us_etf_fee,
+    ibkr_us_etf_sell_fee,
     repo_fee,
     repo_interest,
     usd_to_cny,
@@ -64,6 +70,15 @@ class PortfolioState:
 
 class BacktestError(ValueError):
     pass
+
+
+class BacktestCancelled(RuntimeError):
+    pass
+
+
+def raise_if_cancelled(should_cancel=None) -> None:
+    if should_cancel and should_cancel():
+        raise BacktestCancelled("回测任务已取消：页面没有继续请求结果")
 
 
 def canonical_config_hash(config: dict[str, Any]) -> str:
@@ -115,6 +130,24 @@ def load_fx_map(conn, start: str, end: str) -> dict[str, float]:
     return {row["trade_date"]: float(row["rate"]) for row in rows}
 
 
+def load_fx_maps(conn, pairs: list[str], start: str, end: str) -> dict[str, dict[str, float]]:
+    result: dict[str, dict[str, float]] = {pair: {} for pair in pairs}
+    if not pairs:
+        return result
+    placeholders = ",".join("?" for _ in pairs)
+    rows = conn.execute(
+        f"""
+        SELECT pair, trade_date, rate FROM fx_rates
+        WHERE pair IN ({placeholders}) AND trade_date BETWEEN ? AND ?
+        ORDER BY pair, trade_date
+        """,
+        (*pairs, start, end),
+    ).fetchall()
+    for row in rows:
+        result.setdefault(row["pair"], {})[row["trade_date"]] = float(row["rate"])
+    return result
+
+
 def load_repo_map(conn, symbol: str, start: str, end: str) -> dict[str, float]:
     rows = conn.execute(
         "SELECT trade_date, close_rate FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
@@ -149,11 +182,28 @@ def forward_value(values: dict[str, float], day: date, last: float | None) -> fl
     return current if current is not None else last
 
 
-def position_value_cny(position: Position, price: float, fx: float) -> float:
-    value = position.quantity * price
-    if position.currency == "USD":
-        value *= fx
-    return value
+def currency_to_cny_rate(currency: str, fx_rates: dict[str, float]) -> float:
+    normalized = (currency or "CNY").upper()
+    if normalized == "CNY":
+        return 1.0
+    pair = fx_pair_for_currency(normalized)
+    if not pair or pair not in fx_rates:
+        raise BacktestError(f"missing FX rate for {normalized}/CNY")
+    return fx_rates[pair]
+
+
+def position_value_cny(position: Position, price: float, fx_rates: dict[str, float]) -> float:
+    if position.quantity <= 0:
+        return 0.0
+    return position.quantity * price * currency_to_cny_rate(position.currency, fx_rates)
+
+
+def position_lot_size(position: Position, fees: dict[str, Any]) -> int:
+    if position.currency == "HKD" or position.asset_type == "hk_connect_etf":
+        return max(int(float(fees["hk_connect_etf"].get("lot_size", 100.0))), 1)
+    if position.currency == "CNY":
+        return 100
+    return 1
 
 
 def active_assets(config: dict[str, Any], day: date, latest_prices: dict[str, float | None]) -> list[dict[str, Any]]:
@@ -264,7 +314,7 @@ def _sell_position(
     day: date,
     qty: float,
     price: float,
-    fx: float,
+    fx_rates: dict[str, float],
     fees: dict[str, Any],
     trades: list[dict[str, Any]],
     reason: str,
@@ -274,10 +324,18 @@ def _sell_position(
         return 0.0
     gross_native = qty * price
     if pos.currency == "USD":
-        ibkr_fee = ibkr_us_etf_fee(qty, gross_native, dict_to_dataclass(IbkrFeeConfig, fees["ibkr_us_etf"]))
+        fx = currency_to_cny_rate("USD", fx_rates)
+        ibkr_fee = ibkr_us_etf_sell_fee(qty, gross_native, dict_to_dataclass(IbkrFeeConfig, fees["ibkr_us_etf"]))
         net_usd = max(gross_native - ibkr_fee, 0.0)
         cash_cny, fx_fee = usd_to_cny(net_usd, fx, dict_to_dataclass(FxFeeConfig, fees["fx"]), include_wire=False)
         fee_cny = ibkr_fee * fx + fx_fee
+    elif pos.currency == "HKD" or pos.asset_type == "hk_connect_etf":
+        fx = currency_to_cny_rate("HKD", fx_rates)
+        hk_cfg = dict_to_dataclass(HkConnectEtfFeeConfig, fees["hk_connect_etf"])
+        trade_fee_hkd = hk_connect_etf_trade_fee(gross_native, hk_cfg)
+        net_hkd = max(gross_native - trade_fee_hkd, 0.0)
+        cash_cny, fx_fee = hkd_to_cny(net_hkd, fx, hk_cfg)
+        fee_cny = trade_fee_hkd * fx + fx_fee
     else:
         fee_cny = cn_etf_fee(gross_native, dict_to_dataclass(CnEtfFeeConfig, fees["cn_etf"]))
         cash_cny = max(gross_native - fee_cny, 0.0)
@@ -298,7 +356,7 @@ def _sell_position(
             "fee": fee_cny,
             "currency": pos.currency,
             "reason": reason,
-            "payload_json": json_dumps({"cash_cny": cash_cny, "fx": fx}),
+            "payload_json": json_dumps({"cash_cny": cash_cny, "fx_rates": fx_rates}),
         }
     )
     return cash_cny
@@ -310,7 +368,7 @@ def _buy_position(
     day: date,
     budget_cny: float,
     price: float,
-    fx: float,
+    fx_rates: dict[str, float],
     fees: dict[str, Any],
     trades: list[dict[str, Any]],
     allow_fractional_us_shares: bool,
@@ -320,6 +378,7 @@ def _buy_position(
     if budget_cny <= 0:
         return 0.0
     if pos.currency == "USD":
+        fx = currency_to_cny_rate("USD", fx_rates)
         fx_cfg = dict_to_dataclass(FxFeeConfig, fees["fx"])
         usd_budget, fx_fee = cny_to_usd(budget_cny, fx, fx_cfg, include_wire=False)
         raw_qty = usd_budget / price if price else 0.0
@@ -334,6 +393,22 @@ def _buy_position(
         spent_cny = (gross_usd + commission_usd) * fx + fx_fee
         fee_cny = commission_usd * fx + fx_fee
         gross_native = gross_usd
+    elif pos.currency == "HKD" or pos.asset_type == "hk_connect_etf":
+        fx = currency_to_cny_rate("HKD", fx_rates)
+        hk_cfg = dict_to_dataclass(HkConnectEtfFeeConfig, fees["hk_connect_etf"])
+        lot_size = max(int(hk_cfg.lot_size), 1)
+        spread = hk_cfg.fx_spread_bps / 10000.0
+        hkd_budget = budget_cny / (fx * (1.0 + spread)) if fx and price else 0.0
+        qty = max(math.floor((hkd_budget / price) / lot_size) * lot_size, 0) if price else 0
+        gross_native = qty * price
+        trade_fee_hkd = hk_connect_etf_trade_fee(gross_native, hk_cfg) if qty else 0.0
+        spent_cny, fx_fee = cny_cost_for_hkd(gross_native + trade_fee_hkd, fx, hk_cfg)
+        while qty > 0 and spent_cny > budget_cny:
+            qty -= lot_size
+            gross_native = qty * price
+            trade_fee_hkd = hk_connect_etf_trade_fee(gross_native, hk_cfg) if qty else 0.0
+            spent_cny, fx_fee = cny_cost_for_hkd(gross_native + trade_fee_hkd, fx, hk_cfg)
+        fee_cny = trade_fee_hkd * fx + fx_fee
     else:
         lot_size = 100
         raw_qty = math.floor((budget_cny / price) / lot_size) * lot_size if price else 0
@@ -362,7 +437,7 @@ def _buy_position(
             "fee": fee_cny,
             "currency": pos.currency,
             "reason": reason,
-            "payload_json": json_dumps({"spent_cny": spent_cny, "fx": fx}),
+            "payload_json": json_dumps({"spent_cny": spent_cny, "fx_rates": fx_rates}),
         }
     )
     return spent_cny
@@ -371,12 +446,12 @@ def _buy_position(
 def _portfolio_value(
     state: PortfolioState,
     latest_prices: dict[str, float | None],
-    fx: float,
+    fx_rates: dict[str, float],
 ) -> tuple[float, dict[str, float]]:
     values: dict[str, float] = {}
     for symbol, pos in state.positions.items():
         price = latest_prices.get(symbol)
-        values[symbol] = position_value_cny(pos, price or 0.0, fx) if price is not None else 0.0
+        values[symbol] = position_value_cny(pos, price or 0.0, fx_rates) if price is not None else 0.0
     repo_value = state.cash_cny + sum(lot.principal + lot.interest - lot.fee for lot in state.repo_lots) + state.dividend_receivable_cny
     values["REPO"] = repo_value
     total = sum(values.values())
@@ -395,7 +470,7 @@ def _cover_cash_shortfall(
     shortfall: float,
     day: date,
     latest_prices: dict[str, float | None],
-    fx: float,
+    fx_rates: dict[str, float],
     fees: dict[str, Any],
     trades: list[dict[str, Any]],
 ) -> None:
@@ -404,21 +479,22 @@ def _cover_cash_shortfall(
         return
     ranked = sorted(
         state.positions.values(),
-        key=lambda p: position_value_cny(p, latest_prices.get(p.symbol) or 0.0, fx),
+        key=lambda p: position_value_cny(p, latest_prices.get(p.symbol) or 0.0, fx_rates),
         reverse=True,
     )
     for pos in ranked:
         price = latest_prices.get(pos.symbol)
         if not price or pos.quantity <= 0:
             continue
-        value = position_value_cny(pos, price, fx)
+        value = position_value_cny(pos, price, fx_rates)
         needed = shortfall - state.cash_cny
         if needed <= 0:
             break
         qty = min(pos.quantity, pos.quantity * min(1.0, needed / max(value, 1e-9) * 1.05))
-        if pos.currency == "CNY":
-            qty = math.ceil(qty / 100) * 100
-        _sell_position(state, pos, day, qty, price, fx, fees, trades, "liquidity_shortfall")
+        if pos.currency in {"CNY", "HKD"}:
+            lot_size = position_lot_size(pos, fees)
+            qty = math.ceil(qty / lot_size) * lot_size
+        _sell_position(state, pos, day, qty, price, fx_rates, fees, trades, "liquidity_shortfall")
 
 
 def _rebalance_state_to_band(
@@ -426,7 +502,7 @@ def _rebalance_state_to_band(
     assets: list[dict[str, Any]],
     day: date,
     latest_prices: dict[str, float | None],
-    fx: float,
+    fx_rates: dict[str, float],
     fees: dict[str, Any],
     trades: list[dict[str, Any]],
     allow_fractional_us_shares: bool,
@@ -434,7 +510,7 @@ def _rebalance_state_to_band(
     band: float,
 ) -> tuple[float, float, float, float, dict[str, float]]:
     _liquidate_repo_to_cash(state)
-    before_rebalance, values = _portfolio_value(state, latest_prices, fx)
+    before_rebalance, values = _portfolio_value(state, latest_prices, fx_rates)
     current_weights = {key: (value / before_rebalance if before_rebalance else 0.0) for key, value in values.items()}
     desired_weights = minimal_rebalance_weights(current_weights, targets, band)
     turnover = 0.0
@@ -446,16 +522,18 @@ def _rebalance_state_to_band(
         price = latest_prices.get(symbol)
         if price is None:
             continue
-        desired_value = before_rebalance * desired_weights.get(symbol, 0.0)
-        current_value = position_value_cny(pos, price, fx)
+        desired_weight = desired_weights.get(symbol, 0.0) if symbol in targets else 0.0
+        desired_value = before_rebalance * desired_weight
+        current_value = position_value_cny(pos, price, fx_rates)
         diff = desired_value - current_value
         if diff < -1.0:
             sell_value = -diff
-            qty = sell_value / (price * (fx if pos.currency == "USD" else 1.0))
-            if pos.currency == "CNY":
-                qty = math.floor(qty / 100) * 100
+            qty = sell_value / (price * currency_to_cny_rate(pos.currency, fx_rates))
+            if pos.currency in {"CNY", "HKD"}:
+                lot_size = position_lot_size(pos, fees)
+                qty = math.floor(qty / lot_size) * lot_size
             prev_cash = state.cash_cny
-            _sell_position(state, pos, day, qty, price, fx, fees, trades, "rebalance")
+            _sell_position(state, pos, day, qty, price, fx_rates, fees, trades, "rebalance")
             turnover += max(state.cash_cny - prev_cash, 0.0)
 
     for asset in assets:
@@ -464,9 +542,11 @@ def _rebalance_state_to_band(
         price = latest_prices.get(symbol)
         if price is None:
             continue
-        after_sell_total, _ = _portfolio_value(state, latest_prices, fx)
+        after_sell_total, _ = _portfolio_value(state, latest_prices, fx_rates)
+        if symbol not in targets or targets.get(symbol, 0.0) <= 0:
+            continue
         desired_value = after_sell_total * desired_weights.get(symbol, 0.0)
-        current_value = position_value_cny(pos, price, fx)
+        current_value = position_value_cny(pos, price, fx_rates)
         diff = desired_value - current_value
         if diff > 1.0:
             spent = _buy_position(
@@ -475,7 +555,7 @@ def _rebalance_state_to_band(
                 day,
                 diff,
                 price,
-                fx,
+                fx_rates,
                 fees,
                 trades,
                 allow_fractional_us_shares,
@@ -483,7 +563,7 @@ def _rebalance_state_to_band(
             )
             turnover += spent
 
-    after_rebalance, _ = _portfolio_value(state, latest_prices, fx)
+    after_rebalance, _ = _portfolio_value(state, latest_prices, fx_rates)
     return before_rebalance, after_rebalance, turnover, state.total_fees_cny - fee_before, desired_weights
 
 
@@ -559,7 +639,7 @@ def _apply_dividend_events(
     day_str: str,
     ex_events: dict[str, list[dict[str, Any]]],
     pay_events: dict[str, list[dict[str, Any]]],
-    fx: float,
+    fx_rates: dict[str, float],
     fees: dict[str, Any],
 ) -> None:
     for event in ex_events.get(day_str, []):
@@ -568,7 +648,14 @@ def _apply_dividend_events(
             continue
         dividend = pos.quantity * float(event["div_cash"])
         if event["currency"] == "USD":
+            fx = currency_to_cny_rate("USD", fx_rates)
             tax_rate = float(fees["tax"].get("us_dividend_withholding_rate", 0.10))
+            tax = dividend * tax_rate * fx
+            state.total_withheld_tax_cny += tax
+            state.dividend_receivable_cny += dividend * (1.0 - tax_rate) * fx
+        elif event["currency"] == "HKD":
+            fx = currency_to_cny_rate("HKD", fx_rates)
+            tax_rate = float(fees["tax"].get("hk_dividend_withholding_rate", 0.0))
             tax = dividend * tax_rate * fx
             state.total_withheld_tax_cny += tax
             state.dividend_receivable_cny += dividend * (1.0 - tax_rate) * fx
@@ -582,6 +669,30 @@ def _apply_dividend_events(
         if state.dividend_receivable_cny > 0:
             state.cash_cny += state.dividend_receivable_cny
             state.dividend_receivable_cny = 0.0
+
+
+def _apply_hk_connect_portfolio_fee(
+    state: PortfolioState,
+    latest_prices: dict[str, float | None],
+    fx_rates: dict[str, float],
+    fees: dict[str, Any],
+) -> None:
+    hk_cfg = dict_to_dataclass(HkConnectEtfFeeConfig, fees["hk_connect_etf"])
+    hkd_cny = fx_rates.get("HKD/CNY")
+    if hkd_cny is None:
+        return
+    total_fee_cny = 0.0
+    for pos in state.positions.values():
+        if pos.quantity <= 0 or not (pos.currency == "HKD" or pos.asset_type == "hk_connect_etf"):
+            continue
+        price = latest_prices.get(pos.symbol)
+        if price is None:
+            continue
+        fee_hkd = hk_connect_portfolio_fee(pos.quantity * price, hk_cfg)
+        total_fee_cny += fee_hkd * hkd_cny
+    if total_fee_cny > 0:
+        state.cash_cny -= total_fee_cny
+        state.total_fees_cny += total_fee_cny
 
 
 def _initial_state(capital_cny: float, assets: list[dict[str, Any]]) -> PortfolioState:
@@ -626,7 +737,7 @@ def comparison_assets(config: dict[str, Any]) -> list[dict[str, Any]]:
     by_symbol = {asset["symbol"]: asset for asset in config["assets"]}
     hs300_weight = sum(
         float(by_symbol[symbol].get("target_weight", 0.0))
-        for symbol in ("VOO", "510300.SH", "512890.SH")
+        for symbol in ("VOO", "03195.HK", "510300.SH", "512890.SH")
         if by_symbol.get(symbol, {}).get("enabled", True)
     )
     result: list[dict[str, Any]] = []
@@ -643,19 +754,21 @@ def _simulate_comparison_series(
     config: dict[str, Any],
     days: list[date],
     price_maps: dict[str, dict[str, float]],
-    fx_map: dict[str, float],
+    fx_maps: dict[str, dict[str, float]],
     repo_map: dict[str, float],
     one_day_repo_map: dict[str, float],
     ex_events: dict[str, list[dict[str, Any]]],
     pay_events: dict[str, list[dict[str, Any]]],
     monthly_spend_days: set[date],
     reb_days: set[date],
+    should_cancel=None,
 ) -> dict[str, float]:
     assets = comparison_assets(config)
     state = _initial_state(float(config["initial_capital_cny"]), assets)
     symbols = [asset["symbol"] for asset in assets]
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols}
-    latest_fx: float | None = None
+    comparison_fx_pairs = required_fx_pairs_for_assets(assets)
+    latest_fx_rates: dict[str, float | None] = {pair: None for pair in comparison_fx_pairs}
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
     tenor_days = repo_tenor_days(config)
@@ -663,32 +776,37 @@ def _simulate_comparison_series(
     trades: list[dict[str, Any]] = []
     initial_rebalance_done = False
 
-    for day in days:
+    for idx, day in enumerate(days):
+        if idx % 64 == 0:
+            raise_if_cancelled(should_cancel)
         day_str = day.isoformat()
         for symbol in latest_prices:
             latest_prices[symbol] = forward_value(price_maps.get(symbol, {}), day, latest_prices.get(symbol))
-        latest_fx = forward_value(fx_map, day, latest_fx)
+        for pair in latest_fx_rates:
+            latest_fx_rates[pair] = forward_value(fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
         repo_rate = repo_map.get(day_str)
         if repo_rate is not None:
             latest_repo_rate = repo_rate
         one_day_repo_rate = one_day_repo_map.get(day_str)
         if one_day_repo_rate is not None:
             latest_one_day_repo_rate = one_day_repo_rate
-        if latest_fx is None:
+        if any(value is None for value in latest_fx_rates.values()):
             continue
+        fx_rates = {pair: float(value) for pair, value in latest_fx_rates.items() if value is not None}
 
         _mature_repo_lots(state, day)
-        _apply_dividend_events(state, day_str, ex_events, pay_events, latest_fx, config["fees"])
+        _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
+        _apply_hk_connect_portfolio_fee(state, latest_prices, fx_rates, config["fees"])
 
         if day in monthly_spend_days:
             spend = float(config["monthly_spend_cny"])
             if state.cash_cny < spend:
-                _cover_cash_shortfall(state, spend, day, latest_prices, latest_fx, config["fees"], trades)
+                _cover_cash_shortfall(state, spend, day, latest_prices, fx_rates, config["fees"], trades)
             actual_spend = min(spend, state.cash_cny)
             state.cash_cny -= actual_spend
             state.total_spend_cny += actual_spend
 
-        before_total, before_values = _portfolio_value(state, latest_prices, latest_fx)
+        before_total, before_values = _portfolio_value(state, latest_prices, fx_rates)
         targets = effective_weights({**config, "assets": assets}, day, latest_prices)
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
         is_rebalance_day = day in reb_days or not initial_rebalance_done
@@ -698,7 +816,7 @@ def _simulate_comparison_series(
                 assets,
                 day,
                 latest_prices,
-                latest_fx,
+                fx_rates,
                 config["fees"],
                 trades,
                 False,
@@ -718,13 +836,14 @@ def _simulate_comparison_series(
             monthly_spend_days,
             float(config["monthly_spend_cny"]),
         )
-        total, _values = _portfolio_value(state, latest_prices, latest_fx)
+        total, _values = _portfolio_value(state, latest_prices, fx_rates)
         totals[day_str] = total
     return totals
 
 
-def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=None) -> dict[str, Any]:
     started_at = time.perf_counter()
+    raise_if_cancelled(should_cancel)
     config = normalize_config(user_config)
     errors = validate_config(config)
     if errors:
@@ -735,6 +854,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         logger.info("run_backtest cache hit range=%s..%s seconds=%.3f", config["start_date"], config["end_date"], time.perf_counter() - started_at)
         return cached
 
+    raise_if_cancelled(should_cancel)
     start = config["start_date"]
     end = config["end_date"]
     logger.info("run_backtest start range=%s..%s assets=%s repo=%s", start, end, [asset["symbol"] for asset in config["assets"]], config["repo_symbol"])
@@ -758,11 +878,13 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     if len(days) < 2:
         raise BacktestError("backtest needs at least two business days")
 
+    raise_if_cancelled(should_cancel)
     symbols = [asset["symbol"] for asset in config["assets"]]
     benchmark_symbol = "000300.SH"
     load_started_at = time.perf_counter()
     price_maps = load_price_map(conn, symbols + [benchmark_symbol], start, end)
-    fx_map = load_fx_map(conn, start, end)
+    needed_fx_pairs = required_fx_pairs_for_assets(config["assets"])
+    fx_maps = load_fx_maps(conn, needed_fx_pairs, start, end)
     repo_map = load_repo_map(conn, config["repo_symbol"], start, end)
     one_day_repo_map = load_repo_map(conn, "204001", start, end)
     ex_events, pay_events = load_dividend_events(conn, symbols, start, end)
@@ -770,14 +892,15 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         "run_backtest data loaded days=%d price_rows=%d fx_rows=%d repo_rows=%d one_day_repo_rows=%d dividend_events=%d seconds=%.3f",
         len(days),
         sum(len(values) for values in price_maps.values()),
-        len(fx_map),
+        sum(len(values) for values in fx_maps.values()),
         len(repo_map),
         len(one_day_repo_map),
         sum(len(events) for events in ex_events.values()),
         time.perf_counter() - load_started_at,
     )
 
-    if not fx_map or not repo_map:
+    raise_if_cancelled(should_cancel)
+    if any(not fx_maps.get(pair) for pair in needed_fx_pairs) or not repo_map:
         raise BacktestError("missing fx_rates or repo_rates; run data sync first")
 
     state = _initial_state(float(config["initial_capital_cny"]), config["assets"])
@@ -794,7 +917,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     monthly_spend_days = first_business_day_by_month(days)
     reb_days = rebalance_days(days, config["rebalance_frequency"])
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
-    latest_fx: float | None = None
+    latest_fx_rates: dict[str, float | None] = {pair: None for pair in needed_fx_pairs}
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
     tenor_days = repo_tenor_days(config)
@@ -809,34 +932,39 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
 
     loop_started_at = time.perf_counter()
     for idx, day in enumerate(days):
+        if idx % 64 == 0:
+            raise_if_cancelled(should_cancel)
         day_str = day.isoformat()
         flow = 0.0
         for symbol in latest_prices:
             latest_prices[symbol] = forward_value(price_maps.get(symbol, {}), day, latest_prices.get(symbol))
-        latest_fx = forward_value(fx_map, day, latest_fx)
+        for pair in latest_fx_rates:
+            latest_fx_rates[pair] = forward_value(fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
         repo_rate = repo_map.get(day_str)
         if repo_rate is not None:
             latest_repo_rate = repo_rate
         one_day_repo_rate = one_day_repo_map.get(day_str)
         if one_day_repo_rate is not None:
             latest_one_day_repo_rate = one_day_repo_rate
-        if latest_fx is None:
+        if any(value is None for value in latest_fx_rates.values()):
             continue
+        fx_rates = {pair: float(value) for pair, value in latest_fx_rates.items() if value is not None}
 
         _mature_repo_lots(state, day)
-        _apply_dividend_events(state, day_str, ex_events, pay_events, latest_fx, config["fees"])
+        _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
+        _apply_hk_connect_portfolio_fee(state, latest_prices, fx_rates, config["fees"])
 
         if day in monthly_spend_days:
             spend = float(config["monthly_spend_cny"])
             if state.cash_cny < spend:
-                _cover_cash_shortfall(state, spend, day, latest_prices, latest_fx, config["fees"], trades)
+                _cover_cash_shortfall(state, spend, day, latest_prices, fx_rates, config["fees"], trades)
             actual_spend = min(spend, state.cash_cny)
             state.cash_cny -= actual_spend
             state.total_spend_cny += actual_spend
             flow -= actual_spend
             period_external_flows["REPO"] = period_external_flows.get("REPO", 0.0) - actual_spend
 
-        before_total, before_values = _portfolio_value(state, latest_prices, latest_fx)
+        before_total, before_values = _portfolio_value(state, latest_prices, fx_rates)
         targets = effective_weights(config, day, latest_prices)
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
         is_rebalance_day = day in reb_days or not initial_rebalance_done
@@ -854,14 +982,14 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
                 config["assets"],
                 day,
                 latest_prices,
-                latest_fx,
+                fx_rates,
                 config["fees"],
                 trades,
                 bool(config.get("allow_fractional_us_shares", True)),
                 targets,
                 float(config["rebalance_band"]),
             )
-            _after_total, after_values = _portfolio_value(state, latest_prices, latest_fx)
+            _after_total, after_values = _portfolio_value(state, latest_prices, fx_rates)
             previous_total = daily_total_assets[-1] if daily_total_assets else float(config["initial_capital_cny"])
             period_return = event_nav / period_start_nav - 1.0
             rebalance_rows.append(
@@ -903,7 +1031,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
             float(config["monthly_spend_cny"]),
         )
 
-        total, values = _portfolio_value(state, latest_prices, latest_fx)
+        total, values = _portfolio_value(state, latest_prices, fx_rates)
         daily_total_assets.append(total)
         daily_flows.append(flow)
         benchmark_values.append(latest_prices.get(benchmark_symbol))
@@ -947,18 +1075,20 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         raise BacktestError("no daily rows created; check data coverage")
     logger.info("run_backtest main loop complete rows=%d trades=%d rebalance=%d seconds=%.3f", len(daily_rows), len(trades), len(rebalance_rows), time.perf_counter() - loop_started_at)
 
+    raise_if_cancelled(should_cancel)
     comparison_started_at = time.perf_counter()
     comparison_totals = _simulate_comparison_series(
         config,
         days,
         price_maps,
-        fx_map,
+        fx_maps,
         repo_map,
         one_day_repo_map,
         ex_events,
         pay_events,
         set(monthly_spend_days),
         set(reb_days),
+        should_cancel,
     )
     for row, payload in zip(daily_rows, daily_payloads):
         comparison_total = comparison_totals.get(row["trade_date"])
@@ -969,6 +1099,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
         row["payload_json"] = json_dumps(payload)
     logger.info("run_backtest comparison complete rows=%d seconds=%.3f", len(comparison_totals), time.perf_counter() - comparison_started_at)
 
+    raise_if_cancelled(should_cancel)
     metrics_started_at = time.perf_counter()
     daily_returns, cumulative_returns, drawdowns = compute_metrics(daily_total_assets, daily_flows, benchmark_values)
     bench_returns = benchmark_returns(benchmark_values)
@@ -1004,6 +1135,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None) -> dict[str, A
     }
     logger.info("run_backtest metrics complete seconds=%.3f", time.perf_counter() - metrics_started_at)
 
+    raise_if_cancelled(should_cancel)
     persist_started_at = time.perf_counter()
     conn.execute(
         "INSERT INTO backtest_runs(run_id, created_at, config_hash, config_json, summary_json) VALUES(?,?,?,?,?)",

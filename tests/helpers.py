@@ -72,6 +72,13 @@ def fixture_fx_rates(start: str, end: str) -> list[dict]:
     ]
 
 
+def fixture_hkd_fx_rates(start: str, end: str) -> list[dict]:
+    return [
+        {"pair": "HKD/CNY", "trade_date": day.isoformat(), "rate": round(0.88 + 0.01 * math.sin(idx / 60), 6), "source": "fixture:fx"}
+        for idx, day in enumerate(business_days(start, end))
+    ]
+
+
 def fixture_dividends(symbol: str, start: str, end: str, currency: str) -> list[dict]:
     rows = []
     for year in range(int(start[:4]), int(end[:4]) + 1):
@@ -107,7 +114,7 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
             }
         ],
     )
-    seeds = {"VOO": 280.0, "512890.SH": 1.0, "510300.SH": 3.0, "518880.SH": 2.5, "000300.SH": 3500.0}
+    seeds = {"VOO": 280.0, "03195.HK": 8.0, "512890.SH": 1.0, "510300.SH": 3.0, "518880.SH": 2.5, "000300.SH": 3500.0}
     for asset in config["assets"]:
         fetch_start = max(start, asset.get("inception_date") or start)
         insert_many(conn, "prices", fixture_price_series(asset["symbol"], fetch_start, end, asset["currency"], seeds[asset["symbol"]]))
@@ -125,3 +132,4 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
     insert_many(conn, "prices", fixture_price_series("000300.SH", start, end, "CNY", seeds["000300.SH"]))
     insert_many(conn, "repo_rates", fixture_repo_rates(start, end, config.get("repo_symbol", "204001")))
     insert_many(conn, "fx_rates", fixture_fx_rates(start, end))
+    insert_many(conn, "fx_rates", fixture_hkd_fx_rates(start, end))

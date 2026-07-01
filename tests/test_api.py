@@ -73,6 +73,7 @@ class ApiTests(unittest.TestCase):
         with opener.open(f"{self.base_url}/", timeout=10) as resp:
             html = resp.read().decode("utf-8")
         self.assertIn("跨市场组合回测", html)
+        self.assertIn("dailyReturnChart", html)
         self.assertNotIn("syncBtn", html)
 
     def test_run_backtest_auto_syncs_when_data_is_missing(self) -> None:
@@ -152,6 +153,38 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(current["status"], "completed")
         self.assertGreater(current["result"]["summary"]["final_asset_cny"], 0)
+
+    def test_unpolled_async_backtest_job_is_cancelled(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        original_execute = main_module.execute_backtest_request
+
+        def slow_execute(settings, write_lock, config, should_cancel=None):
+            for _ in range(50):
+                if should_cancel and should_cancel():
+                    raise main_module.BacktestCancelled(main_module.CANCELLED_JOB_MESSAGE)
+                time.sleep(0.02)
+            return {"run_id": "late", "summary": {"final_asset_cny": 1}, "cache": {"hit": False}}
+
+        server = create_server(port=0, db_path=db_path)
+        server.job_abandoned_seconds = 0.05  # type: ignore[attr-defined]
+        thread = Thread(target=server.serve_forever, daemon=True)
+        try:
+            main_module.execute_backtest_request = slow_execute
+            thread.start()
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}"
+            job = http_json(f"{base_url}/api/backtest/start", {"config": cfg})
+            time.sleep(0.12)
+            main_module.cleanup_jobs(server)
+            current = http_json(f"{base_url}/api/backtest/jobs/{job['job_id']}")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            main_module.execute_backtest_request = original_execute
+
+        self.assertEqual(current["status"], "cancelled")
+        self.assertIn("页面没有继续请求结果", current["message"])
 
 
 if __name__ == "__main__":

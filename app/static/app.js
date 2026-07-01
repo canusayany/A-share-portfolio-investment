@@ -4,14 +4,18 @@ const charts = {};
 const APP_BASE_PATH = window.location.pathname.startsWith("/portfolio/") || window.location.pathname === "/portfolio"
   ? "/portfolio"
   : "";
+const SP500_GROUP = "sp500";
+const SP500_CONTROL_KEY = "sp500_group";
 
 const $ = (id) => document.getElementById(id);
 const fmtMoney = (v) => Number(v || 0).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
 const fmtPct = (v) => `${(Number(v || 0) * 100).toFixed(2)}%`;
+const fmtRate = (v, d = 4) => `${(Number(v || 0) * 100).toFixed(d)}%`;
 const fmtNum = (v, d = 2) => Number(v || 0).toFixed(d);
 
 const STATIC_NAMES = {
   VOO: "标普500指数基金",
+  "03195.HK": "港股通标普500ETF",
   "512890.SH": "红利低波基金",
   "510300.SH": "沪深300基金",
   "518880.SH": "黄金基金",
@@ -31,6 +35,7 @@ const STATIC_NAMES = {
 
 const SHORT_NAMES = {
   VOO: "标普500",
+  "03195.HK": "港股通标普",
   "512890.SH": "红利",
   "510300.SH": "沪深300",
   "518880.SH": "黄金",
@@ -47,7 +52,7 @@ const DATA_KIND_NAMES = {
 
 const SIDE_NAMES = { BUY: "买入", SELL: "卖出" };
 const REASON_NAMES = { rebalance: "再平衡", liquidity_shortfall: "补足现金" };
-const CURRENCY_NAMES = { CNY: "人民币", USD: "美元" };
+const CURRENCY_NAMES = { CNY: "人民币", USD: "美元", HKD: "港币" };
 const SOURCE_NAMES = {
   "sohu:hisHq": "搜狐历史行情",
   "eastmoney:repo_kline": "东方财富逆回购行情",
@@ -60,10 +65,54 @@ const SOURCE_NAMES = {
   "tushare:index_daily": "专业指数日线",
   "tushare:fund_div": "专业基金分红",
   "tushare:fund_adj": "专业复权因子",
+  "eastmoney:hk_kline": "东方财富港股行情",
+  "stooq:hk": "Stooq 港股行情",
+  "public:dividend_unavailable_empty": "公开分红源不可用，按无分红覆盖",
+  "yahoo:3195.HK": "雅虎港股行情",
+  "yahoo:HKDCNY=X": "雅虎港币汇率",
 };
 
+const SP500_ROUTE_DETAILS = {
+  us_sp500: [
+    ["市场", "美股"],
+    ["币种", "USD/CNY"],
+    ["费用", "IBKR/分红税"],
+  ],
+  hk_sp500_connect: [
+    ["市场", "港股通"],
+    ["币种", "HKD/CNY"],
+    ["费用", "佣金/交易费/结算费/组合费"],
+  ],
+};
+
+function isSp500Asset(asset) {
+  return asset.exclusive_group === SP500_GROUP || ["us_sp500", "hk_sp500_connect"].includes(asset.key);
+}
+
+function sp500Assets() {
+  return (config?.assets || []).filter(isSp500Asset);
+}
+
+function selectedSp500Asset() {
+  const assets = sp500Assets();
+  return assets.find((asset) => asset.enabled) || assets[0];
+}
+
+function selectedSp500Weight() {
+  const selected = selectedSp500Asset();
+  return Number(selected?.target_weight || 0);
+}
+
+function sp500RouteDetails(key) {
+  return SP500_ROUTE_DETAILS[key] || [];
+}
+
+function assetBySymbol(symbol) {
+  return config?.assets?.find((asset) => asset.symbol === symbol);
+}
+
 function assetName(symbol) {
-  const configured = config?.assets?.find((asset) => asset.symbol === symbol);
+  const configured = assetBySymbol(symbol);
   const repo = config?.repo_options?.find((option) => option.symbol === symbol);
   if (repo) return repo.name;
   return STATIC_NAMES[symbol] || configured?.name || symbol;
@@ -113,13 +162,43 @@ function humanizeError(text) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(`${APP_BASE_PATH}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || response.statusText);
-  return data;
+  const method = (options.method || "GET").toUpperCase();
+  const retryable = method === "GET";
+  const maxAttempts = retryable ? 3 : 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(`${APP_BASE_PATH}${path}`, {
+        headers: { "Content-Type": "application/json" },
+        ...options,
+      });
+      const text = await response.text();
+      let data = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error(`接口返回内容不是 JSON：${response.status} ${response.statusText}`);
+        }
+      }
+      if (!response.ok) {
+        const message = data.error || response.statusText || `HTTP ${response.status}`;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    } catch (error) {
+      lastError = error;
+      const retryStatus = [502, 503, 504].includes(error.status);
+      if (!retryable || attempt >= maxAttempts || (!retryStatus && error.status)) break;
+      await sleep(500 * attempt);
+    }
+  }
+  if (lastError?.message === "Failed to fetch") {
+    throw new Error("网络请求失败，已自动重试仍未成功，请稍后再试");
+  }
+  throw lastError;
 }
 
 function sleep(ms) {
@@ -131,8 +210,68 @@ function setMessage(text, isError = false) {
   $("message").className = isError ? "message error" : "message";
 }
 
+function feeInputNumber(id, fallback) {
+  return Number($(id)?.value ?? fallback ?? 0);
+}
+
+function ibkrPlanLabel(plan) {
+  return {
+    pro_fixed: "固定费率",
+    pro_tiered: "阶梯费率",
+    lite: "免佣类型",
+  }[plan] || plan;
+}
+
+function renderFeeSummary() {
+  const host = $("feeSummary");
+  if (!host || !config) return;
+  const voo = assetBySymbol("VOO") || {};
+  const hk = assetBySymbol("03195.HK") || {};
+  const hkFee = config.fees.hk_connect_etf;
+  const ibkr = config.fees.ibkr_us_etf;
+  const cnCommission = feeInputNumber("cnCommission", config.fees.cn_etf.commission_rate);
+  const hkCommission = feeInputNumber("hkCommission", hkFee.broker_commission_rate);
+  const hkFxBps = feeInputNumber("hkFxBps", hkFee.fx_spread_bps);
+  const hkPortfolio = feeInputNumber("hkPortfolioFee", hkFee.portfolio_fee_annual_rate);
+  const usDividendTax = feeInputNumber("usDividendTax", config.fees.tax.us_dividend_withholding_rate);
+  const officialHkPerSide = hkFee.trading_fee_rate + hkFee.transaction_levy_rate + hkFee.afrc_transaction_levy_rate;
+  const fundGap = Number(hk.expense_ratio || 0) - Number(voo.expense_ratio || 0);
+  const rows = [
+    ["基金内扣", "03195", fmtRate(hk.expense_ratio, 2), "已在净值/价格中体现"],
+    ["基金内扣", "VOO", fmtRate(voo.expense_ratio, 2), "已在净值/价格中体现"],
+    ["基金内扣差", "03195-VOO", fmtRate(fundGap, 2), "03195 长期拖累更高"],
+    ["03195 交易", "官方规费", `${fmtRate(officialHkPerSide, 4)}/边`, "交易费+交易征费+会财局征费"],
+    ["03195 交易", "股份交收费", `${fmtRate(hkFee.stock_settlement_fee_rate, 4)}/边`, "当前按保守现行口径"],
+    ["03195 交易", "ETF印花税", fmtRate(hkFee.stamp_duty_rate, 2), "暂按 0"],
+    ["03195 持仓", "港股通组合费", `${fmtRate(hkPortfolio, 3)}/年`, "按日折算"],
+    ["03195 假设", "券商佣金", `${fmtRate(hkCommission, 3)}/边`, "用户可调"],
+    ["03195 假设", "汇兑点差", `${hkFxBps.toFixed(0)} bp`, "用户可调"],
+    ["VOO 交易", "IBKR佣金", ibkrPlanLabel($("ibkrPlan")?.value || ibkr.plan), "用户可调"],
+    ["VOO 卖出", "SEC费", `${fmtRate(ibkr.sec_transaction_fee_rate, 4)}`, "仅卖出"],
+    ["VOO 卖出", "FINRA TAF", `$${fmtNum(ibkr.finra_taf_per_share_usd, 6)}/股`, `上限 $${fmtNum(ibkr.finra_taf_cap_usd, 2)}`],
+    ["VOO 税务", "分红预扣税", fmtRate(usDividendTax, 0), "最差预期可用 30%"],
+    ["境内 ETF", "佣金", `${fmtRate(cnCommission, 3)}/边`, "用户可调"],
+  ];
+  host.innerHTML = `
+    <div class="fee-cards">
+      ${rows.map(([group, item, value, note]) => `
+        <div class="fee-card">
+          <span>${group}</span>
+          <strong>${item}</strong>
+          <b>${value}</b>
+          <small>${note}</small>
+        </div>
+      `).join("")}
+    </div>
+    <div class="fee-note">ETF基金内扣费用已反映在历史价格或净值中，回测不额外重复扣除。</div>
+  `;
+}
+
 function readConfig() {
   const next = structuredClone(config);
+  const sp500SelectedKey = $("sp500Type")?.value;
+  const sp500Enabled = $("enabled_sp500_group")?.checked ?? false;
+  const sp500Weight = Number($("weight_sp500_group")?.value ?? 0);
   next.initial_capital_cny = Number($("initialCapital").value);
   next.start_date = $("startDate").value;
   next.end_date = $("endDate").value;
@@ -140,21 +279,39 @@ function readConfig() {
   next.rebalance_band = Number($("rebalanceBand").value);
   next.monthly_spend_cny = Number($("monthlySpend").value);
   next.repo_symbol = $("repoSymbol").value;
-  next.assets = next.assets.map((asset) => ({
-    ...asset,
-    enabled: $(`enabled_${asset.key}`).checked,
-    target_weight: Number($(`weight_${asset.key}`).value),
-  }));
+  next.assets = next.assets.map((asset) => {
+    if (isSp500Asset(asset)) {
+      const selected = asset.key === sp500SelectedKey;
+      return {
+        ...asset,
+        enabled: sp500Enabled && selected,
+        target_weight: selected ? sp500Weight : 0,
+      };
+    }
+    return {
+      ...asset,
+      enabled: $(`enabled_${asset.key}`).checked,
+      target_weight: Number($(`weight_${asset.key}`).value),
+    };
+  });
   next.fees.cn_etf.commission_rate = Number($("cnCommission").value);
   next.fees.ibkr_us_etf.plan = $("ibkrPlan").value;
   next.fees.fx.bank_out_spread_bps = Number($("fxOutBps").value);
   next.fees.fx.bank_in_spread_bps = Number($("fxInBps").value);
+  next.fees.hk_connect_etf.broker_commission_rate = Number($("hkCommission").value);
+  next.fees.hk_connect_etf.fx_spread_bps = Number($("hkFxBps").value);
+  next.fees.hk_connect_etf.portfolio_fee_annual_rate = Number($("hkPortfolioFee").value);
   next.fees.tax.us_dividend_withholding_rate = Number($("usDividendTax").value);
   return next;
 }
 
 function updateRepoWeight() {
-  const enabledWeight = config.assets.reduce((sum, asset) => {
+  let enabledWeight = 0;
+  if ($("enabled_sp500_group")) {
+    enabledWeight += $("enabled_sp500_group").checked ? Number($("weight_sp500_group").value) : 0;
+    updateSp500Route();
+  }
+  enabledWeight += config.assets.filter((asset) => !isSp500Asset(asset)).reduce((sum, asset) => {
     const enabledEl = $(`enabled_${asset.key}`);
     const weightEl = $(`weight_${asset.key}`);
     return sum + ((enabledEl?.checked ?? asset.enabled) ? Number(weightEl?.value ?? asset.target_weight) : 0);
@@ -162,6 +319,15 @@ function updateRepoWeight() {
   const repoWeight = Math.max(1 - enabledWeight, 0);
   $("repoWeight").textContent = fmtPct(repoWeight);
   $("repoWeight").style.color = enabledWeight > 1 ? "#b42318" : "";
+}
+
+function updateSp500Route() {
+  const route = $("sp500Route");
+  const selectedKey = $("sp500Type")?.value;
+  if (!route || !selectedKey) return;
+  route.innerHTML = sp500RouteDetails(selectedKey)
+    .map(([label, value]) => `<span><em>${label}</em>${value}</span>`)
+    .join("");
 }
 
 function renderControls() {
@@ -178,11 +344,19 @@ function renderControls() {
   $("ibkrPlan").value = config.fees.ibkr_us_etf.plan;
   $("fxOutBps").value = config.fees.fx.bank_out_spread_bps;
   $("fxInBps").value = config.fees.fx.bank_in_spread_bps;
+  $("hkCommission").value = config.fees.hk_connect_etf.broker_commission_rate;
+  $("hkFxBps").value = config.fees.hk_connect_etf.fx_spread_bps;
+  $("hkPortfolioFee").value = config.fees.hk_connect_etf.portfolio_fee_annual_rate;
   $("usDividendTax").value = config.fees.tax.us_dividend_withholding_rate;
+  ["cnCommission", "fxOutBps", "fxInBps", "hkCommission", "hkFxBps", "hkPortfolioFee", "usDividendTax"].forEach((id) => {
+    $(id).addEventListener("input", renderFeeSummary);
+  });
+  $("ibkrPlan").addEventListener("change", renderFeeSummary);
 
   const host = $("assetControls");
   host.innerHTML = "";
-  for (const asset of config.assets) {
+  renderSp500Control(host);
+  for (const asset of config.assets.filter((item) => !isSp500Asset(item))) {
     const row = document.createElement("div");
     row.className = "asset-control";
     row.innerHTML = `
@@ -202,6 +376,38 @@ function renderControls() {
     $("bandValue").textContent = fmtPct($("rebalanceBand").value);
   });
   updateRepoWeight();
+  renderFeeSummary();
+}
+
+function renderSp500Control(host) {
+  const assets = sp500Assets();
+  if (!assets.length) return;
+  const selected = selectedSp500Asset();
+  const enabled = Boolean(selected?.enabled);
+  const weight = selectedSp500Weight();
+  const row = document.createElement("div");
+  row.className = "asset-control asset-control-group";
+  row.innerHTML = `
+    <input id="enabled_${SP500_CONTROL_KEY}" type="checkbox" ${enabled ? "checked" : ""} />
+    <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" />
+    <strong id="weight_label_${SP500_CONTROL_KEY}">${fmtPct(weight)}</strong>
+    <div class="asset-name">标普500</div>
+    <label class="asset-type">
+      类型
+      <select id="sp500Type">
+        ${assets.map((asset) => `<option value="${asset.key}" ${asset.key === selected?.key ? "selected" : ""}>${asset.choice_label || assetName(asset.symbol)}</option>`).join("")}
+      </select>
+    </label>
+    <div id="sp500Route" class="asset-route"></div>
+  `;
+  host.appendChild(row);
+  row.querySelector(`#enabled_${SP500_CONTROL_KEY}`).addEventListener("change", updateRepoWeight);
+  row.querySelector(`#weight_${SP500_CONTROL_KEY}`).addEventListener("input", (event) => {
+    row.querySelector(`#weight_label_${SP500_CONTROL_KEY}`).textContent = fmtPct(event.target.value);
+    updateRepoWeight();
+  });
+  row.querySelector("#sp500Type").addEventListener("change", updateRepoWeight);
+  updateSp500Route();
 }
 
 function renderStatus(rows) {
@@ -304,6 +510,27 @@ function ensureChart(id) {
   return charts[id];
 }
 
+function resizeCharts() {
+  Object.values(charts).forEach((chart) => chart.resize());
+}
+
+let chartResizeTimer = null;
+
+function queueChartResize() {
+  window.clearTimeout(chartResizeTimer);
+  chartResizeTimer = window.setTimeout(resizeCharts, 80);
+}
+
+function lineZoomOption() {
+  return {
+    grid: { left: 58, right: 20, top: 54, bottom: 58 },
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0, filterMode: "none", zoomOnMouseWheel: true, moveOnMouseMove: true },
+      { type: "slider", xAxisIndex: 0, filterMode: "none", height: 18, bottom: 14 },
+    ],
+  };
+}
+
 function renderCharts(series) {
   if (!series.length) return;
   if (!window.echarts) {
@@ -312,6 +539,7 @@ function renderCharts(series) {
   }
   const dates = series.map((row) => row.trade_date);
   ensureChart("assetChart").setOption({
+    ...lineZoomOption(),
     title: { text: "总资产", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis" },
     xAxis: { type: "category", data: dates },
@@ -319,6 +547,7 @@ function renderCharts(series) {
     series: [{ type: "line", name: "总资产", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none" }],
   });
   ensureChart("comparisonChart").setOption({
+    ...lineZoomOption(),
     title: { text: "总资产对比", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => `￥${fmtMoney(v)}` },
     legend: { top: 4, right: 10 },
@@ -336,6 +565,7 @@ function renderCharts(series) {
     ],
   });
   ensureChart("returnChart").setOption({
+    ...lineZoomOption(),
     title: { text: "收益率对比沪深300", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
     legend: { top: 4, right: 10 },
@@ -346,7 +576,16 @@ function renderCharts(series) {
       { type: "line", name: "沪深300", data: series.map((row) => row.benchmark_return), smooth: true, symbol: "none" },
     ],
   });
+  ensureChart("dailyReturnChart").setOption({
+    ...lineZoomOption(),
+    title: { text: "单日收益", left: 8, top: 4, textStyle: { fontSize: 14 } },
+    tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
+    xAxis: { type: "category", data: dates },
+    yAxis: { type: "value", axisLabel: { formatter: (v) => `${(v * 100).toFixed(1)}%` } },
+    series: [{ type: "line", name: "单日收益", data: series.map((row) => row.daily_return), smooth: false, symbol: "none" }],
+  });
   ensureChart("drawdownChart").setOption({
+    ...lineZoomOption(),
     title: { text: "回撤", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
     xAxis: { type: "category", data: dates },
@@ -356,6 +595,7 @@ function renderCharts(series) {
 
   const symbols = Object.keys(series.at(-1)?.payload?.values || {});
   ensureChart("weightChart").setOption({
+    ...lineZoomOption(),
     title: { text: "资产权重", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
     legend: { top: 4, right: 10 },
@@ -370,6 +610,7 @@ function renderCharts(series) {
       symbol: "none",
     })),
   });
+  queueChartResize();
 }
 
 function renderFallbackCharts(series) {
@@ -383,6 +624,7 @@ function renderFallbackCharts(series) {
     { name: "策略", color: "#1f7a5a", points: makePointSeries(series.map((row) => row.cumulative_return)) },
     { name: "沪深300", color: "#2f5aa8", points: makePointSeries(series.map((row) => row.benchmark_return)) },
   ], true);
+  drawFallbackChart("dailyReturnChart", "单日收益", [{ name: "单日收益", color: "#7a3db8", points: makePointSeries(series.map((row) => row.daily_return)) }], true);
   drawFallbackChart("drawdownChart", "回撤", [{ name: "回撤", color: "#b42318", points: makePointSeries(series.map((row) => row.drawdown)) }], true);
   const symbols = Object.keys(series.at(-1)?.payload?.weights || {});
   const colors = ["#1f7a5a", "#2f5aa8", "#b45f06", "#7a3db8", "#667085"];
@@ -513,6 +755,7 @@ async function waitForBacktestJob(jobId) {
     const job = await api(`/api/backtest/jobs/${jobId}`);
     if (job.status === "completed") return job.result;
     if (job.status === "failed") throw new Error(job.error || job.message || "回测失败");
+    if (job.status === "cancelled") throw new Error(job.error || job.message || "回测任务已取消");
     setMessage(job.message || (job.status === "running" ? "正在运行回测..." : "回测任务排队中..."));
     pollCount += 1;
     await sleep(Math.min(1200 + pollCount * 200, 5000));
@@ -558,7 +801,7 @@ async function runBacktest() {
       setMessage("参数一致，已直接读取历史回测结果");
     } else if (result.data_sync?.triggered) {
       const quality = summarizeDataQuality(result.status || []);
-      setMessage(`数据已自动补足，回测完成：${quality.real} 项真实/公开源`);
+      setMessage(quality.real > 0 ? `数据已自动补足，回测完成：${quality.real} 项真实/公开源` : "数据已自动补足，回测完成");
     } else {
       setMessage("数据充足，回测完成");
     }
@@ -574,7 +817,7 @@ async function init() {
   renderControls();
   await loadStatus();
   $("runBtn").addEventListener("click", runBacktest);
-  window.addEventListener("resize", () => Object.values(charts).forEach((chart) => chart.resize()));
+  window.addEventListener("resize", queueChartResize);
 }
 
 init().catch((error) => setMessage(error.message, true));
