@@ -22,7 +22,7 @@ from app.services.data_sync import required_data_missing, sync_all
 
 logger = logging.getLogger(__name__)
 MAX_LOG_BYTES = 5 * 1024 * 1024
-DEFAULT_ABANDONED_JOB_SECONDS = 30.0
+DEFAULT_ABANDONED_JOB_SECONDS = 120.0
 DEFAULT_JOB_RETENTION_SECONDS = 600.0
 JOB_CLEANUP_INTERVAL_SECONDS = 5.0
 CANCELLED_JOB_MESSAGE = "任务已取消：页面没有继续请求结果"
@@ -56,7 +56,7 @@ class SingleFileSizeHandler(logging.FileHandler):
 
 
 def response_bytes(data: object) -> bytes:
-    return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def iso_now() -> str:
@@ -234,10 +234,14 @@ def cleanup_jobs(server) -> None:
             elif status in {"completed", "failed", "cancelled"} and now - activity > retention_seconds:
                 to_delete.append(job_id)
         for job_id in to_delete:
+            job = server.jobs.get(job_id)  # type: ignore[attr-defined]
             server.jobs.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_activity.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_cancel_events.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_futures.pop(job_id, None)  # type: ignore[attr-defined]
+            client_request_id = job.get("client_request_id") if job else None
+            if client_request_id:
+                server.job_request_index.pop(client_request_id, None)  # type: ignore[attr-defined]
     for job_id in to_cancel:
         cancel_job(server, job_id)
     if to_delete:
@@ -439,20 +443,35 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, result)
             elif path == "/api/backtest/start":
                 config = normalize_config(payload.get("config") or payload)
+                client_request_id = str(payload.get("client_request_id") or "").strip()
                 job_id = str(uuid.uuid4())
                 now_mono = time.monotonic()
+                if client_request_id:
+                    with self.jobs_lock:
+                        existing_job_id = self.server.job_request_index.get(client_request_id)  # type: ignore[attr-defined]
+                        existing_job = self.jobs.get(existing_job_id) if existing_job_id else None
+                        if existing_job:
+                            self.server.job_activity[existing_job_id] = now_mono  # type: ignore[index,attr-defined]
+                            existing_job["last_requested_at"] = iso_now()
+                            existing_job["updated_at"] = iso_now()
+                            self.jobs[existing_job_id] = existing_job  # type: ignore[index]
+                            self.send_json(HTTPStatus.ACCEPTED, existing_job)
+                            return
                 job = {
                     "job_id": job_id,
                     "status": "queued",
                     "message": "回测任务已进入队列",
                     "created_at": iso_now(),
                     "updated_at": iso_now(),
+                    "client_request_id": client_request_id or None,
                     "cancel_if_unrequested_seconds": self.server.job_abandoned_seconds,  # type: ignore[attr-defined]
                 }
                 with self.jobs_lock:
                     self.jobs[job_id] = job
                     self.server.job_activity[job_id] = now_mono  # type: ignore[attr-defined]
                     self.server.job_cancel_events[job_id] = Event()  # type: ignore[attr-defined]
+                    if client_request_id:
+                        self.server.job_request_index[client_request_id] = job_id  # type: ignore[attr-defined]
                 future = self.server.job_executor.submit(run_backtest_job, self.server, job_id, config)  # type: ignore[attr-defined]
                 with self.jobs_lock:
                     self.server.job_futures[job_id] = future  # type: ignore[attr-defined]
@@ -560,6 +579,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | Path
     server.job_activity = {}  # type: ignore[attr-defined]
     server.job_cancel_events = {}  # type: ignore[attr-defined]
     server.job_futures = {}  # type: ignore[attr-defined]
+    server.job_request_index = {}  # type: ignore[attr-defined]
     server.job_abandoned_seconds = float(os.getenv("PORTFOLIO_JOB_ABANDONED_SECONDS", DEFAULT_ABANDONED_JOB_SECONDS))  # type: ignore[attr-defined]
     server.job_retention_seconds = float(os.getenv("PORTFOLIO_JOB_RETENTION_SECONDS", DEFAULT_JOB_RETENTION_SECONDS))  # type: ignore[attr-defined]
     server.job_executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[attr-defined]

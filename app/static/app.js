@@ -162,15 +162,17 @@ function humanizeError(text) {
 }
 
 async function api(path, options = {}) {
-  const method = (options.method || "GET").toUpperCase();
-  const retryable = method === "GET";
-  const maxAttempts = retryable ? 3 : 1;
+  const { attempts, retry = false, retryDelayMs = 500, ...fetchOptions } = options;
+  const method = (fetchOptions.method || "GET").toUpperCase();
+  const retryable = method === "GET" || retry;
+  const maxAttempts = attempts || (retryable ? (method === "GET" ? 5 : 3) : 1);
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const response = await fetch(`${APP_BASE_PATH}${path}`, {
-        headers: { "Content-Type": "application/json" },
-        ...options,
+        ...fetchOptions,
+        headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+        cache: method === "GET" ? "no-store" : fetchOptions.cache,
       });
       const text = await response.text();
       let data = {};
@@ -190,19 +192,29 @@ async function api(path, options = {}) {
       return data;
     } catch (error) {
       lastError = error;
-      const retryStatus = [502, 503, 504].includes(error.status);
+      const retryStatus = [408, 429, 502, 503, 504].includes(error.status);
       if (!retryable || attempt >= maxAttempts || (!retryStatus && error.status)) break;
-      await sleep(500 * attempt);
+      await sleep(Math.min(retryDelayMs * attempt * attempt, 5000));
     }
   }
-  if (lastError?.message === "Failed to fetch") {
-    throw new Error("网络请求失败，已自动重试仍未成功，请稍后再试");
+  if (isNetworkError(lastError)) {
+    throw new Error(`网络请求失败，已自动重试 ${maxAttempts - 1} 次仍未成功，请稍后再试`);
   }
   throw lastError;
 }
 
+function isNetworkError(error) {
+  if (!error || error.status) return false;
+  return error.name === "TypeError" || /Failed to fetch|NetworkError|Load failed/i.test(error.message || "");
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createClientRequestId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function setMessage(text, isError = false) {
@@ -751,8 +763,19 @@ async function loadStatus() {
 
 async function waitForBacktestJob(jobId) {
   let pollCount = 0;
+  let transientFailures = 0;
   while (true) {
-    const job = await api(`/api/backtest/jobs/${jobId}`);
+    let job = null;
+    try {
+      job = await api(`/api/backtest/jobs/${jobId}`, { attempts: 5, retryDelayMs: 700 });
+      transientFailures = 0;
+    } catch (error) {
+      transientFailures += 1;
+      if (!isNetworkError(error) || transientFailures > 4) throw error;
+      setMessage("网络短暂波动，正在继续等待回测结果...");
+      await sleep(Math.min(1500 * transientFailures, 6000));
+      continue;
+    }
     if (job.status === "completed") return job.result;
     if (job.status === "failed") throw new Error(job.error || job.message || "回测失败");
     if (job.status === "cancelled") throw new Error(job.error || job.message || "回测任务已取消");
@@ -762,21 +785,33 @@ async function waitForBacktestJob(jobId) {
   }
 }
 
+async function loadBacktestResultSections(runId) {
+  setMessage("回测完成，正在加载净值曲线...");
+  const series = await api(`/api/backtest/${runId}/series`, { attempts: 6, retryDelayMs: 700 });
+  setMessage("正在加载再平衡记录...");
+  const rebalance = await api(`/api/backtest/${runId}/rebalance`, { attempts: 5, retryDelayMs: 700 });
+  setMessage("正在加载交易流水...");
+  const trades = await api(`/api/backtest/${runId}/trades`, { attempts: 5, retryDelayMs: 700 });
+  return { series, rebalance, trades };
+}
+
 async function runBacktest() {
   const button = $("runBtn");
   button.disabled = true;
   setMessage("正在提交回测任务...");
   try {
-    const job = await api("/api/backtest/start", { method: "POST", body: JSON.stringify({ config: readConfig() }) });
+    const job = await api("/api/backtest/start", {
+      method: "POST",
+      body: JSON.stringify({ config: readConfig(), client_request_id: createClientRequestId() }),
+      retry: true,
+      attempts: 3,
+      retryDelayMs: 700,
+    });
     setMessage(job.message || "回测任务已进入队列");
     const result = await waitForBacktestJob(job.job_id);
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
-    const [series, rebalance, trades] = await Promise.all([
-      api(`/api/backtest/${currentRunId}/series`),
-      api(`/api/backtest/${currentRunId}/rebalance`),
-      api(`/api/backtest/${currentRunId}/trades`),
-    ]);
+    const { series, rebalance, trades } = await loadBacktestResultSections(currentRunId);
     const computedSeries = computeSeriesMetrics(series.series || []);
     renderSummary(deriveSummary(result.summary, computedSeries));
     renderCharts(computedSeries);

@@ -1,0 +1,800 @@
+2026-06-26 11:19:37,663 INFO __main__ http request method=GET path=/api/backtest/jobs/04bfb572-e505-4e81-b3b0-304eb7a170b0 status=404 bytes=30 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:19:53,635 INFO __main__ http request method=GET path=/ status=200 bytes=3921 seconds=0.074 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 11:19:53,757 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 11:35:16,067 INFO __main__ backtest request start id=257db8d1 range=2012-01-01..2026-06-20 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-06-26 11:35:16,068 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:35:16,070 INFO __main__ backtest lock acquired id=257db8d1 wait_seconds=0.003
+2026-06-26 11:35:16,072 INFO __main__ http request method=GET path=/api/backtest/jobs/6d28043c-cb12-4df9-a26a-958952595b47 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:35:16,156 INFO __main__ backtest data check id=257db8d1 seconds=0.079 missing=[]
+2026-06-26 11:35:16,160 INFO __main__ backtest cache miss id=257db8d1 seconds=0.001
+2026-06-26 11:35:16,168 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-06-20 assets=['VOO', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-06-26 11:35:16,250 INFO app.services.backtest_engine run_backtest data loaded days=3775 price_rows=14664 fx_rows=3765 repo_rows=3488 one_day_repo_rows=3488 dividend_events=70 seconds=0.062
+2026-06-26 11:35:16,471 INFO app.services.backtest_engine run_backtest main loop complete rows=3775 trades=35 rebalance=15 seconds=0.217
+2026-06-26 11:35:16,706 INFO app.services.backtest_engine run_backtest comparison complete rows=3775 seconds=0.234
+2026-06-26 11:35:16,712 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.003
+2026-06-26 11:35:16,746 INFO app.services.backtest_engine run_backtest persisted run_id=f3ef7e68-281f-41bf-9ae2-43aaef82dcb1 rows=3775 trades=35 rebalance=15 seconds=0.033 total_seconds=0.579
+2026-06-26 11:35:16,752 INFO __main__ backtest engine complete id=257db8d1 seconds=0.586 cache={'hit': False, 'mode': '重新计算'}
+2026-06-26 11:35:16,755 INFO __main__ backtest request complete id=257db8d1 total_seconds=0.689
+2026-06-26 11:35:17,484 INFO __main__ http request method=GET path=/api/backtest/jobs/6d28043c-cb12-4df9-a26a-958952595b47 status=200 bytes=1276 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:35:17,498 INFO __main__ http request method=GET path=/api/backtest/f3ef7e68-281f-41bf-9ae2-43aaef82dcb1/trades status=200 bytes=14626 seconds=0.008 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:35:17,501 INFO __main__ http request method=GET path=/api/backtest/f3ef7e68-281f-41bf-9ae2-43aaef82dcb1/rebalance status=200 bytes=30292 seconds=0.014 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:35:17,941 INFO __main__ http request method=GET path=/api/backtest/f3ef7e68-281f-41bf-9ae2-43aaef82dcb1/series status=200 bytes=4379366 seconds=0.455 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:36:57,155 INFO __main__ http request method=GET path=/ status=200 bytes=3921 seconds=0.005 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 11:37:56,100 INFO __main__ http request method=GET path=/ status=200 bytes=3921 seconds=0.014 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:37:56,124 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=3465 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:37:56,124 INFO __main__ http request method=GET path=/static/app.js?v=20260626-chart-zoom status=200 bytes=26838 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:37:56,213 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:37:56,294 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2198 seconds=0.040 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-06-26 11:45:19,775 INFO __main__ backtest jobs cleaned count=1
+2026-06-26 16:59:54,711 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2198 seconds=0.452 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:04:19,024 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2217 seconds=0.059 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:11,599 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:11,648 INFO __main__ backtest request start id=4b52f6cc range=2012-01-01..2026-06-26 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-06-26 17:05:11,649 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.002 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:11,653 INFO __main__ backtest lock acquired id=4b52f6cc wait_seconds=0.005
+2026-06-26 17:05:11,796 INFO __main__ backtest data check id=4b52f6cc seconds=0.129 missing=['dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH', 'dividends:VOO', 'fx_rates:USD/CNY', 'prices:000300.SH', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001']
+2026-06-26 17:05:11,799 INFO app.services.data_sync sync_all start range=2012-01-01..2026-06-26 missing_items=['dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH', 'dividends:VOO', 'fx_rates:USD/CNY', 'prices:000300.SH', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001'] plan_prices=['510300.SH', '512890.SH', '518880.SH'] plan_dividends=['510300.SH', '512890.SH', '518880.SH', 'VOO'] plan_index=True plan_repo=['204001'] plan_fx=True
+2026-06-26 17:05:12,198 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.370 warnings=0 missing=[]
+2026-06-26 17:05:12,692 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:13,738 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:13,939 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=3 dividends=0 adj=0 seconds=2.113 warnings=4 missing=['dividends:512890.SH']
+2026-06-26 17:05:14,694 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=3 dividends=0 adj=0 seconds=2.866 warnings=3 missing=['dividends:510300.SH']
+2026-06-26 17:05:14,783 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:15,828 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:16,133 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=3 dividends=0 adj=0 seconds=4.307 warnings=4 missing=['dividends:518880.SH']
+2026-06-26 17:05:16,712 INFO app.services.data_sync sync index complete ranges=1 rows=3 seconds=0.574
+2026-06-26 17:05:16,872 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:17,575 INFO app.services.data_sync sync repo complete ranges=1 rows=3 seconds=0.862
+2026-06-26 17:05:17,913 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:18,126 INFO app.services.data_sync sync fx source complete source=yahoo range=2026-06-24..2026-06-25 rows=1
+2026-06-26 17:05:18,949 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:19,989 INFO app.services.data_sync sync fx source complete source=frankfurter range=2026-06-24..2026-06-25 rows=1
+2026-06-26 17:05:19,989 INFO app.services.data_sync sync fx complete ranges=1 rows=2 seconds=2.417
+2026-06-26 17:05:19,989 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:05:19,989 INFO app.services.data_sync sync_all complete seconds=8.189 inserted={'prices': 12, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 3, 'fx_rates': 2} missing=['dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH'] warnings=9
+2026-06-26 17:05:19,997 INFO __main__ backtest sync complete id=4b52f6cc seconds=8.192 result={'inserted': {'prices': 12, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 3, 'fx_rates': 2}, 'warnings': ['DataSrc Postgres returned no USD/CNY rows', 'DataSrc Postgres returned no price rows for 000300.SH', 'DataSrc Postgres returned no price rows for 512890.SH', 'DataSrc Postgres returned no price rows for 518880.SH', 'DataSrc Postgres returned no repo rows for 204001', 'TUSHARE_TOKEN is not configured', 'skip Tushare adj for 510300.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 512890.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 518880.SH because primary Tushare price source is unavailable'], 'missing_data': ['dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH']}
+2026-06-26 17:05:20,082 INFO __main__ backtest post-sync data check id=4b52f6cc seconds=0.052 missing=['dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH']
+2026-06-26 17:05:20,082 WARNING __main__ backtest job failed id=7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 error=自动补足数据后仍缺少：dividends:510300.SH、dividends:512890.SH、dividends:518880.SH
+2026-06-26 17:05:21,034 INFO __main__ http request method=GET path=/api/backtest/jobs/7690ecf7-c2ef-4f35-9e66-2ea328ef5a18 status=200 bytes=575 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:09:36,939 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.002 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:09:36,994 INFO __main__ backtest request start id=ca0d5fb2 range=2012-01-01..2026-06-26 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-06-26 17:09:36,995 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:09:36,996 INFO __main__ backtest lock acquired id=ca0d5fb2 wait_seconds=0.002
+2026-06-26 17:09:37,085 INFO __main__ backtest data check id=ca0d5fb2 seconds=0.082 missing=[]
+2026-06-26 17:09:37,085 INFO __main__ backtest cache miss id=ca0d5fb2 seconds=0.001
+2026-06-26 17:09:37,096 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-06-26 assets=['VOO', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-06-26 17:09:37,173 INFO app.services.backtest_engine run_backtest data loaded days=3780 price_rows=14684 fx_rows=3769 repo_rows=3492 one_day_repo_rows=3492 dividend_events=70 seconds=0.054
+2026-06-26 17:09:37,503 INFO app.services.backtest_engine run_backtest main loop complete rows=3780 trades=35 rebalance=15 seconds=0.319
+2026-06-26 17:09:37,891 INFO app.services.backtest_engine run_backtest comparison complete rows=3780 seconds=0.395
+2026-06-26 17:09:37,909 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.006
+2026-06-26 17:09:37,973 INFO app.services.backtest_engine run_backtest persisted run_id=d621a528-c54e-402f-911a-ff287f9f38af rows=3780 trades=35 rebalance=15 seconds=0.060 total_seconds=0.878
+2026-06-26 17:09:37,981 INFO __main__ backtest engine complete id=ca0d5fb2 seconds=0.887 cache={'hit': False, 'mode': '重新计算'}
+2026-06-26 17:09:37,984 INFO __main__ backtest request complete id=ca0d5fb2 total_seconds=0.991
+2026-06-26 17:09:38,023 INFO __main__ http request method=GET path=/api/backtest/jobs/808c9ee0-ce8a-4d41-9a2b-fe42a2ee2877 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:09:39,053 INFO __main__ http request method=GET path=/api/backtest/jobs/808c9ee0-ce8a-4d41-9a2b-fe42a2ee2877 status=200 bytes=1277 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:09:57,993 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2269 seconds=0.066 client=127.0.0.1 ua=curl/8.19.0
+2026-06-26 17:19:38,495 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 17:18:22,902 INFO __main__ http request method=GET path=/ status=200 bytes=4260 seconds=0.087 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:18:22,926 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=3465 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:18:22,927 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-connect status=200 bytes=27534 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:18:23,429 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4411 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:18:23,547 INFO __main__ http request method=GET path=/favicon.ico status=404 bytes=0 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:18:23,810 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2269 seconds=0.256 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:01,455 INFO __main__ http request method=GET path=/ status=200 bytes=4260 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:01,465 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=3465 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:01,469 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-connect status=200 bytes=27534 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:01,762 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4411 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:01,795 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2269 seconds=0.021 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:17,171 INFO __main__ http request method=GET path=/ status=200 bytes=4260 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:17,186 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-connect status=200 bytes=27534 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:17,186 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=3465 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:17,485 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4411 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:19:17,524 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2269 seconds=0.028 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:00,163 INFO __main__ http request method=GET path=/ status=200 bytes=4262 seconds=0.180 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:00,191 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=3575 seconds=0.006 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:00,193 INFO __main__ http request method=GET path=/static/app.js?v=20260701-sp500-choice status=200 bytes=30161 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:00,518 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:00,920 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2269 seconds=0.371 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:07,982 INFO __main__ http request method=GET path=/ status=200 bytes=4262 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:08,000 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=3575 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:08,003 INFO __main__ http request method=GET path=/static/app.js?v=20260701-sp500-choice status=200 bytes=30161 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:08,472 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:08,529 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2269 seconds=0.041 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:18,423 INFO __main__ backtest request start id=63de378a range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:27:18,424 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:18,425 INFO __main__ backtest lock acquired id=63de378a wait_seconds=0.003
+2026-07-01 17:27:18,431 INFO __main__ http request method=GET path=/api/backtest/jobs/5cd29913-192c-4c46-b7b9-e31a7b6bf889 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:18,501 INFO __main__ backtest data check id=63de378a seconds=0.069 missing=['dividends:03195.HK', 'dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH', 'fx_rates:HKD/CNY', 'prices:000300.SH', 'prices:03195.HK', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001']
+2026-07-01 17:27:18,511 INFO app.services.data_sync sync_all start range=2012-01-01..2026-07-01 missing_items=['dividends:03195.HK', 'dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH', 'fx_rates:HKD/CNY', 'prices:000300.SH', 'prices:03195.HK', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001'] plan_prices=['03195.HK', '510300.SH', '512890.SH', '518880.SH'] plan_dividends=['03195.HK', '510300.SH', '512890.SH', '518880.SH'] plan_index=True plan_repo=['204001'] plan_fx=['HKD/CNY']
+2026-07-01 17:27:18,537 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:27:19,280 INFO app.services.data_sync sync price source complete symbol=03195.HK source=yahoo-chart range=2015-05-18..2026-06-30 rows=527
+2026-07-01 17:27:19,844 INFO __main__ http request method=GET path=/api/backtest/jobs/5cd29913-192c-4c46-b7b9-e31a7b6bf889 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:21,147 INFO app.services.data_sync sync price source complete symbol=03195.HK source=eastmoney-hk range=2015-05-18..2026-06-30 rows=9
+2026-07-01 17:27:21,461 INFO __main__ http request method=GET path=/api/backtest/jobs/5cd29913-192c-4c46-b7b9-e31a7b6bf889 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:22,268 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=536 dividends=0 adj=0 seconds=3.736 warnings=1 missing=['prices:03195.HK']
+2026-07-01 17:27:23,279 INFO __main__ http request method=GET path=/api/backtest/jobs/5cd29913-192c-4c46-b7b9-e31a7b6bf889 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:24,545 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=3 dividends=0 adj=0 seconds=6.007 warnings=5 missing=['dividends:510300.SH']
+2026-07-01 17:27:25,293 INFO __main__ http request method=GET path=/api/backtest/jobs/5cd29913-192c-4c46-b7b9-e31a7b6bf889 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:25,360 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=3 dividends=0 adj=0 seconds=6.822 warnings=5 missing=['dividends:518880.SH']
+2026-07-01 17:27:26,531 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=3 dividends=0 adj=0 seconds=7.996 warnings=4 missing=[]
+2026-07-01 17:27:27,098 INFO app.services.data_sync sync index complete ranges=1 rows=3 seconds=0.567
+2026-07-01 17:27:27,496 INFO __main__ http request method=GET path=/api/backtest/jobs/5cd29913-192c-4c46-b7b9-e31a7b6bf889 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:27,678 INFO app.services.data_sync sync repo complete ranges=1 rows=3 seconds=0.578
+2026-07-01 17:27:29,042 INFO app.services.data_sync sync fx source complete pair=HKD/CNY source=yahoo range=2012-01-02..2026-06-30 rows=3335
+2026-07-01 17:27:29,909 INFO __main__ http request method=GET path=/api/backtest/jobs/5cd29913-192c-4c46-b7b9-e31a7b6bf889 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:27:31,873 INFO app.services.data_sync sync fx source complete pair=HKD/CNY source=frankfurter range=2012-01-02..2026-06-30 rows=429
+2026-07-01 17:27:34,179 INFO app.services.data_sync sync fx complete ranges=1 rows=3764 seconds=6.500
+2026-07-01 17:27:34,180 INFO app.services.data_sync sync_all complete seconds=15.669 inserted={'prices': 548, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 3, 'fx_rates': 3764} missing=['dividends:510300.SH', 'dividends:518880.SH', 'fx_rates:HKD/CNY', 'prices:03195.HK'] warnings=11
+2026-07-01 17:27:34,180 INFO __main__ backtest sync complete id=63de378a seconds=15.670 result={'inserted': {'prices': 548, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 3, 'fx_rates': 3764}, 'warnings': ['Currency API daily fallback skipped for 3782 days', 'Eastmoney dividend fetch failed for 510300.SH: public source request failed: exit 28: curl: (28) Operation timed out after 2000 milliseconds with 0 bytes received; exit 28: curl: (28) Connection timed out after 2006 milliseconds', 'Eastmoney dividend fetch failed for 518880.SH: public source request failed: exit 28: curl: (28) Connection timed out after 2007 milliseconds; exit 28: curl: (28) Connection timed out after 2008 milliseconds', "Open ER latest FX fallback is only used for today's tail gap", 'Stooq returned no rows for hkdcny', 'TUSHARE_TOKEN is not configured', 'psycopg is not installed; DataSrc Postgres cache unavailable', 'psycopg is not installed; DataSrc Postgres series cache unavailable', 'skip Tushare adj for 510300.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 512890.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 518880.SH because primary Tushare price source is unavailable'], 'missing_data': ['dividends:510300.SH', 'dividends:518880.SH', 'fx_rates:HKD/CNY', 'prices:03195.HK']}
+2026-07-01 17:27:34,232 INFO __main__ backtest post-sync data check id=63de378a seconds=0.032 missing=['dividends:510300.SH', 'dividends:518880.SH']
+2026-07-01 17:27:34,232 WARNING __main__ backtest job failed id=5cd29913-192c-4c46-b7b9-e31a7b6bf889 error=自动补足数据后仍缺少：dividends:510300.SH、dividends:518880.SH
+2026-07-01 17:28:11,783 INFO __main__ http request method=GET path=/ status=200 bytes=4262 seconds=0.072 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:11,798 INFO __main__ http request method=GET path=/static/app.js?v=20260701-sp500-choice status=200 bytes=30161 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:11,798 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=3575 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:11,826 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:11,875 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.027 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:40,452 INFO __main__ backtest request start id=0d3d4a1a range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:28:40,452 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:40,453 INFO __main__ backtest lock acquired id=0d3d4a1a wait_seconds=0.001
+2026-07-01 17:28:40,457 INFO __main__ http request method=GET path=/api/backtest/jobs/2298a3b1-7a50-4945-8efa-00e17169150a status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:40,515 INFO __main__ backtest data check id=0d3d4a1a seconds=0.065 missing=['dividends:510300.SH', 'dividends:518880.SH']
+2026-07-01 17:28:40,536 INFO app.services.data_sync sync_all start range=2012-01-01..2026-07-01 missing_items=['dividends:510300.SH', 'dividends:518880.SH'] plan_prices=[] plan_dividends=['510300.SH', '518880.SH'] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 17:28:40,555 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:28:40,555 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:28:40,555 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:28:41,863 INFO __main__ http request method=GET path=/api/backtest/jobs/2298a3b1-7a50-4945-8efa-00e17169150a status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:43,478 INFO __main__ http request method=GET path=/api/backtest/jobs/2298a3b1-7a50-4945-8efa-00e17169150a status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:28:43,632 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=3.076 warnings=2 missing=['dividends:510300.SH']
+2026-07-01 17:28:43,634 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=3.078 warnings=2 missing=['dividends:518880.SH']
+2026-07-01 17:28:43,636 INFO app.services.data_sync sync_all complete seconds=3.099 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['dividends:510300.SH', 'dividends:518880.SH'] warnings=3
+2026-07-01 17:28:43,636 INFO __main__ backtest sync complete id=0d3d4a1a seconds=3.100 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['Eastmoney dividend fetch failed for 510300.SH: public source request failed: exit 28: curl: (28) Connection timed out after 2010 milliseconds; exit 35: curl: (35) schannel: failed to receive handshake, SSL/TLS connection failed', 'Eastmoney dividend fetch failed for 518880.SH: public source request failed: exit 28: curl: (28) Connection timed out after 2012 milliseconds; exit 35: curl: (35) schannel: failed to receive handshake, SSL/TLS connection failed', 'TUSHARE_TOKEN is not configured'], 'missing_data': ['dividends:510300.SH', 'dividends:518880.SH']}
+2026-07-01 17:28:43,697 INFO __main__ backtest post-sync data check id=0d3d4a1a seconds=0.046 missing=['dividends:510300.SH', 'dividends:518880.SH']
+2026-07-01 17:28:43,700 WARNING __main__ backtest job failed id=2298a3b1-7a50-4945-8efa-00e17169150a error=自动补足数据后仍缺少：dividends:510300.SH、dividends:518880.SH
+2026-07-01 17:28:45,282 INFO __main__ http request method=GET path=/api/backtest/jobs/2298a3b1-7a50-4945-8efa-00e17169150a status=200 bytes=531 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:33,814 INFO __main__ backtest request start id=f1066d5d range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:30:33,814 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:33,815 INFO __main__ backtest lock acquired id=f1066d5d wait_seconds=0.002
+2026-07-01 17:30:33,817 INFO __main__ http request method=GET path=/api/backtest/jobs/4ceb4432-969e-46ee-8823-66544b5aae0a status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:33,853 INFO __main__ backtest data check id=f1066d5d seconds=0.032 missing=['dividends:510300.SH', 'dividends:518880.SH']
+2026-07-01 17:30:33,858 INFO app.services.data_sync sync_all start range=2012-01-01..2026-07-01 missing_items=['dividends:510300.SH', 'dividends:518880.SH'] plan_prices=[] plan_dividends=['510300.SH', '518880.SH'] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 17:30:33,864 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:30:33,864 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:30:33,864 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:30:35,229 INFO __main__ http request method=GET path=/api/backtest/jobs/4ceb4432-969e-46ee-8823-66544b5aae0a status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:35,330 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=1.461 warnings=1 missing=[]
+2026-07-01 17:30:36,846 INFO __main__ http request method=GET path=/api/backtest/jobs/4ceb4432-969e-46ee-8823-66544b5aae0a status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:37,952 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=4.083 warnings=2 missing=['dividends:518880.SH']
+2026-07-01 17:30:37,953 INFO app.services.data_sync sync_all complete seconds=4.095 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['dividends:518880.SH'] warnings=2
+2026-07-01 17:30:37,954 INFO __main__ backtest sync complete id=f1066d5d seconds=4.095 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['Eastmoney dividend fetch failed for 518880.SH: public source request failed: exit 28: curl: (28) Connection timed out after 2005 milliseconds; exit 28: curl: (28) Connection timed out after 2005 milliseconds', 'TUSHARE_TOKEN is not configured'], 'missing_data': ['dividends:518880.SH']}
+2026-07-01 17:30:37,993 INFO __main__ backtest post-sync data check id=f1066d5d seconds=0.028 missing=['dividends:518880.SH']
+2026-07-01 17:30:37,997 WARNING __main__ backtest job failed id=4ceb4432-969e-46ee-8823-66544b5aae0a error=自动补足数据后仍缺少：dividends:518880.SH
+2026-07-01 17:30:38,664 INFO __main__ http request method=GET path=/api/backtest/jobs/4ceb4432-969e-46ee-8823-66544b5aae0a status=200 bytes=487 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:58,701 INFO __main__ backtest request start id=adaff01b range=2012-01-01..2026-01-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:30:58,701 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:58,701 INFO __main__ backtest lock acquired id=adaff01b wait_seconds=0.001
+2026-07-01 17:30:58,705 INFO __main__ http request method=GET path=/api/backtest/jobs/cf6b865f-91eb-49a0-891d-742142bc9058 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:30:58,733 INFO __main__ backtest data check id=adaff01b seconds=0.027 missing=[]
+2026-07-01 17:30:58,736 INFO __main__ backtest cache miss id=adaff01b seconds=0.002
+2026-07-01 17:30:58,740 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-01-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 17:30:58,776 INFO app.services.backtest_engine run_backtest data loaded days=3654 price_rows=14529 fx_rows=3638 repo_rows=3379 one_day_repo_rows=3379 dividend_events=68 seconds=0.028
+2026-07-01 17:30:58,965 INFO app.services.backtest_engine run_backtest main loop complete rows=3654 trades=26 rebalance=13 seconds=0.185
+2026-07-01 17:30:59,134 INFO app.services.backtest_engine run_backtest comparison complete rows=3654 seconds=0.167
+2026-07-01 17:30:59,139 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.005
+2026-07-01 17:30:59,164 INFO app.services.backtest_engine run_backtest persisted run_id=54e1707d-443b-49d6-bc7b-e91d012c9515 rows=3654 trades=26 rebalance=13 seconds=0.033 total_seconds=0.434
+2026-07-01 17:30:59,164 INFO __main__ backtest engine complete id=adaff01b seconds=0.439 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 17:30:59,180 INFO __main__ backtest request complete id=adaff01b total_seconds=0.479
+2026-07-01 17:31:00,116 INFO __main__ http request method=GET path=/api/backtest/jobs/cf6b865f-91eb-49a0-891d-742142bc9058 status=200 bytes=1263 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:31:00,129 INFO __main__ http request method=GET path=/api/backtest/54e1707d-443b-49d6-bc7b-e91d012c9515/rebalance status=200 bytes=27947 seconds=0.010 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:31:00,130 INFO __main__ http request method=GET path=/api/backtest/54e1707d-443b-49d6-bc7b-e91d012c9515/trades status=200 bytes=11557 seconds=0.012 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:31:00,387 INFO __main__ http request method=GET path=/api/backtest/54e1707d-443b-49d6-bc7b-e91d012c9515/series status=200 bytes=4303466 seconds=0.268 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:02,887 INFO __main__ backtest request start id=d923be16 range=2012-01-01..2026-01-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:33:02,887 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:02,888 INFO __main__ backtest lock acquired id=d923be16 wait_seconds=0.001
+2026-07-01 17:33:02,889 INFO __main__ http request method=GET path=/api/backtest/jobs/91418d6d-73cc-4b55-b822-70098d6b580e status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:02,918 INFO __main__ backtest data check id=d923be16 seconds=0.026 missing=[]
+2026-07-01 17:33:02,919 INFO __main__ backtest cache miss id=d923be16 seconds=0.000
+2026-07-01 17:33:02,924 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-01-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 17:33:02,966 INFO app.services.backtest_engine run_backtest data loaded days=3654 price_rows=14529 fx_rows=3638 repo_rows=3379 one_day_repo_rows=3379 dividend_events=68 seconds=0.031
+2026-07-01 17:33:03,150 INFO app.services.backtest_engine run_backtest main loop complete rows=3654 trades=17 rebalance=14 seconds=0.185
+2026-07-01 17:33:03,332 INFO app.services.backtest_engine run_backtest comparison complete rows=3654 seconds=0.178
+2026-07-01 17:33:03,335 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.002
+2026-07-01 17:33:03,364 INFO app.services.backtest_engine run_backtest persisted run_id=25dd35ea-31b3-4b99-ad85-3423323955b2 rows=3654 trades=17 rebalance=14 seconds=0.029 total_seconds=0.441
+2026-07-01 17:33:03,371 INFO __main__ backtest engine complete id=d923be16 seconds=0.448 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 17:33:03,372 INFO __main__ backtest request complete id=d923be16 total_seconds=0.484
+2026-07-01 17:33:04,299 INFO __main__ http request method=GET path=/api/backtest/jobs/91418d6d-73cc-4b55-b822-70098d6b580e status=200 bytes=1262 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:04,318 INFO __main__ http request method=GET path=/api/backtest/25dd35ea-31b3-4b99-ad85-3423323955b2/trades status=200 bytes=7550 seconds=0.015 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:04,318 INFO __main__ http request method=GET path=/api/backtest/25dd35ea-31b3-4b99-ad85-3423323955b2/rebalance status=200 bytes=30275 seconds=0.016 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:04,631 INFO __main__ http request method=GET path=/api/backtest/25dd35ea-31b3-4b99-ad85-3423323955b2/series status=200 bytes=4316245 seconds=0.330 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:26,985 INFO __main__ backtest request start id=f65c13fc range=2012-01-01..2026-01-01 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:33:26,985 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:26,986 INFO __main__ backtest lock acquired id=f65c13fc wait_seconds=0.001
+2026-07-01 17:33:26,988 INFO __main__ http request method=GET path=/api/backtest/jobs/07d4ea51-ac10-42b0-acc1-5a4502587e4e status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:27,022 INFO __main__ backtest data check id=f65c13fc seconds=0.032 missing=[]
+2026-07-01 17:33:27,024 INFO __main__ backtest cache miss id=f65c13fc seconds=0.000
+2026-07-01 17:33:27,028 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-01-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 17:33:27,066 INFO app.services.backtest_engine run_backtest data loaded days=3654 price_rows=14529 fx_rows=3644 repo_rows=3379 one_day_repo_rows=3379 dividend_events=68 seconds=0.026
+2026-07-01 17:33:27,204 INFO app.services.backtest_engine run_backtest main loop complete rows=3654 trades=24 rebalance=15 seconds=0.136
+2026-07-01 17:33:27,344 INFO app.services.backtest_engine run_backtest comparison complete rows=3654 seconds=0.138
+2026-07-01 17:33:27,346 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.002
+2026-07-01 17:33:27,381 INFO app.services.backtest_engine run_backtest persisted run_id=d28a63bc-d8c6-483b-8906-58c30237b8b4 rows=3654 trades=24 rebalance=15 seconds=0.035 total_seconds=0.354
+2026-07-01 17:33:27,387 INFO __main__ backtest engine complete id=f65c13fc seconds=0.360 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 17:33:27,388 INFO __main__ backtest request complete id=f65c13fc total_seconds=0.403
+2026-07-01 17:33:28,400 INFO __main__ http request method=GET path=/api/backtest/jobs/07d4ea51-ac10-42b0-acc1-5a4502587e4e status=200 bytes=1275 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:28,421 INFO __main__ http request method=GET path=/api/backtest/d28a63bc-d8c6-483b-8906-58c30237b8b4/trades status=200 bytes=11054 seconds=0.016 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:28,421 INFO __main__ http request method=GET path=/api/backtest/d28a63bc-d8c6-483b-8906-58c30237b8b4/rebalance status=200 bytes=33432 seconds=0.017 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:33:28,669 INFO __main__ http request method=GET path=/api/backtest/d28a63bc-d8c6-483b-8906-58c30237b8b4/series status=200 bytes=4527086 seconds=0.266 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:36:52,756 INFO __main__ http request method=GET path=/ status=200 bytes=4267 seconds=0.068 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:36:52,765 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=4676 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:36:52,765 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-flow-fallbacks status=200 bytes=31026 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:36:52,800 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:36:52,870 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.058 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:14,121 INFO __main__ http request method=GET path=/ status=200 bytes=4267 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:14,129 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-flow-fallbacks status=200 bytes=31026 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:14,130 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=4676 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:14,142 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:14,185 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.024 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:16,412 INFO __main__ backtest request start id=44f1b11e range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:37:16,412 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:16,412 INFO __main__ backtest lock acquired id=44f1b11e wait_seconds=0.002
+2026-07-01 17:37:16,422 INFO __main__ http request method=GET path=/api/backtest/jobs/391c7b78-60cf-46dd-bbd1-eed5a5f91445 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:16,484 INFO __main__ backtest data check id=44f1b11e seconds=0.057 missing=['dividends:518880.SH']
+2026-07-01 17:37:16,492 INFO app.services.data_sync sync_all start range=2012-01-01..2026-07-01 missing_items=['dividends:518880.SH'] plan_prices=[] plan_dividends=['518880.SH'] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 17:37:16,506 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:37:16,507 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:37:16,509 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:37:16,510 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:37:17,828 INFO __main__ http request method=GET path=/api/backtest/jobs/391c7b78-60cf-46dd-bbd1-eed5a5f91445 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:19,443 INFO __main__ http request method=GET path=/api/backtest/jobs/391c7b78-60cf-46dd-bbd1-eed5a5f91445 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:20,768 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=4.262 warnings=1 missing=[]
+2026-07-01 17:37:20,770 INFO app.services.data_sync sync_all complete seconds=4.278 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=[] warnings=1
+2026-07-01 17:37:20,771 INFO __main__ backtest sync complete id=44f1b11e seconds=4.279 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['TUSHARE_TOKEN is not configured'], 'missing_data': []}
+2026-07-01 17:37:20,814 INFO __main__ backtest post-sync data check id=44f1b11e seconds=0.029 missing=[]
+2026-07-01 17:37:20,818 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 17:37:20,874 INFO app.services.backtest_engine run_backtest data loaded days=3783 price_rows=15232 fx_rows=3764 repo_rows=3495 one_day_repo_rows=3495 dividend_events=70 seconds=0.043
+2026-07-01 17:37:21,059 INFO app.services.backtest_engine run_backtest main loop complete rows=3783 trades=26 rebalance=13 seconds=0.181
+2026-07-01 17:37:21,258 INFO app.services.backtest_engine run_backtest comparison complete rows=3783 seconds=0.197
+2026-07-01 17:37:21,262 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.003
+2026-07-01 17:37:21,263 INFO __main__ http request method=GET path=/api/backtest/jobs/391c7b78-60cf-46dd-bbd1-eed5a5f91445 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:21,298 INFO app.services.backtest_engine run_backtest persisted run_id=a5769da9-6fb8-44d5-a108-8e0baeff2f86 rows=3783 trades=26 rebalance=13 seconds=0.034 total_seconds=0.479
+2026-07-01 17:37:21,304 INFO __main__ backtest engine complete id=44f1b11e seconds=0.485 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 17:37:21,305 INFO __main__ backtest request complete id=44f1b11e total_seconds=4.888
+2026-07-01 17:37:23,270 INFO __main__ http request method=GET path=/api/backtest/jobs/391c7b78-60cf-46dd-bbd1-eed5a5f91445 status=200 bytes=1567 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:23,284 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/rebalance status=200 bytes=27959 seconds=0.009 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:23,285 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/trades status=200 bytes=11557 seconds=0.010 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:37:23,715 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/series status=200 bytes=4469880 seconds=0.442 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,302 INFO __main__ http request method=GET path=/ status=200 bytes=4269 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,315 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-flow-responsive2 status=200 bytes=31313 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,315 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=4739 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,350 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,406 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.033 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,942 INFO __main__ backtest request start id=0132b0e7 range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:39:19,942 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,944 INFO __main__ backtest lock acquired id=0132b0e7 wait_seconds=0.002
+2026-07-01 17:39:19,947 INFO __main__ http request method=GET path=/api/backtest/jobs/fedc8e96-9086-4bbf-8116-25e7c8762be9 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:19,999 INFO __main__ backtest data check id=0132b0e7 seconds=0.047 missing=[]
+2026-07-01 17:39:20,002 INFO __main__ backtest cache hit id=0132b0e7 seconds=0.001 total_seconds=0.060
+2026-07-01 17:39:21,357 INFO __main__ http request method=GET path=/api/backtest/jobs/fedc8e96-9086-4bbf-8116-25e7c8762be9 status=200 bytes=1260 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:21,375 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/trades status=200 bytes=11557 seconds=0.013 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:21,383 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/rebalance status=200 bytes=27959 seconds=0.022 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:39:21,888 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/series status=200 bytes=4469880 seconds=0.528 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:03,444 INFO __main__ backtest request start id=bb9abe1b range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:41:03,444 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:03,445 INFO __main__ backtest lock acquired id=bb9abe1b wait_seconds=0.002
+2026-07-01 17:41:03,447 INFO __main__ http request method=GET path=/api/backtest/jobs/76037d35-80d1-4147-86f4-2c65bcb3d0cf status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:03,480 INFO __main__ backtest data check id=bb9abe1b seconds=0.028 missing=[]
+2026-07-01 17:41:03,482 INFO __main__ backtest cache hit id=bb9abe1b seconds=0.000 total_seconds=0.038
+2026-07-01 17:41:04,862 INFO __main__ http request method=GET path=/api/backtest/jobs/76037d35-80d1-4147-86f4-2c65bcb3d0cf status=200 bytes=1260 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:04,871 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/rebalance status=200 bytes=27959 seconds=0.007 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:04,873 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/trades status=200 bytes=11557 seconds=0.007 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:05,194 INFO __main__ http request method=GET path=/api/backtest/a5769da9-6fb8-44d5-a108-8e0baeff2f86/series status=200 bytes=4469880 seconds=0.330 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:15,636 INFO __main__ backtest request start id=56aad384 range=2012-01-01..2020-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:41:15,636 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:15,637 INFO __main__ backtest lock acquired id=56aad384 wait_seconds=0.001
+2026-07-01 17:41:15,640 INFO __main__ http request method=GET path=/api/backtest/jobs/b3c8c7e5-d5bc-4f26-aa7a-464fc20e22a9 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:15,660 INFO __main__ backtest data check id=56aad384 seconds=0.017 missing=['prices:03195.HK']
+2026-07-01 17:41:15,667 INFO app.services.data_sync sync_all start range=2012-01-01..2020-07-01 missing_items=['prices:03195.HK'] plan_prices=['03195.HK'] plan_dividends=[] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 17:41:15,681 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:41:15,683 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:41:15,684 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:41:15,685 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:41:17,044 INFO __main__ http request method=GET path=/api/backtest/jobs/b3c8c7e5-d5bc-4f26-aa7a-464fc20e22a9 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:18,652 INFO __main__ http request method=GET path=/api/backtest/jobs/b3c8c7e5-d5bc-4f26-aa7a-464fc20e22a9 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:41:20,068 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=4.390 warnings=5 missing=['prices:03195.HK']
+2026-07-01 17:41:20,070 INFO app.services.data_sync sync_all complete seconds=4.403 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['prices:03195.HK'] warnings=5
+2026-07-01 17:41:20,072 INFO __main__ backtest sync complete id=56aad384 seconds=4.405 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['DataSrc Postgres returned no price rows for 03195.HK', 'Eastmoney returned no price rows for 03195.HK', 'Stooq returned no rows for 03195.HK', 'Yahoo query1 returned no price rows for 3195.HK; Yahoo query2 returned no price rows for 3195.HK', 'Yahoo spark fallback skipped for 3195.HK: requested range is too long'], 'missing_data': ['prices:03195.HK']}
+2026-07-01 17:41:20,100 INFO __main__ backtest post-sync data check id=56aad384 seconds=0.015 missing=['prices:03195.HK']
+2026-07-01 17:41:20,104 WARNING __main__ backtest job failed id=b3c8c7e5-d5bc-4f26-aa7a-464fc20e22a9 error=自动补足数据后仍缺少：prices:03195.HK
+2026-07-01 17:41:20,463 INFO __main__ http request method=GET path=/api/backtest/jobs/b3c8c7e5-d5bc-4f26-aa7a-464fc20e22a9 status=200 bytes=479 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:16,743 INFO __main__ http request method=GET path=/ status=200 bytes=4269 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:16,749 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=4739 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:16,754 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-flow-responsive2 status=200 bytes=31313 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:16,781 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:16,819 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.027 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:32,645 INFO __main__ backtest request start id=49b5973a range=2024-05-01..2026-07-01 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:42:32,646 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:32,647 INFO __main__ backtest lock acquired id=49b5973a wait_seconds=0.002
+2026-07-01 17:42:32,648 INFO __main__ http request method=GET path=/api/backtest/jobs/d7efd728-2422-4622-aa1e-94d6fda3dc6d status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:32,656 INFO __main__ backtest data check id=49b5973a seconds=0.004 missing=['dividends:VOO', 'fx_rates:USD/CNY', 'prices:VOO']
+2026-07-01 17:42:32,659 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['dividends:VOO', 'fx_rates:USD/CNY', 'prices:VOO'] plan_prices=['VOO'] plan_dividends=['VOO'] plan_index=False plan_repo=[] plan_fx=['USD/CNY']
+2026-07-01 17:42:32,664 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:42:32,665 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:42:32,666 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:42:32,667 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 17:42:32,964 INFO app.services.data_sync sync price source complete symbol=VOO source=yahoo-chart range=2026-06-26..2026-06-30 rows=3
+2026-07-01 17:42:33,322 INFO app.services.data_sync sync asset complete symbol=VOO prices=3 dividends=0 adj=0 seconds=0.660 warnings=0 missing=[]
+2026-07-01 17:42:33,864 INFO app.services.data_sync sync fx source complete pair=USD/CNY source=yahoo range=2026-06-26..2026-06-30 rows=1
+2026-07-01 17:42:34,060 INFO __main__ http request method=GET path=/api/backtest/jobs/d7efd728-2422-4622-aa1e-94d6fda3dc6d status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:35,681 INFO __main__ http request method=GET path=/api/backtest/jobs/d7efd728-2422-4622-aa1e-94d6fda3dc6d status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:36,143 INFO app.services.data_sync sync fx source complete pair=USD/CNY source=frankfurter range=2026-06-26..2026-06-30 rows=2
+2026-07-01 17:42:36,145 INFO app.services.data_sync sync fx complete ranges=1 rows=3 seconds=2.820
+2026-07-01 17:42:36,146 INFO app.services.data_sync sync_all complete seconds=3.486 inserted={'prices': 3, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 3} missing=[] warnings=1
+2026-07-01 17:42:36,147 INFO __main__ backtest sync complete id=49b5973a seconds=3.487 result={'inserted': {'prices': 3, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 3}, 'warnings': ['DataSrc Postgres returned no USD/CNY rows'], 'missing_data': []}
+2026-07-01 17:42:36,173 INFO __main__ backtest post-sync data check id=49b5973a seconds=0.005 missing=[]
+2026-07-01 17:42:36,540 INFO __main__ backtest cache invalidated id=49b5973a seconds=0.361
+2026-07-01 17:42:36,542 INFO app.services.backtest_engine run_backtest start range=2024-05-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 17:42:36,552 INFO app.services.backtest_engine run_backtest data loaded days=566 price_rows=2983 fx_rows=559 repo_rows=523 one_day_repo_rows=523 dividend_events=10 seconds=0.006
+2026-07-01 17:42:36,584 INFO app.services.backtest_engine run_backtest main loop complete rows=566 trades=6 rebalance=3 seconds=0.023
+2026-07-01 17:42:36,609 INFO app.services.backtest_engine run_backtest comparison complete rows=566 seconds=0.025
+2026-07-01 17:42:36,611 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.001
+2026-07-01 17:42:36,618 INFO app.services.backtest_engine run_backtest persisted run_id=025c7274-0a4f-494e-9c25-694143976691 rows=566 trades=6 rebalance=3 seconds=0.005 total_seconds=0.076
+2026-07-01 17:42:36,620 INFO __main__ backtest engine complete id=49b5973a seconds=0.078 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 17:42:36,643 INFO __main__ backtest status complete id=49b5973a seconds=0.023 rows=14
+2026-07-01 17:42:36,644 INFO __main__ backtest request complete id=49b5973a total_seconds=3.999
+2026-07-01 17:42:37,499 INFO __main__ http request method=GET path=/api/backtest/jobs/d7efd728-2422-4622-aa1e-94d6fda3dc6d status=200 bytes=4538 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:37,509 INFO __main__ http request method=GET path=/api/backtest/025c7274-0a4f-494e-9c25-694143976691/trades status=200 bytes=2751 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:37,513 INFO __main__ http request method=GET path=/api/backtest/025c7274-0a4f-494e-9c25-694143976691/rebalance status=200 bytes=6411 seconds=0.010 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:37,556 INFO __main__ http request method=GET path=/api/backtest/025c7274-0a4f-494e-9c25-694143976691/series status=200 bytes=709054 seconds=0.058 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:44,949 INFO __main__ backtest request start id=c1d3031d range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 17:42:44,949 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:44,951 INFO __main__ backtest lock acquired id=c1d3031d wait_seconds=0.001
+2026-07-01 17:42:44,951 INFO __main__ http request method=GET path=/api/backtest/jobs/a99031af-c1be-4ea8-8c86-1ce70808201c status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:44,964 INFO __main__ backtest data check id=c1d3031d seconds=0.006 missing=[]
+2026-07-01 17:42:44,966 INFO __main__ backtest cache miss id=c1d3031d seconds=0.001
+2026-07-01 17:42:44,973 INFO app.services.backtest_engine run_backtest start range=2024-05-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 17:42:44,989 INFO app.services.backtest_engine run_backtest data loaded days=566 price_rows=2983 fx_rows=559 repo_rows=523 one_day_repo_rows=523 dividend_events=10 seconds=0.005
+2026-07-01 17:42:44,997 INFO app.services.backtest_engine run_backtest main loop complete rows=566 trades=7 rebalance=3 seconds=0.020
+2026-07-01 17:42:45,035 INFO app.services.backtest_engine run_backtest comparison complete rows=566 seconds=0.025
+2026-07-01 17:42:45,037 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.001
+2026-07-01 17:42:45,041 INFO app.services.backtest_engine run_backtest persisted run_id=16bc9377-46cf-4643-ab8e-026a14b96db0 rows=566 trades=7 rebalance=3 seconds=0.003 total_seconds=0.070
+2026-07-01 17:42:45,043 INFO __main__ backtest engine complete id=c1d3031d seconds=0.072 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 17:42:45,043 INFO __main__ backtest request complete id=c1d3031d total_seconds=0.095
+2026-07-01 17:42:46,368 INFO __main__ http request method=GET path=/api/backtest/jobs/a99031af-c1be-4ea8-8c86-1ce70808201c status=200 bytes=1254 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:46,376 INFO __main__ http request method=GET path=/api/backtest/16bc9377-46cf-4643-ab8e-026a14b96db0/trades status=200 bytes=3238 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:46,422 INFO __main__ http request method=GET path=/api/backtest/16bc9377-46cf-4643-ab8e-026a14b96db0/series status=200 bytes=713751 seconds=0.051 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:42:46,424 INFO __main__ http request method=GET path=/api/backtest/16bc9377-46cf-4643-ab8e-026a14b96db0/rebalance status=200 bytes=6378 seconds=0.052 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:47:21,419 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 17:49:21,589 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 17:51:06,739 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 17:51:21,758 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 17:52:36,878 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 17:52:46,894 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 17:53:00,066 INFO __main__ http request method=GET path=/ status=200 bytes=4269 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:53:00,077 INFO __main__ http request method=GET path=/static/app.js?v=20260701-hk-flow-responsive2 status=200 bytes=31313 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:53:00,077 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=4739 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:53:00,110 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4556 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 17:53:00,315 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.203 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:38,935 INFO __main__ http request method=GET path=/ status=200 bytes=4422 seconds=0.055 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:38,945 INFO __main__ http request method=GET path=/static/app.js?v=20260701-fee-summary status=200 bytes=34681 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:38,947 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=5458 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:38,963 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:39,185 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.210 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:40,722 INFO __main__ http request method=GET path=/ status=200 bytes=4422 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:40,734 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=5458 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:40,735 INFO __main__ http request method=GET path=/static/app.js?v=20260701-fee-summary status=200 bytes=34681 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:40,752 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:01:40,800 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.037 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:07:53,969 INFO __main__ http request method=GET path=/ status=200 bytes=4422 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:07:53,983 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=5458 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:07:53,984 INFO __main__ http request method=GET path=/static/app.js?v=20260701-fee-summary status=200 bytes=34681 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:07:54,004 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:07:54,038 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.026 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:08:19,776 INFO __main__ backtest request start id=fdcb8e6b range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:08:19,777 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:08:19,778 INFO __main__ backtest lock acquired id=fdcb8e6b wait_seconds=0.002
+2026-07-01 18:08:19,779 INFO __main__ http request method=GET path=/api/backtest/jobs/a88692bc-83bd-43d2-a017-28b21a379a5b status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:08:19,804 INFO __main__ backtest data check id=fdcb8e6b seconds=0.020 missing=['fx_rates:HKD/CNY', 'prices:000300.SH', 'prices:03195.HK', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001']
+2026-07-01 18:08:19,808 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['fx_rates:HKD/CNY', 'prices:000300.SH', 'prices:03195.HK', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001'] plan_prices=['03195.HK', '510300.SH', '512890.SH', '518880.SH'] plan_dividends=[] plan_index=True plan_repo=['204001'] plan_fx=['HKD/CNY']
+2026-07-01 18:08:19,814 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:08:21,137 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=1 dividends=0 adj=0 seconds=1.324 warnings=3 missing=[]
+2026-07-01 18:08:21,194 INFO __main__ http request method=GET path=/api/backtest/jobs/a88692bc-83bd-43d2-a017-28b21a379a5b status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:01,531 INFO __main__ http request method=GET path=/api/config status=404 bytes=37 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:10:01,533 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.031 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:10:11,321 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:10:31,549 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:10:31,551 INFO __main__ backtest request start id=39ad22ca range=2024-05-01..2024-08-12 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:10:31,553 INFO __main__ backtest lock acquired id=39ad22ca wait_seconds=0.002
+2026-07-01 18:10:31,574 INFO __main__ backtest data check id=39ad22ca seconds=0.017 missing=[]
+2026-07-01 18:10:31,576 INFO __main__ backtest cache miss id=39ad22ca seconds=0.000
+2026-07-01 18:10:31,581 INFO app.services.backtest_engine run_backtest start range=2024-05-01..2024-08-12 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:10:31,595 INFO app.services.backtest_engine run_backtest data loaded days=74 price_rows=421 fx_rows=74 repo_rows=70 one_day_repo_rows=70 dividend_events=1 seconds=0.001
+2026-07-01 18:10:31,598 INFO app.services.backtest_engine run_backtest main loop complete rows=74 trades=1 rebalance=1 seconds=0.003
+2026-07-01 18:10:31,606 INFO app.services.backtest_engine run_backtest comparison complete rows=74 seconds=0.005
+2026-07-01 18:10:31,608 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.000
+2026-07-01 18:10:31,610 INFO app.services.backtest_engine run_backtest persisted run_id=4acd34ac-9630-4f2f-9648-6da282410862 rows=74 trades=1 rebalance=1 seconds=0.001 total_seconds=0.030
+2026-07-01 18:10:31,612 INFO __main__ backtest engine complete id=39ad22ca seconds=0.031 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:10:31,613 INFO __main__ backtest request complete id=39ad22ca total_seconds=0.062
+2026-07-01 18:10:31,625 INFO __main__ http request method=POST path=/api/backtest/run status=200 bytes=811 seconds=0.077 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:10:35,610 INFO __main__ backtest request start id=91b1e934 range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:10:35,610 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:35,610 INFO __main__ backtest lock acquired id=91b1e934 wait_seconds=0.002
+2026-07-01 18:10:35,610 INFO __main__ http request method=GET path=/api/backtest/jobs/6763f965-623c-40cf-9484-c0607fcc575b status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:35,628 INFO __main__ backtest data check id=91b1e934 seconds=0.008 missing=['fx_rates:HKD/CNY', 'prices:000300.SH', 'prices:03195.HK', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001']
+2026-07-01 18:10:35,634 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['fx_rates:HKD/CNY', 'prices:000300.SH', 'prices:03195.HK', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'repo_rates:204001'] plan_prices=['03195.HK', '510300.SH', '512890.SH', '518880.SH'] plan_dividends=[] plan_index=True plan_repo=['204001'] plan_fx=['HKD/CNY']
+2026-07-01 18:10:35,643 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:10:37,021 INFO __main__ http request method=GET path=/api/backtest/jobs/6763f965-623c-40cf-9484-c0607fcc575b status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:37,200 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=1 dividends=0 adj=0 seconds=1.558 warnings=3 missing=[]
+2026-07-01 18:10:38,232 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=1 dividends=0 adj=0 seconds=2.591 warnings=3 missing=[]
+2026-07-01 18:10:38,637 INFO __main__ http request method=GET path=/api/backtest/jobs/6763f965-623c-40cf-9484-c0607fcc575b status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:39,722 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=1 dividends=0 adj=0 seconds=4.080 warnings=3 missing=[]
+2026-07-01 18:10:39,864 INFO __main__ http request method=GET path=/api/backtest/4acd34ac-9630-4f2f-9648-6da282410862/series status=200 bytes=86867 seconds=0.018 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:10:39,945 INFO __main__ http request method=GET path=/api/backtest/4acd34ac-9630-4f2f-9648-6da282410862/trades status=200 bytes=472 seconds=0.003 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:10:39,963 INFO __main__ http request method=GET path=/api/backtest/4acd34ac-9630-4f2f-9648-6da282410862/rebalance status=200 bytes=1881 seconds=0.003 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:10:40,298 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=4.656 warnings=4 missing=['prices:03195.HK']
+2026-07-01 18:10:40,453 INFO __main__ http request method=GET path=/api/backtest/jobs/6763f965-623c-40cf-9484-c0607fcc575b status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:41,066 INFO app.services.data_sync sync index complete ranges=1 rows=1 seconds=0.766
+2026-07-01 18:10:41,779 INFO app.services.data_sync sync repo complete ranges=1 rows=1 seconds=0.713
+2026-07-01 18:10:42,282 INFO app.services.data_sync sync fx source complete pair=HKD/CNY source=yahoo range=2026-07-01..2026-07-01 rows=1
+2026-07-01 18:10:42,287 INFO app.services.data_sync sync fx complete ranges=1 rows=1 seconds=0.506
+2026-07-01 18:10:42,289 INFO app.services.data_sync sync_all complete seconds=6.655 inserted={'prices': 4, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 1, 'fx_rates': 1} missing=['prices:03195.HK'] warnings=14
+2026-07-01 18:10:42,290 INFO __main__ backtest sync complete id=91b1e934 seconds=6.656 result={'inserted': {'prices': 4, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 1, 'fx_rates': 1}, 'warnings': ['DataSrc Postgres returned no HKD/CNY rows', 'DataSrc Postgres returned no price rows for 000300.SH', 'DataSrc Postgres returned no price rows for 03195.HK', 'DataSrc Postgres returned no price rows for 510300.SH', 'DataSrc Postgres returned no price rows for 512890.SH', 'DataSrc Postgres returned no price rows for 518880.SH', 'DataSrc Postgres returned no repo rows for 204001', 'Eastmoney returned no price rows for 03195.HK', 'Stooq returned no rows for 03195.HK', 'TUSHARE_TOKEN is not configured', 'Yahoo spark query1 returned no usable price rows for 3195.HK; Yahoo spark query2 returned no usable price rows for 3195.HK', 'skip Tushare adj for 510300.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 512890.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 518880.SH because primary Tushare price source is unavailable'], 'missing_data': ['prices:03195.HK']}
+2026-07-01 18:10:42,313 INFO __main__ backtest post-sync data check id=91b1e934 seconds=0.005 missing=['prices:03195.HK']
+2026-07-01 18:10:42,320 WARNING __main__ backtest job failed id=6763f965-623c-40cf-9484-c0607fcc575b error=自动补足数据后仍缺少：prices:03195.HK
+2026-07-01 18:10:42,468 INFO __main__ http request method=GET path=/api/backtest/jobs/6763f965-623c-40cf-9484-c0607fcc575b status=200 bytes=479 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:46,388 INFO __main__ backtest request start id=b150e4b5 range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:10:46,388 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:46,390 INFO __main__ backtest lock acquired id=b150e4b5 wait_seconds=0.002
+2026-07-01 18:10:46,393 INFO __main__ http request method=GET path=/api/backtest/jobs/9856b4a8-80db-428b-9457-901e3045bc88 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:46,410 INFO __main__ backtest data check id=b150e4b5 seconds=0.009 missing=['prices:03195.HK']
+2026-07-01 18:10:46,418 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['prices:03195.HK'] plan_prices=['03195.HK'] plan_dividends=[] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 18:10:46,427 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:10:46,428 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:10:46,431 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:10:46,432 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:10:47,805 INFO __main__ http request method=GET path=/api/backtest/jobs/9856b4a8-80db-428b-9457-901e3045bc88 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:49,414 INFO __main__ http request method=GET path=/api/backtest/jobs/9856b4a8-80db-428b-9457-901e3045bc88 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:10:50,283 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=3.857 warnings=4 missing=['prices:03195.HK']
+2026-07-01 18:10:50,285 INFO app.services.data_sync sync_all complete seconds=3.867 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['prices:03195.HK'] warnings=4
+2026-07-01 18:10:50,287 INFO __main__ backtest sync complete id=b150e4b5 seconds=3.869 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['DataSrc Postgres returned no price rows for 03195.HK', 'Eastmoney returned no price rows for 03195.HK', 'Stooq returned no rows for 03195.HK', 'Yahoo spark query1 returned no usable price rows for 3195.HK; Yahoo spark query2 returned no usable price rows for 3195.HK'], 'missing_data': ['prices:03195.HK']}
+2026-07-01 18:10:50,309 INFO __main__ backtest post-sync data check id=b150e4b5 seconds=0.008 missing=['prices:03195.HK']
+2026-07-01 18:10:50,312 WARNING __main__ backtest job failed id=9856b4a8-80db-428b-9457-901e3045bc88 error=自动补足数据后仍缺少：prices:03195.HK
+2026-07-01 18:10:51,232 INFO __main__ http request method=GET path=/api/backtest/jobs/9856b4a8-80db-428b-9457-901e3045bc88 status=200 bytes=479 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:00,860 INFO __main__ backtest request start id=048d95a3 range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:11:00,861 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:00,863 INFO __main__ backtest lock acquired id=048d95a3 wait_seconds=0.002
+2026-07-01 18:11:00,864 INFO __main__ http request method=GET path=/api/backtest/jobs/3d359a55-6dcf-494d-a7c5-7409ead4fd54 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:00,877 INFO __main__ backtest data check id=048d95a3 seconds=0.008 missing=['prices:03195.HK']
+2026-07-01 18:11:00,882 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['prices:03195.HK'] plan_prices=['03195.HK'] plan_dividends=[] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 18:11:00,887 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:00,889 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:00,890 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:00,893 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:02,271 INFO __main__ http request method=GET path=/api/backtest/jobs/3d359a55-6dcf-494d-a7c5-7409ead4fd54 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:03,886 INFO __main__ http request method=GET path=/api/backtest/jobs/3d359a55-6dcf-494d-a7c5-7409ead4fd54 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:05,186 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=4.299 warnings=4 missing=['prices:03195.HK']
+2026-07-01 18:11:05,189 INFO app.services.data_sync sync_all complete seconds=4.307 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['prices:03195.HK'] warnings=4
+2026-07-01 18:11:05,189 INFO __main__ backtest sync complete id=048d95a3 seconds=4.308 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['DataSrc Postgres returned no price rows for 03195.HK', 'Eastmoney returned no price rows for 03195.HK', 'Stooq returned no rows for 03195.HK', 'Yahoo spark query1 returned no usable price rows for 3195.HK; Yahoo spark query2 returned no usable price rows for 3195.HK'], 'missing_data': ['prices:03195.HK']}
+2026-07-01 18:11:05,212 INFO __main__ backtest post-sync data check id=048d95a3 seconds=0.006 missing=['prices:03195.HK']
+2026-07-01 18:11:05,214 WARNING __main__ backtest job failed id=3d359a55-6dcf-494d-a7c5-7409ead4fd54 error=自动补足数据后仍缺少：prices:03195.HK
+2026-07-01 18:11:05,705 INFO __main__ http request method=GET path=/api/backtest/jobs/3d359a55-6dcf-494d-a7c5-7409ead4fd54 status=200 bytes=479 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:45,309 INFO __main__ backtest request start id=76877b21 range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:11:45,309 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:45,309 INFO __main__ backtest lock acquired id=76877b21 wait_seconds=0.001
+2026-07-01 18:11:45,309 INFO __main__ http request method=GET path=/api/backtest/jobs/c0524795-8e57-4083-ac5f-d21eab8e7393 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:45,317 INFO __main__ backtest data check id=76877b21 seconds=0.005 missing=['prices:03195.HK']
+2026-07-01 18:11:45,326 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['prices:03195.HK'] plan_prices=['03195.HK'] plan_dividends=[] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 18:11:45,330 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:45,332 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:45,333 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:45,334 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:11:46,723 INFO __main__ http request method=GET path=/api/backtest/jobs/c0524795-8e57-4083-ac5f-d21eab8e7393 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:11:48,090 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=2.760 warnings=4 missing=['prices:03195.HK']
+2026-07-01 18:11:48,091 INFO app.services.data_sync sync_all complete seconds=2.766 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['prices:03195.HK'] warnings=4
+2026-07-01 18:11:48,093 INFO __main__ backtest sync complete id=76877b21 seconds=2.767 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['DataSrc Postgres returned no price rows for 03195.HK', 'Eastmoney returned no price rows for 03195.HK', 'Stooq returned no rows for 03195.HK', 'Yahoo spark query1 returned no usable price rows for 3195.HK; Yahoo spark query2 returned no usable price rows for 3195.HK'], 'missing_data': ['prices:03195.HK']}
+2026-07-01 18:11:48,116 INFO __main__ backtest post-sync data check id=76877b21 seconds=0.010 missing=['prices:03195.HK']
+2026-07-01 18:11:48,118 WARNING __main__ backtest job failed id=c0524795-8e57-4083-ac5f-d21eab8e7393 error=自动补足数据后仍缺少：prices:03195.HK
+2026-07-01 18:11:48,342 INFO __main__ http request method=GET path=/api/backtest/jobs/c0524795-8e57-4083-ac5f-d21eab8e7393 status=200 bytes=479 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:12:00,981 INFO __main__ backtest request start id=12efaca2 range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:12:00,981 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:12:00,983 INFO __main__ backtest lock acquired id=12efaca2 wait_seconds=0.002
+2026-07-01 18:12:00,984 INFO __main__ http request method=GET path=/api/backtest/jobs/e75cb8f9-badb-46c0-a6ec-1f3ab9761528 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:12:00,993 INFO __main__ backtest data check id=12efaca2 seconds=0.005 missing=['prices:03195.HK']
+2026-07-01 18:12:00,993 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['prices:03195.HK'] plan_prices=['03195.HK'] plan_dividends=[] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 18:12:01,004 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:01,005 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:01,007 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:01,009 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:02,404 INFO __main__ http request method=GET path=/api/backtest/jobs/e75cb8f9-badb-46c0-a6ec-1f3ab9761528 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:12:03,878 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=2.876 warnings=4 missing=['prices:03195.HK']
+2026-07-01 18:12:03,878 INFO app.services.data_sync sync_all complete seconds=2.882 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['prices:03195.HK'] warnings=4
+2026-07-01 18:12:03,878 INFO __main__ backtest sync complete id=12efaca2 seconds=2.883 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['DataSrc Postgres returned no price rows for 03195.HK', 'Eastmoney returned no price rows for 03195.HK', 'Stooq returned no rows for 03195.HK', 'Yahoo spark query1 returned no usable price rows for 3195.HK; Yahoo spark query2 returned no usable price rows for 3195.HK'], 'missing_data': ['prices:03195.HK']}
+2026-07-01 18:12:03,898 INFO __main__ backtest post-sync data check id=12efaca2 seconds=0.004 missing=['prices:03195.HK']
+2026-07-01 18:12:03,900 WARNING __main__ backtest job failed id=e75cb8f9-badb-46c0-a6ec-1f3ab9761528 error=自动补足数据后仍缺少：prices:03195.HK
+2026-07-01 18:12:04,021 INFO __main__ http request method=GET path=/api/backtest/jobs/e75cb8f9-badb-46c0-a6ec-1f3ab9761528 status=200 bytes=479 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:12:41,773 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:12:41,788 INFO __main__ backtest request start id=a1b371ae range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:12:41,791 INFO __main__ backtest lock acquired id=a1b371ae wait_seconds=0.002
+2026-07-01 18:12:41,847 INFO __main__ backtest data check id=a1b371ae seconds=0.051 missing=['prices:03195.HK']
+2026-07-01 18:12:41,857 INFO app.services.data_sync sync_all start range=2012-01-01..2026-07-01 missing_items=['prices:03195.HK'] plan_prices=['03195.HK'] plan_dividends=[] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-01 18:12:41,870 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:41,873 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:41,875 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:41,877 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:12:44,642 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=2.775 warnings=4 missing=['prices:03195.HK']
+2026-07-01 18:12:44,642 INFO app.services.data_sync sync_all complete seconds=2.790 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=['prices:03195.HK'] warnings=4
+2026-07-01 18:12:44,642 INFO __main__ backtest sync complete id=a1b371ae seconds=2.792 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['DataSrc Postgres returned no price rows for 03195.HK', 'Eastmoney returned no price rows for 03195.HK', 'Stooq returned no rows for 03195.HK', 'Yahoo spark query1 returned no usable price rows for 3195.HK; Yahoo spark query2 returned no usable price rows for 3195.HK'], 'missing_data': ['prices:03195.HK']}
+2026-07-01 18:12:44,721 INFO __main__ backtest post-sync data check id=a1b371ae seconds=0.047 missing=['prices:03195.HK']
+2026-07-01 18:12:44,727 INFO __main__ http request method=POST path=/api/backtest/run status=400 bytes=65 seconds=2.945 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:14:55,392 INFO __main__ backtest request start id=7ecf7e28 range=2024-05-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:14:55,393 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.002 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:14:55,395 INFO __main__ backtest lock acquired id=7ecf7e28 wait_seconds=0.002
+2026-07-01 18:14:55,396 INFO __main__ http request method=GET path=/api/backtest/jobs/6388bd5c-5517-4ff9-a42e-c878f726e537 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:14:55,429 INFO __main__ backtest data check id=7ecf7e28 seconds=0.026 missing=[]
+2026-07-01 18:14:55,432 INFO __main__ backtest cache miss id=7ecf7e28 seconds=0.001
+2026-07-01 18:14:55,437 INFO app.services.backtest_engine run_backtest start range=2024-05-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:14:55,448 INFO app.services.backtest_engine run_backtest data loaded days=566 price_rows=2987 fx_rows=560 repo_rows=524 one_day_repo_rows=524 dividend_events=10 seconds=0.005
+2026-07-01 18:14:55,482 INFO app.services.backtest_engine run_backtest main loop complete rows=566 trades=6 rebalance=3 seconds=0.026
+2026-07-01 18:14:55,509 INFO app.services.backtest_engine run_backtest comparison complete rows=566 seconds=0.026
+2026-07-01 18:14:55,509 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.001
+2026-07-01 18:14:55,516 INFO app.services.backtest_engine run_backtest persisted run_id=edfc9476-606d-448c-96a0-13e1d70f7d8b rows=566 trades=6 rebalance=3 seconds=0.004 total_seconds=0.081
+2026-07-01 18:14:55,516 INFO __main__ backtest engine complete id=7ecf7e28 seconds=0.083 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:14:55,516 INFO __main__ backtest request complete id=7ecf7e28 total_seconds=0.129
+2026-07-01 18:14:56,680 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:14:56,695 INFO __main__ backtest request start id=0c380afc range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:14:56,696 INFO __main__ backtest lock acquired id=0c380afc wait_seconds=0.001
+2026-07-01 18:14:56,734 INFO __main__ backtest data check id=0c380afc seconds=0.033 missing=[]
+2026-07-01 18:14:56,735 INFO __main__ backtest cache miss id=0c380afc seconds=0.000
+2026-07-01 18:14:56,740 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:14:56,796 INFO app.services.backtest_engine run_backtest data loaded days=3783 price_rows=15239 fx_rows=3765 repo_rows=3496 one_day_repo_rows=3496 dividend_events=70 seconds=0.041
+2026-07-01 18:14:56,908 INFO __main__ http request method=GET path=/api/backtest/jobs/6388bd5c-5517-4ff9-a42e-c878f726e537 status=200 bytes=1260 seconds=0.049 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:14:56,987 INFO app.services.backtest_engine run_backtest main loop complete rows=3783 trades=26 rebalance=13 seconds=0.190
+2026-07-01 18:14:57,204 INFO app.services.backtest_engine run_backtest comparison complete rows=3783 seconds=0.213
+2026-07-01 18:14:57,206 INFO __main__ http request method=GET path=/api/backtest/edfc9476-606d-448c-96a0-13e1d70f7d8b/rebalance status=200 bytes=6412 seconds=0.219 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:14:57,209 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.004
+2026-07-01 18:14:57,211 INFO __main__ http request method=GET path=/api/backtest/edfc9476-606d-448c-96a0-13e1d70f7d8b/trades status=200 bytes=2758 seconds=0.222 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:14:57,266 INFO __main__ http request method=GET path=/api/backtest/edfc9476-606d-448c-96a0-13e1d70f7d8b/series status=200 bytes=713751 seconds=0.326 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:14:57,302 INFO app.services.backtest_engine run_backtest persisted run_id=b5a0f9c7-84c9-4ee9-aea6-6a26dd3fc5b0 rows=3783 trades=26 rebalance=13 seconds=0.087 total_seconds=0.561
+2026-07-01 18:14:57,307 INFO __main__ backtest engine complete id=0c380afc seconds=0.568 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:14:57,309 INFO __main__ backtest request complete id=0c380afc total_seconds=0.613
+2026-07-01 18:14:57,412 INFO __main__ http request method=POST path=/api/backtest/run status=200 bytes=810 seconds=0.740 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:15:12,761 INFO __main__ backtest request start id=949583ee range=2024-05-01..2026-07-01 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:15:12,761 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:12,762 INFO __main__ backtest lock acquired id=949583ee wait_seconds=0.002
+2026-07-01 18:15:12,763 INFO __main__ http request method=GET path=/api/backtest/jobs/de00d7c7-1eec-4e32-b5b2-151bf7a9bc11 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:12,772 INFO __main__ backtest data check id=949583ee seconds=0.007 missing=['fx_rates:USD/CNY']
+2026-07-01 18:15:12,778 INFO app.services.data_sync sync_all start range=2024-05-01..2026-07-01 missing_items=['fx_rates:USD/CNY'] plan_prices=[] plan_dividends=[] plan_index=False plan_repo=[] plan_fx=['USD/CNY']
+2026-07-01 18:15:12,780 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:15:12,780 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:15:12,780 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:15:12,780 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:15:12,780 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-01 18:15:13,684 INFO app.services.data_sync sync fx source complete pair=USD/CNY source=yahoo range=2026-07-01..2026-07-01 rows=1
+2026-07-01 18:15:13,684 INFO app.services.data_sync sync fx complete ranges=1 rows=1 seconds=0.899
+2026-07-01 18:15:13,685 INFO app.services.data_sync sync_all complete seconds=0.908 inserted={'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 1} missing=[] warnings=1
+2026-07-01 18:15:13,686 INFO __main__ backtest sync complete id=949583ee seconds=0.909 result={'inserted': {'prices': 0, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 1}, 'warnings': ['DataSrc Postgres returned no USD/CNY rows'], 'missing_data': []}
+2026-07-01 18:15:13,704 INFO __main__ backtest post-sync data check id=949583ee seconds=0.004 missing=[]
+2026-07-01 18:15:13,759 INFO __main__ backtest cache invalidated id=949583ee seconds=0.052
+2026-07-01 18:15:13,760 INFO app.services.backtest_engine run_backtest start range=2024-05-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:15:13,773 INFO app.services.backtest_engine run_backtest data loaded days=566 price_rows=2987 fx_rows=560 repo_rows=524 one_day_repo_rows=524 dividend_events=10 seconds=0.005
+2026-07-01 18:15:13,791 INFO app.services.backtest_engine run_backtest main loop complete rows=566 trades=6 rebalance=3 seconds=0.016
+2026-07-01 18:15:13,816 INFO app.services.backtest_engine run_backtest comparison complete rows=566 seconds=0.023
+2026-07-01 18:15:13,816 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.000
+2026-07-01 18:15:13,822 INFO app.services.backtest_engine run_backtest persisted run_id=3a9ee9f8-98a5-4017-95c2-7d2e76d23190 rows=566 trades=6 rebalance=3 seconds=0.004 total_seconds=0.062
+2026-07-01 18:15:13,824 INFO __main__ backtest engine complete id=949583ee seconds=0.064 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:15:13,872 INFO __main__ backtest status complete id=949583ee seconds=0.047 rows=14
+2026-07-01 18:15:13,873 INFO __main__ backtest request complete id=949583ee total_seconds=1.113
+2026-07-01 18:15:14,178 INFO __main__ http request method=GET path=/api/backtest/jobs/de00d7c7-1eec-4e32-b5b2-151bf7a9bc11 status=200 bytes=4489 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:14,188 INFO __main__ http request method=GET path=/api/backtest/3a9ee9f8-98a5-4017-95c2-7d2e76d23190/trades status=200 bytes=2765 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:14,226 INFO __main__ http request method=GET path=/api/backtest/3a9ee9f8-98a5-4017-95c2-7d2e76d23190/series status=200 bytes=709356 seconds=0.054 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:14,243 INFO __main__ http request method=GET path=/api/backtest/3a9ee9f8-98a5-4017-95c2-7d2e76d23190/rebalance status=200 bytes=6427 seconds=0.061 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:45,141 INFO __main__ http request method=GET path=/ status=200 bytes=4422 seconds=0.066 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:45,155 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=5458 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:45,155 INFO __main__ http request method=GET path=/static/app.js?v=20260701-fee-summary status=200 bytes=34681 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:45,201 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:45,242 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=2675 seconds=0.028 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:55,642 INFO __main__ backtest request start id=c417f9f8 range=2012-01-01..2026-07-01 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:15:55,642 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:55,644 INFO __main__ backtest lock acquired id=c417f9f8 wait_seconds=0.002
+2026-07-01 18:15:55,646 INFO __main__ http request method=GET path=/api/backtest/jobs/9e11c889-4039-4ea8-9a6d-7976926ae934 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:55,700 INFO __main__ backtest data check id=c417f9f8 seconds=0.046 missing=[]
+2026-07-01 18:15:55,702 INFO __main__ backtest cache miss id=c417f9f8 seconds=0.000
+2026-07-01 18:15:55,709 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:15:55,786 INFO app.services.backtest_engine run_backtest data loaded days=3783 price_rows=15239 fx_rows=3773 repo_rows=3496 one_day_repo_rows=3496 dividend_events=70 seconds=0.058
+2026-07-01 18:15:56,014 INFO app.services.backtest_engine run_backtest main loop complete rows=3783 trades=37 rebalance=15 seconds=0.221
+2026-07-01 18:15:56,248 INFO app.services.backtest_engine run_backtest comparison complete rows=3783 seconds=0.232
+2026-07-01 18:15:56,255 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.004
+2026-07-01 18:15:56,296 INFO app.services.backtest_engine run_backtest persisted run_id=09597a47-c12e-47fb-b140-46088dd23e80 rows=3783 trades=37 rebalance=15 seconds=0.040 total_seconds=0.588
+2026-07-01 18:15:56,301 INFO __main__ backtest engine complete id=c417f9f8 seconds=0.595 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:15:56,301 INFO __main__ backtest request complete id=c417f9f8 total_seconds=0.662
+2026-07-01 18:15:57,061 INFO __main__ http request method=GET path=/api/backtest/jobs/9e11c889-4039-4ea8-9a6d-7976926ae934 status=200 bytes=1244 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:57,075 INFO __main__ http request method=GET path=/api/backtest/09597a47-c12e-47fb-b140-46088dd23e80/trades status=200 bytes=16925 seconds=0.010 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:57,082 INFO __main__ http request method=GET path=/api/backtest/09597a47-c12e-47fb-b140-46088dd23e80/rebalance status=200 bytes=31671 seconds=0.018 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:15:57,471 INFO __main__ http request method=GET path=/api/backtest/09597a47-c12e-47fb-b140-46088dd23e80/series status=200 bytes=4362094 seconds=0.408 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:06,641 INFO __main__ backtest request start id=f18b3ed4 range=2012-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:16:06,642 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:06,642 INFO __main__ backtest lock acquired id=f18b3ed4 wait_seconds=0.001
+2026-07-01 18:16:06,645 INFO __main__ http request method=GET path=/api/backtest/jobs/474e3c83-43b0-4e94-9faa-588fd4b13265 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:06,679 INFO __main__ backtest data check id=f18b3ed4 seconds=0.030 missing=[]
+2026-07-01 18:16:06,681 INFO __main__ backtest cache miss id=f18b3ed4 seconds=0.000
+2026-07-01 18:16:06,685 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:16:06,740 INFO app.services.backtest_engine run_backtest data loaded days=3783 price_rows=15239 fx_rows=3765 repo_rows=3496 one_day_repo_rows=3496 dividend_events=70 seconds=0.041
+2026-07-01 18:16:06,895 INFO app.services.backtest_engine run_backtest main loop complete rows=3783 trades=15 rebalance=14 seconds=0.154
+2026-07-01 18:16:07,045 INFO app.services.backtest_engine run_backtest comparison complete rows=3783 seconds=0.159
+2026-07-01 18:16:07,045 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.002
+2026-07-01 18:16:07,087 INFO app.services.backtest_engine run_backtest persisted run_id=6999de4b-6a4b-48a5-9525-0c7f54510d7c rows=3783 trades=15 rebalance=14 seconds=0.027 total_seconds=0.403
+2026-07-01 18:16:07,092 INFO __main__ backtest engine complete id=f18b3ed4 seconds=0.407 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:16:07,094 INFO __main__ backtest request complete id=f18b3ed4 total_seconds=0.452
+2026-07-01 18:16:08,059 INFO __main__ http request method=GET path=/api/backtest/jobs/474e3c83-43b0-4e94-9faa-588fd4b13265 status=200 bytes=1230 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:08,062 INFO __main__ http request method=GET path=/api/backtest/6999de4b-6a4b-48a5-9525-0c7f54510d7c/rebalance status=200 bytes=28084 seconds=0.006 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:08,071 INFO __main__ http request method=GET path=/api/backtest/6999de4b-6a4b-48a5-9525-0c7f54510d7c/trades status=200 bytes=6615 seconds=0.007 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:08,361 INFO __main__ http request method=GET path=/api/backtest/6999de4b-6a4b-48a5-9525-0c7f54510d7c/series status=200 bytes=4136252 seconds=0.300 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:28,250 INFO __main__ backtest request start id=73d1192a range=2025-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:16:28,250 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:28,252 INFO __main__ backtest lock acquired id=73d1192a wait_seconds=0.002
+2026-07-01 18:16:28,253 INFO __main__ http request method=GET path=/api/backtest/jobs/ec80d18c-3fa9-4166-90d5-ea8c810ffb5c status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:28,262 INFO __main__ backtest data check id=73d1192a seconds=0.005 missing=[]
+2026-07-01 18:16:28,264 INFO __main__ backtest cache miss id=73d1192a seconds=0.000
+2026-07-01 18:16:28,264 INFO app.services.backtest_engine run_backtest start range=2025-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:16:28,286 INFO app.services.backtest_engine run_backtest data loaded days=391 price_rows=1997 fx_rows=385 repo_rows=360 one_day_repo_rows=360 dividend_events=7 seconds=0.004
+2026-07-01 18:16:28,295 INFO app.services.backtest_engine run_backtest main loop complete rows=390 trades=7 rebalance=2 seconds=0.015
+2026-07-01 18:16:28,319 INFO app.services.backtest_engine run_backtest comparison complete rows=391 seconds=0.016
+2026-07-01 18:16:28,320 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.000
+2026-07-01 18:16:28,324 INFO app.services.backtest_engine run_backtest persisted run_id=93cd9b6c-5479-4e67-adf7-6b4052c4cb13 rows=390 trades=7 rebalance=2 seconds=0.002 total_seconds=0.054
+2026-07-01 18:16:28,325 INFO __main__ backtest engine complete id=73d1192a seconds=0.055 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:16:28,326 INFO __main__ backtest request complete id=73d1192a total_seconds=0.077
+2026-07-01 18:16:29,659 INFO __main__ http request method=GET path=/api/backtest/jobs/ec80d18c-3fa9-4166-90d5-ea8c810ffb5c status=200 bytes=1262 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:29,672 INFO __main__ http request method=GET path=/api/backtest/93cd9b6c-5479-4e67-adf7-6b4052c4cb13/rebalance status=200 bytes=4396 seconds=0.009 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:29,673 INFO __main__ http request method=GET path=/api/backtest/93cd9b6c-5479-4e67-adf7-6b4052c4cb13/trades status=200 bytes=3195 seconds=0.009 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:29,717 INFO __main__ http request method=GET path=/api/backtest/93cd9b6c-5479-4e67-adf7-6b4052c4cb13/series status=200 bytes=506587 seconds=0.055 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:35,375 INFO __main__ backtest request start id=95687c68 range=2025-01-01..2026-07-01 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:16:35,375 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:35,377 INFO __main__ backtest lock acquired id=95687c68 wait_seconds=0.002
+2026-07-01 18:16:35,378 INFO __main__ http request method=GET path=/api/backtest/jobs/135821dc-eb78-4a6e-a0bb-eb3c7ce3664c status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:35,390 INFO __main__ backtest data check id=95687c68 seconds=0.005 missing=[]
+2026-07-01 18:16:35,392 INFO __main__ backtest cache miss id=95687c68 seconds=0.000
+2026-07-01 18:16:35,400 INFO app.services.backtest_engine run_backtest start range=2025-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:16:35,420 INFO app.services.backtest_engine run_backtest data loaded days=391 price_rows=1997 fx_rows=386 repo_rows=360 one_day_repo_rows=360 dividend_events=7 seconds=0.006
+2026-07-01 18:16:35,438 INFO app.services.backtest_engine run_backtest main loop complete rows=390 trades=6 rebalance=2 seconds=0.019
+2026-07-01 18:16:35,471 INFO app.services.backtest_engine run_backtest comparison complete rows=391 seconds=0.028
+2026-07-01 18:16:35,474 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.001
+2026-07-01 18:16:35,481 INFO app.services.backtest_engine run_backtest persisted run_id=52189e7b-3b99-4a05-8361-ebfc5bcd426e rows=390 trades=6 rebalance=2 seconds=0.006 total_seconds=0.082
+2026-07-01 18:16:35,484 INFO __main__ backtest engine complete id=95687c68 seconds=0.085 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:16:35,485 INFO __main__ backtest request complete id=95687c68 total_seconds=0.110
+2026-07-01 18:16:36,798 INFO __main__ http request method=GET path=/api/backtest/jobs/135821dc-eb78-4a6e-a0bb-eb3c7ce3664c status=200 bytes=1276 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:36,807 INFO __main__ http request method=GET path=/api/backtest/52189e7b-3b99-4a05-8361-ebfc5bcd426e/rebalance status=200 bytes=4410 seconds=0.006 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:36,807 INFO __main__ http request method=GET path=/api/backtest/52189e7b-3b99-4a05-8361-ebfc5bcd426e/trades status=200 bytes=2711 seconds=0.006 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:36,856 INFO __main__ http request method=GET path=/api/backtest/52189e7b-3b99-4a05-8361-ebfc5bcd426e/series status=200 bytes=504742 seconds=0.055 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:38,508 INFO __main__ backtest request start id=bf44f6f2 range=2025-01-01..2026-07-01 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:16:38,508 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:38,509 INFO __main__ backtest lock acquired id=bf44f6f2 wait_seconds=0.001
+2026-07-01 18:16:38,511 INFO __main__ http request method=GET path=/api/backtest/jobs/9ced28e2-c615-4821-9580-746d5b53dae1 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:38,520 INFO __main__ backtest data check id=bf44f6f2 seconds=0.004 missing=[]
+2026-07-01 18:16:38,522 INFO __main__ backtest cache hit id=bf44f6f2 seconds=0.000 total_seconds=0.014
+2026-07-01 18:16:39,931 INFO __main__ http request method=GET path=/api/backtest/jobs/9ced28e2-c615-4821-9580-746d5b53dae1 status=200 bytes=1275 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:39,939 INFO __main__ http request method=GET path=/api/backtest/52189e7b-3b99-4a05-8361-ebfc5bcd426e/rebalance status=200 bytes=4410 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:39,942 INFO __main__ http request method=GET path=/api/backtest/52189e7b-3b99-4a05-8361-ebfc5bcd426e/trades status=200 bytes=2711 seconds=0.006 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:39,985 INFO __main__ http request method=GET path=/api/backtest/52189e7b-3b99-4a05-8361-ebfc5bcd426e/series status=200 bytes=504742 seconds=0.052 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:55,658 INFO __main__ backtest request start id=9baf5a0d range=2025-01-01..2026-07-01 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:16:55,658 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:55,659 INFO __main__ backtest lock acquired id=9baf5a0d wait_seconds=0.001
+2026-07-01 18:16:55,660 INFO __main__ http request method=GET path=/api/backtest/jobs/da6847ef-9d56-42e8-aaac-70378c556492 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:55,670 INFO __main__ backtest data check id=9baf5a0d seconds=0.003 missing=[]
+2026-07-01 18:16:55,671 INFO __main__ backtest cache miss id=9baf5a0d seconds=0.000
+2026-07-01 18:16:55,675 INFO app.services.backtest_engine run_backtest start range=2025-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:16:55,689 INFO app.services.backtest_engine run_backtest data loaded days=391 price_rows=1997 fx_rows=386 repo_rows=360 one_day_repo_rows=360 dividend_events=7 seconds=0.003
+2026-07-01 18:16:55,705 INFO app.services.backtest_engine run_backtest main loop complete rows=390 trades=5 rebalance=2 seconds=0.014
+2026-07-01 18:16:55,720 INFO app.services.backtest_engine run_backtest comparison complete rows=391 seconds=0.014
+2026-07-01 18:16:55,722 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.000
+2026-07-01 18:16:55,836 INFO app.services.backtest_engine run_backtest persisted run_id=84f35b08-72a0-4b33-acf3-30ff1575ba9c rows=390 trades=5 rebalance=2 seconds=0.112 total_seconds=0.161
+2026-07-01 18:16:55,837 INFO __main__ backtest engine complete id=9baf5a0d seconds=0.162 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:16:55,838 INFO __main__ backtest request complete id=9baf5a0d total_seconds=0.180
+2026-07-01 18:16:57,065 INFO __main__ http request method=GET path=/api/backtest/jobs/da6847ef-9d56-42e8-aaac-70378c556492 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:16:58,678 INFO __main__ http request method=GET path=/api/backtest/jobs/da6847ef-9d56-42e8-aaac-70378c556492 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:17:00,495 INFO __main__ http request method=GET path=/api/backtest/jobs/da6847ef-9d56-42e8-aaac-70378c556492 status=200 bytes=355 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:17:02,499 INFO __main__ http request method=GET path=/api/backtest/jobs/da6847ef-9d56-42e8-aaac-70378c556492 status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:17:04,705 INFO __main__ http request method=GET path=/api/backtest/jobs/da6847ef-9d56-42e8-aaac-70378c556492 status=200 bytes=1275 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:17:04,712 INFO __main__ http request method=GET path=/api/backtest/84f35b08-72a0-4b33-acf3-30ff1575ba9c/rebalance status=200 bytes=4430 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:17:04,712 INFO __main__ http request method=GET path=/api/backtest/84f35b08-72a0-4b33-acf3-30ff1575ba9c/trades status=200 bytes=2302 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:17:04,746 INFO __main__ http request method=GET path=/api/backtest/84f35b08-72a0-4b33-acf3-30ff1575ba9c/series status=200 bytes=502427 seconds=0.049 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:18:06,352 INFO __main__ http request method=GET path=/api/backtest/b5a0f9c7-84c9-4ee9-aea6-6a26dd3fc5b0/trades status=404 bytes=30 seconds=0.005 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:18:06,372 INFO __main__ http request method=GET path=/api/backtest/84f35b08-72a0-4b33-acf3-30ff1575ba9c/trades status=200 bytes=2302 seconds=0.007 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:18:06,404 INFO __main__ http request method=GET path=/api/backtest/93cd9b6c-5479-4e67-adf7-6b4052c4cb13/trades status=200 bytes=3195 seconds=0.005 client=127.0.0.1 ua=curl/8.19.0
+2026-07-01 18:19:26,387 INFO __main__ backtest request start id=c4710797 range=2025-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:19:26,388 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=251 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:19:26,389 INFO __main__ backtest lock acquired id=c4710797 wait_seconds=0.002
+2026-07-01 18:19:26,391 INFO __main__ http request method=GET path=/api/backtest/jobs/b81425e8-c462-4202-873e-dafad4297faf status=200 bytes=355 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:19:26,397 INFO __main__ backtest data check id=c4710797 seconds=0.003 missing=[]
+2026-07-01 18:19:26,399 INFO __main__ backtest cache miss id=c4710797 seconds=0.000
+2026-07-01 18:19:26,405 INFO app.services.backtest_engine run_backtest start range=2025-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:19:26,419 INFO app.services.backtest_engine run_backtest data loaded days=391 price_rows=1997 fx_rows=385 repo_rows=360 one_day_repo_rows=360 dividend_events=7 seconds=0.004
+2026-07-01 18:19:26,436 INFO app.services.backtest_engine run_backtest main loop complete rows=390 trades=5 rebalance=2 seconds=0.014
+2026-07-01 18:19:26,454 INFO app.services.backtest_engine run_backtest comparison complete rows=391 seconds=0.017
+2026-07-01 18:19:26,456 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.000
+2026-07-01 18:19:26,460 INFO app.services.backtest_engine run_backtest persisted run_id=21834e6f-09c0-462b-848e-463d944e7e43 rows=390 trades=5 rebalance=2 seconds=0.003 total_seconds=0.054
+2026-07-01 18:19:26,462 INFO __main__ backtest engine complete id=c4710797 seconds=0.056 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:19:26,463 INFO __main__ backtest request complete id=c4710797 total_seconds=0.075
+2026-07-01 18:19:27,800 INFO __main__ http request method=GET path=/api/backtest/jobs/b81425e8-c462-4202-873e-dafad4297faf status=200 bytes=1259 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:19:27,810 INFO __main__ http request method=GET path=/api/backtest/21834e6f-09c0-462b-848e-463d944e7e43/trades status=200 bytes=2302 seconds=0.006 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:19:27,845 INFO __main__ http request method=GET path=/api/backtest/21834e6f-09c0-462b-848e-463d944e7e43/series status=200 bytes=503169 seconds=0.043 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:19:27,848 INFO __main__ http request method=GET path=/api/backtest/21834e6f-09c0-462b-848e-463d944e7e43/rebalance status=200 bytes=4367 seconds=0.045 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-01 18:22:17,602 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4685 seconds=0.001 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:22:17,619 INFO __main__ backtest request start id=cfcc612d range=2025-01-01..2026-07-01 repo=204001 assets=['03195.HK', '512890.SH', '510300.SH', '518880.SH']
+2026-07-01 18:22:17,620 INFO __main__ backtest lock acquired id=cfcc612d wait_seconds=0.002
+2026-07-01 18:22:17,635 INFO __main__ backtest data check id=cfcc612d seconds=0.007 missing=[]
+2026-07-01 18:22:17,637 INFO __main__ backtest cache miss id=cfcc612d seconds=0.001
+2026-07-01 18:22:17,638 INFO app.services.backtest_engine run_backtest start range=2025-01-01..2026-07-01 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-01 18:22:17,668 INFO app.services.backtest_engine run_backtest data loaded days=391 price_rows=1997 fx_rows=385 repo_rows=360 one_day_repo_rows=360 dividend_events=7 seconds=0.007
+2026-07-01 18:22:17,713 INFO app.services.backtest_engine run_backtest main loop complete rows=390 trades=5 rebalance=2 seconds=0.043
+2026-07-01 18:22:17,749 INFO app.services.backtest_engine run_backtest comparison complete rows=391 seconds=0.033
+2026-07-01 18:22:17,751 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.001
+2026-07-01 18:22:17,752 INFO app.services.backtest_engine run_backtest persisted run_id=a61420c9-7fcd-471c-8ed5-13b314707d4b rows=390 trades=5 rebalance=2 seconds=0.005 total_seconds=0.115
+2026-07-01 18:22:17,752 INFO __main__ backtest engine complete id=cfcc612d seconds=0.118 cache={'hit': False, 'mode': '重新计算'}
+2026-07-01 18:22:17,763 INFO __main__ backtest request complete id=cfcc612d total_seconds=0.145
+2026-07-01 18:22:17,796 INFO __main__ http request method=POST path=/api/backtest/run status=200 bytes=809 seconds=0.188 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:22:17,825 INFO __main__ http request method=GET path=/api/backtest/a61420c9-7fcd-471c-8ed5-13b314707d4b/trades status=200 bytes=2300 seconds=0.029 client=127.0.0.1 ua=Python-urllib/3.11
+2026-07-01 18:24:57,516 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:25:17,538 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:25:57,575 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:26:07,586 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:26:32,623 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:26:37,627 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:26:42,642 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:27:02,668 INFO __main__ backtest jobs cleaned count=1
+2026-07-01 18:29:27,876 INFO __main__ backtest jobs cleaned count=1
+2026-07-02 17:59:07,771 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.043 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 17:59:21,890 INFO __main__ http request method=GET path=/static/app.js status=200 bytes=34681 seconds=0.385 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:02:10,581 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3417 seconds=0.017 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:02:10,763 INFO __main__ http request method=GET path=/static/app.js status=200 bytes=36274 seconds=0.111 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:02:26,951 INFO __main__ http request method=GET path=/ status=200 bytes=4428 seconds=0.019 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:26,968 INFO __main__ http request method=GET path=/static/styles.css status=200 bytes=5458 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:26,969 INFO __main__ http request method=GET path=/static/app.js?v=20260702-request-stability status=200 bytes=36274 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:26,992 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3417 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:27,082 INFO __main__ http request method=GET path=/favicon.ico status=404 bytes=0 seconds=0.003 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:27,135 INFO __main__ http request method=GET path=/api/data/status status=200 bytes=1855 seconds=0.056 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:49,516 INFO __main__ backtest request start id=2ded4ca9 range=2012-01-01..2026-07-02 repo=204001 assets=['VOO', '512890.SH', '510300.SH', '518880.SH']
+2026-07-02 18:02:49,516 INFO __main__ http request method=POST path=/api/backtest/start status=202 bytes=286 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:49,517 INFO __main__ backtest lock acquired id=2ded4ca9 wait_seconds=0.002
+2026-07-02 18:02:49,520 INFO __main__ http request method=GET path=/api/backtest/jobs/1eecdff4-4633-4276-9995-2fe4c0742083 status=200 bytes=382 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:49,568 INFO __main__ backtest data check id=2ded4ca9 seconds=0.045 missing=['dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH', 'dividends:VOO', 'fx_rates:USD/CNY', 'prices:000300.SH', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'prices:VOO', 'repo_rates:204001']
+2026-07-02 18:02:49,573 INFO app.services.data_sync sync_all start range=2012-01-01..2026-07-02 missing_items=['dividends:510300.SH', 'dividends:512890.SH', 'dividends:518880.SH', 'dividends:VOO', 'fx_rates:USD/CNY', 'prices:000300.SH', 'prices:510300.SH', 'prices:512890.SH', 'prices:518880.SH', 'prices:VOO', 'repo_rates:204001'] plan_prices=['510300.SH', '512890.SH', '518880.SH', 'VOO'] plan_dividends=['510300.SH', '512890.SH', '518880.SH', 'VOO'] plan_index=True plan_repo=['204001'] plan_fx=['USD/CNY']
+2026-07-02 18:02:49,584 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-02 18:02:50,425 INFO app.services.data_sync sync price source complete symbol=VOO source=yahoo-chart range=2026-07-01..2026-07-01 rows=1
+2026-07-02 18:02:50,703 INFO app.services.data_sync sync asset complete symbol=VOO prices=1 dividends=0 adj=0 seconds=1.121 warnings=0 missing=[]
+2026-07-02 18:02:50,931 INFO __main__ http request method=GET path=/api/backtest/jobs/1eecdff4-4633-4276-9995-2fe4c0742083 status=200 bytes=382 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:52,549 INFO __main__ http request method=GET path=/api/backtest/jobs/1eecdff4-4633-4276-9995-2fe4c0742083 status=200 bytes=382 seconds=0.001 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:53,200 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=1 dividends=0 adj=0 seconds=3.617 warnings=4 missing=[]
+2026-07-02 18:02:53,705 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=1 dividends=0 adj=0 seconds=4.122 warnings=4 missing=[]
+2026-07-02 18:02:54,369 INFO __main__ http request method=GET path=/api/backtest/jobs/1eecdff4-4633-4276-9995-2fe4c0742083 status=200 bytes=382 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:54,847 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=1 dividends=0 adj=0 seconds=5.264 warnings=4 missing=[]
+2026-07-02 18:02:55,518 INFO app.services.data_sync sync index complete ranges=1 rows=1 seconds=0.670
+2026-07-02 18:02:56,145 INFO app.services.data_sync sync repo complete ranges=1 rows=1 seconds=0.625
+2026-07-02 18:02:56,384 INFO __main__ http request method=GET path=/api/backtest/jobs/1eecdff4-4633-4276-9995-2fe4c0742083 status=200 bytes=382 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:56,557 INFO app.services.data_sync sync fx source complete pair=USD/CNY source=yahoo range=2026-07-02..2026-07-02 rows=1
+2026-07-02 18:02:56,559 INFO app.services.data_sync sync fx complete ranges=1 rows=1 seconds=0.413
+2026-07-02 18:02:56,560 INFO app.services.data_sync sync_all complete seconds=6.988 inserted={'prices': 5, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 1, 'fx_rates': 1} missing=[] warnings=10
+2026-07-02 18:02:56,562 INFO __main__ backtest sync complete id=2ded4ca9 seconds=6.989 result={'inserted': {'prices': 5, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 1, 'fx_rates': 1}, 'warnings': ['DataSrc Postgres returned no USD/CNY rows', 'DataSrc Postgres returned no price rows for 000300.SH', 'DataSrc Postgres returned no price rows for 510300.SH', 'DataSrc Postgres returned no price rows for 512890.SH', 'DataSrc Postgres returned no price rows for 518880.SH', 'DataSrc Postgres returned no repo rows for 204001', 'TUSHARE_TOKEN is not configured', 'skip Tushare adj for 510300.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 512890.SH because primary Tushare price source is unavailable', 'skip Tushare adj for 518880.SH because primary Tushare price source is unavailable'], 'missing_data': []}
+2026-07-02 18:02:56,617 INFO __main__ backtest post-sync data check id=2ded4ca9 seconds=0.036 missing=[]
+2026-07-02 18:02:56,978 INFO __main__ backtest cache invalidated id=2ded4ca9 seconds=0.356
+2026-07-02 18:02:56,980 INFO app.services.backtest_engine run_backtest start range=2012-01-01..2026-07-02 assets=['VOO', '03195.HK', '512890.SH', '510300.SH', '518880.SH'] repo=204001
+2026-07-02 18:02:57,041 INFO app.services.backtest_engine run_backtest data loaded days=3784 price_rows=15244 fx_rows=3774 repo_rows=3497 one_day_repo_rows=3497 dividend_events=70 seconds=0.048
+2026-07-02 18:02:57,241 INFO app.services.backtest_engine run_backtest main loop complete rows=3784 trades=35 rebalance=15 seconds=0.197
+2026-07-02 18:02:57,455 INFO app.services.backtest_engine run_backtest comparison complete rows=3784 seconds=0.212
+2026-07-02 18:02:57,459 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.003
+2026-07-02 18:02:57,502 INFO app.services.backtest_engine run_backtest persisted run_id=af095856-2a4f-40a7-bbbc-d4c611572264 rows=3784 trades=35 rebalance=15 seconds=0.042 total_seconds=0.523
+2026-07-02 18:02:57,508 INFO __main__ backtest engine complete id=2ded4ca9 seconds=0.529 cache={'hit': False, 'mode': '重新计算'}
+2026-07-02 18:02:57,536 INFO __main__ backtest status complete id=2ded4ca9 seconds=0.026 rows=14
+2026-07-02 18:02:57,537 INFO __main__ backtest request complete id=2ded4ca9 total_seconds=8.021
+2026-07-02 18:02:58,603 INFO __main__ http request method=GET path=/api/backtest/jobs/1eecdff4-4633-4276-9995-2fe4c0742083 status=200 bytes=3874 seconds=0.000 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:58,760 INFO __main__ http request method=GET path=/api/backtest/af095856-2a4f-40a7-bbbc-d4c611572264/series status=200 bytes=2975320 seconds=0.152 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:58,791 INFO __main__ http request method=GET path=/api/backtest/af095856-2a4f-40a7-bbbc-d4c611572264/rebalance status=200 bytes=21000 seconds=0.007 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:02:58,803 INFO __main__ http request method=GET path=/api/backtest/af095856-2a4f-40a7-bbbc-d4c611572264/trades status=200 bytes=10867 seconds=0.006 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
+2026-07-02 18:03:16,604 INFO __main__ http request method=GET path=/api/backtest/af095856-2a4f-40a7-bbbc-d4c611572264/series status=200 bytes=4694592 seconds=0.985 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:03:16,793 INFO __main__ http request method=GET path=/api/backtest/af095856-2a4f-40a7-bbbc-d4c611572264/series status=200 bytes=2975320 seconds=0.148 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:06:57,881 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.024 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:06:57,939 INFO __main__ http request method=GET path=/static/app.js status=200 bytes=36274 seconds=0.011 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:07:13,209 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.013 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:07:33,616 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3417 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:07:33,786 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3417 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:07:33,789 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:07:40,721 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3563 seconds=0.003 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:08:43,209 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=3417 seconds=0.001 client=127.0.0.1 ua=curl/8.19.0
+2026-07-02 18:08:43,308 INFO __main__ http request method=GET path=/static/app.js status=200 bytes=36274 seconds=0.047 client=127.0.0.1 ua=curl/8.19.0

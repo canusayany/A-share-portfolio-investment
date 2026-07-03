@@ -154,6 +154,42 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(current["status"], "completed")
         self.assertGreater(current["result"]["summary"]["final_asset_cny"], 0)
 
+    def test_async_backtest_start_reuses_client_request_id(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        original_execute = main_module.execute_backtest_request
+        calls = 0
+
+        def slow_execute(settings, write_lock, config, should_cancel=None):
+            nonlocal calls
+            calls += 1
+            time.sleep(0.15)
+            return {"run_id": "same-run", "summary": {"final_asset_cny": 1}, "cache": {"hit": False}}
+
+        server = create_server(port=0, db_path=db_path)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        try:
+            main_module.execute_backtest_request = slow_execute
+            thread.start()
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}"
+            payload = {"config": cfg, "client_request_id": "same-click"}
+            first = http_json(f"{base_url}/api/backtest/start", payload)
+            second = http_json(f"{base_url}/api/backtest/start", payload)
+            for _ in range(20):
+                current = http_json(f"{base_url}/api/backtest/jobs/{first['job_id']}")
+                if current["status"] == "completed":
+                    break
+                time.sleep(0.05)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            main_module.execute_backtest_request = original_execute
+
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertEqual(calls, 1)
+        self.assertEqual(current["status"], "completed")
+
     def test_unpolled_async_backtest_job_is_cancelled(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
         original_execute = main_module.execute_backtest_request
