@@ -12,6 +12,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -154,6 +158,12 @@ summary {
   gap: 10px;
 }
 
+.repo-fixed-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
 .button-row {
   display: grid;
   grid-template-columns: 1fr;
@@ -180,9 +190,22 @@ summary {
 
 .asset-name {
   grid-column: 2 / 4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   color: var(--text);
   font-size: 13px;
   min-width: 0;
+}
+
+.asset-title {
+  min-width: 0;
+}
+
+.asset-effective {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .asset-control-group .asset-name {
@@ -357,6 +380,11 @@ td:first-child {
   }
 
   .date-row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .repo-fixed-controls {
     grid-template-columns: 1fr;
     gap: 0;
   }

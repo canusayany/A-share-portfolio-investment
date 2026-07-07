@@ -104,6 +104,11 @@ class CalendarAndConfigTests(unittest.TestCase):
         bad = default_config()
         bad["assets"] = [{**bad["assets"][0], "target_weight": 1.2}]
         self.assertTrue(validate_config(bad))
+        fixed_bucket = normalize_config({"repo_target_mode": "fixed_bucket"})
+        fixed_bucket["assets"] = [{**fixed_bucket["assets"][0], "target_weight": 1.2}]
+        self.assertFalse(any("target weights cannot exceed" in item for item in validate_config(fixed_bucket)))
+        bad_fixed_bucket = normalize_config({"repo_target_mode": "fixed_bucket", "repo_fixed_target_ratio": 1.2})
+        self.assertTrue(any("repo_fixed_target_ratio" in item for item in validate_config(bad_fixed_bucket)))
         duplicate_sp500 = normalize_config({})
         next(asset for asset in duplicate_sp500["assets"] if asset["symbol"] == "03195.HK")["enabled"] = True
         self.assertTrue(any("exclusive asset group sp500" in item for item in validate_config(duplicate_sp500)))

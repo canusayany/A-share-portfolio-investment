@@ -290,6 +290,9 @@ function readConfig() {
   next.rebalance_frequency = $("rebalanceFrequency").value;
   next.rebalance_band = Number($("rebalanceBand").value);
   next.monthly_spend_cny = Number($("monthlySpend").value);
+  next.repo_target_mode = $("repoTargetMode").value;
+  next.repo_fixed_target_cny = Number($("repoFixedTarget").value);
+  next.repo_fixed_target_ratio = Number($("repoFixedRatio").value);
   next.repo_symbol = $("repoSymbol").value;
   next.assets = next.assets.map((asset) => {
     if (isSp500Asset(asset)) {
@@ -317,17 +320,66 @@ function readConfig() {
   return next;
 }
 
+function currentAssetControls() {
+  const controls = [];
+  if ($(`enabled_${SP500_CONTROL_KEY}`)) {
+    controls.push({
+      key: SP500_CONTROL_KEY,
+      enabled: $(`enabled_${SP500_CONTROL_KEY}`).checked,
+      weight: Number($(`weight_${SP500_CONTROL_KEY}`).value || 0),
+    });
+  }
+  for (const asset of config.assets.filter((item) => !isSp500Asset(item))) {
+    controls.push({
+      key: asset.key,
+      enabled: $(`enabled_${asset.key}`)?.checked ?? Boolean(asset.enabled),
+      weight: Number($(`weight_${asset.key}`)?.value ?? asset.target_weight ?? 0),
+    });
+  }
+  return controls;
+}
+
+function setAssetWeightDisplay(key, weight, mode, enabled, effectiveWeight) {
+  const label = $(`weight_label_${key}`);
+  if (label) label.textContent = fmtPct(weight);
+  const effective = $(`effective_${key}`);
+  if (!effective) return;
+  if (mode === "fixed_bucket") {
+    effective.hidden = false;
+    effective.textContent = enabled ? `实际 ${fmtPct(effectiveWeight)}` : "未启用";
+  } else {
+    effective.hidden = true;
+    effective.textContent = "";
+  }
+}
+
 function updateRepoWeight() {
-  let enabledWeight = 0;
   if ($("enabled_sp500_group")) {
-    enabledWeight += $("enabled_sp500_group").checked ? Number($("weight_sp500_group").value) : 0;
     updateSp500Route();
   }
-  enabledWeight += config.assets.filter((asset) => !isSp500Asset(asset)).reduce((sum, asset) => {
-    const enabledEl = $(`enabled_${asset.key}`);
-    const weightEl = $(`weight_${asset.key}`);
-    return sum + ((enabledEl?.checked ?? asset.enabled) ? Number(weightEl?.value ?? asset.target_weight) : 0);
-  }, 0);
+  const mode = $("repoTargetMode")?.value || config.repo_target_mode || "residual_weight";
+  const controls = currentAssetControls();
+  const enabledWeight = controls.reduce((sum, item) => sum + (item.enabled ? item.weight : 0), 0);
+  if ($("assetWeightTitle")) $("assetWeightTitle").textContent = mode === "fixed_bucket" ? "资产分配比例" : "资产权重";
+  const fixedControls = $("repoFixedControls");
+  if (fixedControls) fixedControls.hidden = mode !== "fixed_bucket";
+  if ($("repoFixedRatioValue")) $("repoFixedRatioValue").textContent = fmtPct(Number($("repoFixedRatio")?.value || 0));
+  if (mode === "fixed_bucket") {
+    const initialCapital = Math.max(Number($("initialCapital")?.value || config.initial_capital_cny || 0), 0);
+    const fixedAmount = Math.max(Number($("repoFixedTarget")?.value || 0), 0);
+    const fixedRatio = Math.min(Math.max(Number($("repoFixedRatio")?.value || 0), 0), 1);
+    const repoTargetValue = initialCapital > 0 ? Math.min(fixedAmount + initialCapital * fixedRatio, initialCapital) : 0;
+    const repoWeight = initialCapital > 0 ? repoTargetValue / initialCapital : 1;
+    const remainingWeight = Math.max(1 - repoWeight, 0);
+    controls.forEach((item) => {
+      const effectiveWeight = item.enabled && enabledWeight > 0 ? (item.weight / enabledWeight) * remainingWeight : 0;
+      setAssetWeightDisplay(item.key, item.weight, mode, item.enabled, effectiveWeight);
+    });
+    $("repoWeight").textContent = `目标 ${fmtPct(repoWeight)}（￥${fmtMoney(repoTargetValue)}），剩余 ${fmtPct(remainingWeight)} 按比例分配`;
+    $("repoWeight").style.color = repoWeight >= 1 || enabledWeight <= 0 ? "#b42318" : "";
+    return;
+  }
+  controls.forEach((item) => setAssetWeightDisplay(item.key, item.weight, mode, item.enabled, item.enabled ? item.weight : 0));
   const repoWeight = Math.max(1 - enabledWeight, 0);
   $("repoWeight").textContent = fmtPct(repoWeight);
   $("repoWeight").style.color = enabledWeight > 1 ? "#b42318" : "";
@@ -350,6 +402,10 @@ function renderControls() {
   $("rebalanceBand").value = config.rebalance_band;
   $("bandValue").textContent = fmtPct(config.rebalance_band);
   $("monthlySpend").value = config.monthly_spend_cny;
+  $("repoTargetMode").value = config.repo_target_mode || "residual_weight";
+  $("repoFixedTarget").value = config.repo_fixed_target_cny ?? 360000;
+  $("repoFixedRatio").value = config.repo_fixed_target_ratio ?? 0;
+  $("repoFixedRatioValue").textContent = fmtPct(config.repo_fixed_target_ratio ?? 0);
   $("repoSymbol").innerHTML = (config.repo_options || []).map((option) => `<option value="${option.symbol}">${option.name}</option>`).join("");
   $("repoSymbol").value = config.repo_symbol;
   $("cnCommission").value = config.fees.cn_etf.commission_rate;
@@ -364,6 +420,9 @@ function renderControls() {
     $(id).addEventListener("input", renderFeeSummary);
   });
   $("ibkrPlan").addEventListener("change", renderFeeSummary);
+  ["initialCapital", "repoTargetMode", "repoFixedTarget", "repoFixedRatio"].forEach((id) => {
+    $(id).addEventListener(id === "repoTargetMode" ? "change" : "input", updateRepoWeight);
+  });
 
   const host = $("assetControls");
   host.innerHTML = "";
@@ -375,12 +434,14 @@ function renderControls() {
       <input id="enabled_${asset.key}" type="checkbox" ${asset.enabled ? "checked" : ""} />
       <input id="weight_${asset.key}" type="range" min="0" max="0.8" step="0.01" value="${asset.target_weight}" />
       <strong id="weight_label_${asset.key}">${fmtPct(asset.target_weight)}</strong>
-      <div class="asset-name">${assetName(asset.symbol)}</div>
+      <div class="asset-name">
+        <span class="asset-title">${assetName(asset.symbol)}</span>
+        <span id="effective_${asset.key}" class="asset-effective" hidden></span>
+      </div>
     `;
     host.appendChild(row);
     row.querySelector(`#enabled_${asset.key}`).addEventListener("change", updateRepoWeight);
     row.querySelector(`#weight_${asset.key}`).addEventListener("input", (event) => {
-      row.querySelector(`#weight_label_${asset.key}`).textContent = fmtPct(event.target.value);
       updateRepoWeight();
     });
   }
@@ -403,7 +464,10 @@ function renderSp500Control(host) {
     <input id="enabled_${SP500_CONTROL_KEY}" type="checkbox" ${enabled ? "checked" : ""} />
     <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" />
     <strong id="weight_label_${SP500_CONTROL_KEY}">${fmtPct(weight)}</strong>
-    <div class="asset-name">标普500</div>
+    <div class="asset-name">
+      <span class="asset-title">标普500</span>
+      <span id="effective_${SP500_CONTROL_KEY}" class="asset-effective" hidden></span>
+    </div>
     <label class="asset-type">
       类型
       <select id="sp500Type">
@@ -415,7 +479,6 @@ function renderSp500Control(host) {
   host.appendChild(row);
   row.querySelector(`#enabled_${SP500_CONTROL_KEY}`).addEventListener("change", updateRepoWeight);
   row.querySelector(`#weight_${SP500_CONTROL_KEY}`).addEventListener("input", (event) => {
-    row.querySelector(`#weight_label_${SP500_CONTROL_KEY}`).textContent = fmtPct(event.target.value);
     updateRepoWeight();
   });
   row.querySelector("#sp500Type").addEventListener("change", updateRepoWeight);

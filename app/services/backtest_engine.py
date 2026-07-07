@@ -215,15 +215,55 @@ def active_assets(config: dict[str, Any], day: date, latest_prices: dict[str, fl
     return result
 
 
-def effective_weights(config: dict[str, Any], day: date, latest_prices: dict[str, float | None]) -> dict[str, float]:
+def repo_fixed_target_weight(config: dict[str, Any], total_value_cny: float | None) -> float:
+    total_value = float(total_value_cny or config.get("initial_capital_cny") or 0.0)
+    if total_value <= 0:
+        return 1.0
+    fixed_amount = max(float(config.get("repo_fixed_target_cny", 0.0) or 0.0), 0.0)
+    fixed_ratio = min(max(float(config.get("repo_fixed_target_ratio", 0.0) or 0.0), 0.0), 1.0)
+    return min(max(fixed_amount / total_value + fixed_ratio, 0.0), 1.0)
+
+
+def effective_weights(
+    config: dict[str, Any],
+    day: date,
+    latest_prices: dict[str, float | None],
+    total_value_cny: float | None = None,
+) -> dict[str, float]:
     weights: dict[str, float] = {}
-    total_risk = 0.0
-    for asset in active_assets(config, day, latest_prices):
-        weight = float(asset.get("target_weight", 0.0))
-        weights[asset["symbol"]] = weight
-        total_risk += weight
-    weights["REPO"] = max(1.0 - total_risk, 0.0)
+    assets = active_assets(config, day, latest_prices)
+    if config.get("repo_target_mode", "residual_weight") == "fixed_bucket":
+        repo_weight = repo_fixed_target_weight(config, total_value_cny)
+        remaining_weight = max(1.0 - repo_weight, 0.0)
+        enabled_total = sum(
+            max(float(asset.get("target_weight", 0.0) or 0.0), 0.0)
+            for asset in config["assets"]
+            if asset.get("enabled", True)
+        )
+        active_total = 0.0
+        if enabled_total > 0 and remaining_weight > 0:
+            for asset in assets:
+                weight = max(float(asset.get("target_weight", 0.0) or 0.0), 0.0) / enabled_total * remaining_weight
+                if weight > 0:
+                    weights[asset["symbol"]] = weight
+                    active_total += weight
+        weights["REPO"] = min(repo_weight + max(remaining_weight - active_total, 0.0), 1.0)
+    else:
+        total_risk = 0.0
+        for asset in assets:
+            weight = float(asset.get("target_weight", 0.0))
+            weights[asset["symbol"]] = weight
+            total_risk += weight
+        weights["REPO"] = max(1.0 - total_risk, 0.0)
     return weights
+
+
+def exact_target_weights(targets: dict[str, float]) -> dict[str, float]:
+    desired = {key: max(float(value), 0.0) for key, value in targets.items()}
+    total = sum(desired.values())
+    if total <= 0:
+        return {"REPO": 1.0}
+    return {key: value / total for key, value in desired.items() if value > 1e-10}
 
 
 def should_rebalance(current_weights: dict[str, float], targets: dict[str, float], band: float) -> bool:
@@ -508,11 +548,12 @@ def _rebalance_state_to_band(
     allow_fractional_us_shares: bool,
     targets: dict[str, float],
     band: float,
+    rebalance_to_target: bool = False,
 ) -> tuple[float, float, float, float, dict[str, float]]:
     _liquidate_repo_to_cash(state)
     before_rebalance, values = _portfolio_value(state, latest_prices, fx_rates)
     current_weights = {key: (value / before_rebalance if before_rebalance else 0.0) for key, value in values.items()}
-    desired_weights = minimal_rebalance_weights(current_weights, targets, band)
+    desired_weights = exact_target_weights(targets) if rebalance_to_target else minimal_rebalance_weights(current_weights, targets, band)
     turnover = 0.0
     fee_before = state.total_fees_cny
 
@@ -807,7 +848,7 @@ def _simulate_comparison_series(
             state.total_spend_cny += actual_spend
 
         before_total, before_values = _portfolio_value(state, latest_prices, fx_rates)
-        targets = effective_weights({**config, "assets": assets}, day, latest_prices)
+        targets = effective_weights({**config, "assets": assets}, day, latest_prices, before_total)
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
         is_rebalance_day = day in reb_days or not initial_rebalance_done
         if is_rebalance_day and should_rebalance(current_weights, targets, float(config["rebalance_band"])):
@@ -822,6 +863,7 @@ def _simulate_comparison_series(
                 False,
                 targets,
                 float(config["rebalance_band"]),
+                config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
             )
         if is_rebalance_day and has_investable_asset_target(targets):
             initial_rebalance_done = True
@@ -965,7 +1007,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             period_external_flows["REPO"] = period_external_flows.get("REPO", 0.0) - actual_spend
 
         before_total, before_values = _portfolio_value(state, latest_prices, fx_rates)
-        targets = effective_weights(config, day, latest_prices)
+        targets = effective_weights(config, day, latest_prices, before_total)
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
         is_rebalance_day = day in reb_days or not initial_rebalance_done
         if is_rebalance_day and should_rebalance(current_weights, targets, float(config["rebalance_band"])):
@@ -988,6 +1030,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
                 bool(config.get("allow_fractional_us_shares", True)),
                 targets,
                 float(config["rebalance_band"]),
+                config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
             )
             _after_total, after_values = _portfolio_value(state, latest_prices, fx_rates)
             previous_total = daily_total_assets[-1] if daily_total_assets else float(config["initial_capital_cny"])
@@ -1005,6 +1048,8 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
                         {
                             "targets": targets,
                             "desired_weights": desired_weights,
+                            "repo_target_mode": config.get("repo_target_mode", "residual_weight"),
+                            "repo_target_value_cny": before_rebalance * desired_weights.get("REPO", 0.0),
                             "asset_performance": asset_performance,
                             "period_max_drawdown": event_max_drawdown,
                             "previous_total": previous_total,

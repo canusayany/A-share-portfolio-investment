@@ -109,6 +109,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rebalance_band": 0.02,
     "monthly_spend_cny": 5_000.0,
     "monthly_spend_day": "first_cn_trade_day",
+    "repo_target_mode": "residual_weight",
+    "repo_fixed_target_cny": 360_000.0,
+    "repo_fixed_target_ratio": 0.0,
     "repo_symbol": "204001",
     "repo_options": REPO_OPTIONS,
     "allow_fractional_us_shares": True,
@@ -249,12 +252,13 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     except (KeyError, TypeError, ValueError):
         errors.append("start_date and end_date must use YYYY-MM-DD")
 
+    repo_target_mode = config.get("repo_target_mode", "residual_weight")
     enabled_weight = sum(
         float(asset.get("target_weight", 0))
         for asset in config.get("assets", [])
         if asset.get("enabled", True)
     )
-    if enabled_weight > 1.0000001:
+    if repo_target_mode == "residual_weight" and enabled_weight > 1.0000001:
         errors.append("enabled asset target weights cannot exceed 100%")
     enabled_groups: dict[str, list[str]] = {}
     for asset in config.get("assets", []):
@@ -268,6 +272,16 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("initial_capital_cny must be positive")
     if config.get("rebalance_frequency") not in {"yearly", "semiannual"}:
         errors.append("rebalance_frequency must be yearly or semiannual")
+    if repo_target_mode not in {"residual_weight", "fixed_bucket"}:
+        errors.append("repo_target_mode must be residual_weight or fixed_bucket")
+    try:
+        if float(config.get("repo_fixed_target_cny", 0)) < 0:
+            errors.append("repo_fixed_target_cny must be non-negative")
+        repo_fixed_target_ratio = float(config.get("repo_fixed_target_ratio", 0))
+        if not 0 <= repo_fixed_target_ratio <= 1:
+            errors.append("repo_fixed_target_ratio must be between 0 and 1")
+    except (TypeError, ValueError):
+        errors.append("repo fixed target parameters must be numeric")
     valid_repo_symbols = {item["symbol"] for item in config.get("repo_options", REPO_OPTIONS)}
     if config.get("repo_symbol") not in valid_repo_symbols:
         errors.append("repo_symbol must be one of configured repo options")

@@ -74,6 +74,10 @@ class ApiTests(unittest.TestCase):
             html = resp.read().decode("utf-8")
         self.assertIn("跨市场组合回测", html)
         self.assertIn("dailyReturnChart", html)
+        self.assertIn("repoTargetMode", html)
+        self.assertIn("assetWeightTitle", html)
+        self.assertIn("static/echarts.min.js", html)
+        self.assertNotIn("cdn.jsdelivr.net", html)
         self.assertNotIn("syncBtn", html)
 
     def test_run_backtest_auto_syncs_when_data_is_missing(self) -> None:

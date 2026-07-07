@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import date
 
 from app.config import normalize_config
 from app.db import db_session, rows_to_dicts
@@ -15,6 +16,7 @@ from app.services.backtest_engine import (
     effective_weights,
     minimal_rebalance_weights,
     repo_tenor_days,
+    repo_fixed_target_weight,
     run_backtest,
     has_investable_asset_target,
     should_rebalance,
@@ -64,6 +66,42 @@ class BacktestEngineTests(unittest.TestCase):
         first_payload = json.loads(daily[0]["payload_json"])
         self.assertEqual(first_payload["targets"].get("VOO", 0), 0)
         self.assertGreater(first_payload["targets"]["REPO"], 0.6)
+
+    def test_fixed_bucket_mode_allocates_repo_first_then_scales_risk_assets(self) -> None:
+        cfg = normalize_config(
+            {
+                "repo_target_mode": "fixed_bucket",
+                "repo_fixed_target_cny": 360000,
+                "repo_fixed_target_ratio": 0.04,
+            }
+        )
+        latest_prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
+        weights = effective_weights(cfg, date(2020, 1, 2), latest_prices, 1_000_000)
+
+        self.assertAlmostEqual(repo_fixed_target_weight(cfg, 1_000_000), 0.40)
+        self.assertAlmostEqual(weights["REPO"], 0.40)
+        self.assertAlmostEqual(weights["VOO"], 0.24)
+        self.assertAlmostEqual(weights["512890.SH"], 0.096)
+        self.assertAlmostEqual(sum(weights.values()), 1.0)
+
+    def test_fixed_bucket_mode_runs_backtest_with_fixed_repo_rebalance_target(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        cfg["repo_target_mode"] = "fixed_bucket"
+        cfg["repo_fixed_target_cny"] = 360000
+        cfg["repo_fixed_target_ratio"] = 0.02
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            first_rebalance = conn.execute(
+                "SELECT * FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+
+        self.assertIsNotNone(first_rebalance)
+        payload = json.loads(first_rebalance["payload_json"])
+        expected_repo_target = 360000 + first_rebalance["total_asset_before"] * 0.02
+        self.assertEqual(payload["repo_target_mode"], "fixed_bucket")
+        self.assertAlmostEqual(payload["repo_target_value_cny"], expected_repo_target, delta=1)
+        self.assertAlmostEqual(payload["desired_weights"]["REPO"], payload["targets"]["REPO"])
 
     def test_us_and_cn_purchase_rules_are_separate(self) -> None:
         db_path, cfg = build_synced_db("2013-01-01", "2013-03-31")
