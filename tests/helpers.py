@@ -4,7 +4,7 @@ from pathlib import Path
 import math
 import tempfile
 
-from app.config import normalize_config
+from app.config import asset_price_start_date, normalize_config
 from app.db import db_session, init_db, insert_many, upsert_assets
 from app.services.calendar import business_days
 from app.services.data_sync import mark_sync_coverage
@@ -114,12 +114,13 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
             }
         ],
     )
-    seeds = {"VOO": 280.0, "03195.HK": 8.0, "512890.SH": 1.0, "510300.SH": 3.0, "518880.SH": 2.5, "000300.SH": 3500.0}
+    seeds = {"VOO": 280.0, "03195.HK": 8.0, "513500.SH": 1.0, "512890.SH": 1.0, "510300.SH": 3.0, "518880.SH": 2.5, "000300.SH": 3500.0}
     for asset in config["assets"]:
-        fetch_start = max(start, asset.get("inception_date") or start)
+        fetch_start = max(start, asset_price_start_date(asset, start))
         insert_many(conn, "prices", fixture_price_series(asset["symbol"], fetch_start, end, asset["currency"], seeds[asset["symbol"]]))
-        insert_many(conn, "fund_dividends", fixture_dividends(asset["symbol"], fetch_start, end, asset["currency"]))
-        mark_sync_coverage(conn, "dividends", asset["symbol"], fetch_start, end, "fixture:dividend")
+        dividend_start = max(start, asset.get("inception_date") or start)
+        insert_many(conn, "fund_dividends", fixture_dividends(asset["symbol"], dividend_start, end, asset["currency"]))
+        mark_sync_coverage(conn, "dividends", asset["symbol"], dividend_start, end, "fixture:dividend")
         if asset["market"] == "CN":
             insert_many(
                 conn,

@@ -513,7 +513,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 rows = rows_to_dicts(
                     conn.execute(
                         """
-                        SELECT trade_date,total_asset_cny,flow_cny,payload_json
+                        SELECT trade_date,total_asset_cny,flow_cny,
+                               daily_return,cumulative_return,drawdown,benchmark_return,payload_json
                         FROM portfolio_daily WHERE run_id=? ORDER BY trade_date
                         """,
                         (run_id,),

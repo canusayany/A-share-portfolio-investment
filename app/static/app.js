@@ -1,6 +1,7 @@
 let config = null;
 let currentRunId = null;
 const charts = {};
+let activeChartId = "assetChart";
 const APP_BASE_PATH = window.location.pathname.startsWith("/portfolio/") || window.location.pathname === "/portfolio"
   ? "/portfolio"
   : "";
@@ -16,9 +17,12 @@ const fmtNum = (v, d = 2) => Number(v || 0).toFixed(d);
 const STATIC_NAMES = {
   VOO: "标普500指数基金",
   "03195.HK": "港股通标普500ETF",
+  "513500.SH": "标普500ETF博时",
   "512890.SH": "红利低波基金",
   "510300.SH": "沪深300基金",
+  "160706": "嘉实沪深300ETF联接(LOF)A",
   "518880.SH": "黄金基金",
+  "Au99.99": "上海金交所 Au99.99",
   "000300.SH": "沪深300指数",
   "204001": "1天国债逆回购",
   "204002": "2天国债逆回购",
@@ -36,9 +40,12 @@ const STATIC_NAMES = {
 const SHORT_NAMES = {
   VOO: "标普500",
   "03195.HK": "港股通标普",
+  "513500.SH": "A股标普",
   "512890.SH": "红利",
   "510300.SH": "沪深300",
+  "160706": "嘉实300",
   "518880.SH": "黄金",
+  "Au99.99": "AU99.99",
   REPO: "逆回购",
 };
 
@@ -53,6 +60,16 @@ const DATA_KIND_NAMES = {
 const SIDE_NAMES = { BUY: "买入", SELL: "卖出" };
 const REASON_NAMES = { rebalance: "再平衡", liquidity_shortfall: "补足现金" };
 const CURRENCY_NAMES = { CNY: "人民币", USD: "美元", HKD: "港币" };
+const CHART_COLORS = {
+  accent: "#087a55",
+  blue: "#3478d4",
+  danger: "#d3423f",
+  violet: "#7257b5",
+  amber: "#b97918",
+  muted: "#718087",
+  line: "#dce4e8",
+  text: "#3c4d54",
+};
 const SOURCE_NAMES = {
   "sohu:hisHq": "搜狐历史行情",
   "eastmoney:repo_kline": "东方财富逆回购行情",
@@ -83,6 +100,11 @@ const SP500_ROUTE_DETAILS = {
     ["币种", "HKD/CNY"],
     ["费用", "佣金/交易费/结算费/组合费"],
   ],
+  cn_sp500_etf: [
+    ["市场", "A股场内"],
+    ["币种", "CNY"],
+    ["费用", "场内ETF佣金/管理托管"],
+  ],
 };
 
 function isSp500Asset(asset) {
@@ -111,11 +133,16 @@ function assetBySymbol(symbol) {
   return config?.assets?.find((asset) => asset.symbol === symbol);
 }
 
+function fallbackBySymbol(symbol) {
+  return config?.assets?.find((asset) => asset.price_fallback?.symbol === symbol)?.price_fallback;
+}
+
 function assetName(symbol) {
   const configured = assetBySymbol(symbol);
+  const fallback = fallbackBySymbol(symbol);
   const repo = config?.repo_options?.find((option) => option.symbol === symbol);
   if (repo) return repo.name;
-  return STATIC_NAMES[symbol] || configured?.name || symbol;
+  return STATIC_NAMES[symbol] || fallback?.name || configured?.name || symbol;
 }
 
 function formatSource(value) {
@@ -218,8 +245,16 @@ function createClientRequestId() {
 }
 
 function setMessage(text, isError = false) {
-  $("message").textContent = text || "";
-  $("message").className = isError ? "message error" : "message";
+  const message = $("message");
+  if (message) {
+    message.textContent = text || "";
+    message.className = isError ? "message error" : "message";
+  }
+  const resultStatus = $("resultStatusText");
+  if (resultStatus) {
+    resultStatus.textContent = text || "尚未运行回测";
+    resultStatus.classList.toggle("error", isError);
+  }
 }
 
 function feeInputNumber(id, fallback) {
@@ -320,6 +355,14 @@ function readConfig() {
   return next;
 }
 
+function repoModeLabel(mode) {
+  return mode === "fixed_bucket" ? "固定消费池" : "按剩余权重";
+}
+
+function currentRepoMode() {
+  return $("repoTargetMode")?.value || config.repo_target_mode || "residual_weight";
+}
+
 function currentAssetControls() {
   const controls = [];
   if ($(`enabled_${SP500_CONTROL_KEY}`)) {
@@ -341,48 +384,157 @@ function currentAssetControls() {
 
 function setAssetWeightDisplay(key, weight, mode, enabled, effectiveWeight) {
   const label = $(`weight_label_${key}`);
-  if (label) label.textContent = fmtPct(weight);
   const effective = $(`effective_${key}`);
   if (!effective) return;
   if (mode === "fixed_bucket") {
+    if (label) label.textContent = enabled ? fmtPct(effectiveWeight) : "0.00%";
     effective.hidden = false;
-    effective.textContent = enabled ? `实际 ${fmtPct(effectiveWeight)}` : "未启用";
+    effective.textContent = enabled ? `输入 ${fmtPct(weight)}` : "未启用";
   } else {
+    if (label) label.textContent = fmtPct(weight);
     effective.hidden = true;
     effective.textContent = "";
   }
 }
 
-function updateRepoWeight() {
-  if ($("enabled_sp500_group")) {
-    updateSp500Route();
-  }
-  const mode = $("repoTargetMode")?.value || config.repo_target_mode || "residual_weight";
-  const controls = currentAssetControls();
-  const enabledWeight = controls.reduce((sum, item) => sum + (item.enabled ? item.weight : 0), 0);
-  if ($("assetWeightTitle")) $("assetWeightTitle").textContent = mode === "fixed_bucket" ? "资产分配比例" : "资产权重";
-  const fixedControls = $("repoFixedControls");
-  if (fixedControls) fixedControls.hidden = mode !== "fixed_bucket";
-  if ($("repoFixedRatioValue")) $("repoFixedRatioValue").textContent = fmtPct(Number($("repoFixedRatio")?.value || 0));
+function currentRepoPlan(mode, enabledWeight) {
   if (mode === "fixed_bucket") {
     const initialCapital = Math.max(Number($("initialCapital")?.value || config.initial_capital_cny || 0), 0);
     const fixedAmount = Math.max(Number($("repoFixedTarget")?.value || 0), 0);
     const fixedRatio = Math.min(Math.max(Number($("repoFixedRatio")?.value || 0), 0), 1);
     const repoTargetValue = initialCapital > 0 ? Math.min(fixedAmount + initialCapital * fixedRatio, initialCapital) : 0;
     const repoWeight = initialCapital > 0 ? repoTargetValue / initialCapital : 1;
-    const remainingWeight = Math.max(1 - repoWeight, 0);
+    return {
+      mode,
+      enabledWeight,
+      repoTargetValue,
+      repoWeight,
+      remainingWeight: Math.max(1 - repoWeight, 0),
+      warning: repoWeight >= 1 || enabledWeight <= 0,
+    };
+  }
+  const repoWeight = Math.max(1 - enabledWeight, 0);
+  return {
+    mode,
+    enabledWeight,
+    repoTargetValue: null,
+    repoWeight,
+    remainingWeight: Math.max(1 - repoWeight, 0),
+    warning: enabledWeight > 1,
+  };
+}
+
+function renderControlSummary(plan) {
+  const host = $("controlSummary");
+  if (!host) return;
+  const start = $("startDate")?.value || config.start_date;
+  const end = $("endDate")?.value || config.end_date;
+  const initialCapital = Number($("initialCapital")?.value || config.initial_capital_cny || 0);
+  const monthlySpend = Number($("monthlySpend")?.value || config.monthly_spend_cny || 0);
+  const frequency = $("rebalanceFrequency")?.value === "semiannual" ? "每半年" : "每年";
+  const repoValue = plan.mode === "fixed_bucket"
+    ? `￥${fmtMoney(plan.repoTargetValue)} / ${fmtPct(plan.repoWeight)}`
+    : fmtPct(plan.repoWeight);
+  const items = [
+    ["区间", `${start} 至 ${end}`],
+    ["初始资金", `￥${fmtMoney(initialCapital)}`],
+    ["再平衡", frequency],
+    ["模式", repoModeLabel(plan.mode)],
+    ["国债", repoValue],
+    ["月消费", `￥${fmtMoney(monthlySpend)}`],
+  ];
+  host.innerHTML = items.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("");
+}
+
+function renderAllocationSummary(plan) {
+  const host = $("allocationSummary");
+  if (!host) return;
+  const actualAssetWeight = plan.mode === "fixed_bucket" && plan.enabledWeight > 0 ? plan.remainingWeight : plan.enabledWeight;
+  const rows = [
+    ["输入合计", fmtPct(plan.enabledWeight)],
+    ["实际资产", fmtPct(actualAssetWeight)],
+    ["国债目标", plan.mode === "fixed_bucket" ? `￥${fmtMoney(plan.repoTargetValue)} / ${fmtPct(plan.repoWeight)}` : fmtPct(plan.repoWeight)],
+  ];
+  host.innerHTML = rows.map(([label, value]) => `
+    <div class="allocation-item ${plan.warning ? "warning" : ""}">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </div>
+  `).join("");
+}
+
+function syncRepoModeTabs() {
+  const mode = currentRepoMode();
+  document.querySelectorAll("[data-repo-mode]").forEach((button) => {
+    const active = button.dataset.repoMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function selectRepoMode(mode) {
+  $("repoTargetMode").value = mode;
+  updateRepoWeight();
+}
+
+function parseInputDate(value) {
+  const parts = String(value || "").split("-").map(Number);
+  if (parts.length !== 3 || parts.some((item) => !Number.isFinite(item))) return null;
+  return new Date(parts[0], parts[1] - 1, parts[2]);
+}
+
+function formatInputDate(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function applyDatePreset(value) {
+  const endValue = $("endDate").value || config.end_date;
+  const end = parseInputDate(endValue) || new Date();
+  if (value === "all") {
+    $("startDate").value = config.start_date;
+    $("endDate").value = config.end_date;
+  } else {
+    const start = new Date(end.getTime());
+    start.setFullYear(start.getFullYear() - Number(value));
+    $("startDate").value = formatInputDate(start);
+    $("endDate").value = formatInputDate(end);
+  }
+  document.querySelectorAll("[data-date-preset]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.datePreset === value);
+  });
+  updateRepoWeight();
+}
+
+function updateRepoWeight() {
+  if ($("enabled_sp500_group")) {
+    updateSp500Route();
+  }
+  const mode = currentRepoMode();
+  const controls = currentAssetControls();
+  const enabledWeight = controls.reduce((sum, item) => sum + (item.enabled ? item.weight : 0), 0);
+  if ($("assetWeightTitle")) $("assetWeightTitle").textContent = mode === "fixed_bucket" ? "资产分配比例" : "资产权重";
+  const fixedControls = $("repoFixedControls");
+  if (fixedControls) fixedControls.hidden = mode !== "fixed_bucket";
+  if ($("repoFixedRatioValue")) $("repoFixedRatioValue").textContent = fmtPct(Number($("repoFixedRatio")?.value || 0));
+  const plan = currentRepoPlan(mode, enabledWeight);
+  syncRepoModeTabs();
+  renderControlSummary(plan);
+  renderAllocationSummary(plan);
+  if (mode === "fixed_bucket") {
     controls.forEach((item) => {
-      const effectiveWeight = item.enabled && enabledWeight > 0 ? (item.weight / enabledWeight) * remainingWeight : 0;
+      const effectiveWeight = item.enabled && enabledWeight > 0 ? (item.weight / enabledWeight) * plan.remainingWeight : 0;
       setAssetWeightDisplay(item.key, item.weight, mode, item.enabled, effectiveWeight);
     });
-    $("repoWeight").textContent = `目标 ${fmtPct(repoWeight)}（￥${fmtMoney(repoTargetValue)}），剩余 ${fmtPct(remainingWeight)} 按比例分配`;
-    $("repoWeight").style.color = repoWeight >= 1 || enabledWeight <= 0 ? "#b42318" : "";
+    $("repoWeight").textContent = `目标 ${fmtPct(plan.repoWeight)}（￥${fmtMoney(plan.repoTargetValue)}），剩余 ${fmtPct(plan.remainingWeight)} 按比例分配`;
+    $("repoWeight").style.color = plan.warning ? "#b42318" : "";
     return;
   }
   controls.forEach((item) => setAssetWeightDisplay(item.key, item.weight, mode, item.enabled, item.enabled ? item.weight : 0));
-  const repoWeight = Math.max(1 - enabledWeight, 0);
-  $("repoWeight").textContent = fmtPct(repoWeight);
-  $("repoWeight").style.color = enabledWeight > 1 ? "#b42318" : "";
+  $("repoWeight").textContent = fmtPct(plan.repoWeight);
+  $("repoWeight").style.color = plan.warning ? "#b42318" : "";
 }
 
 function updateSp500Route() {
@@ -420,8 +572,19 @@ function renderControls() {
     $(id).addEventListener("input", renderFeeSummary);
   });
   $("ibkrPlan").addEventListener("change", renderFeeSummary);
-  ["initialCapital", "repoTargetMode", "repoFixedTarget", "repoFixedRatio"].forEach((id) => {
-    $(id).addEventListener(id === "repoTargetMode" ? "change" : "input", updateRepoWeight);
+  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "repoTargetMode", "repoFixedTarget", "repoFixedRatio"].forEach((id) => {
+    $(id).addEventListener(id === "rebalanceFrequency" || id === "repoTargetMode" ? "change" : "input", updateRepoWeight);
+  });
+  document.querySelectorAll("[data-repo-mode]").forEach((button) => {
+    button.addEventListener("click", () => selectRepoMode(button.dataset.repoMode));
+  });
+  document.querySelectorAll("[data-date-preset]").forEach((button) => {
+    button.addEventListener("click", () => applyDatePreset(button.dataset.datePreset));
+  });
+  ["startDate", "endDate"].forEach((id) => {
+    $(id).addEventListener("input", () => {
+      document.querySelectorAll("[data-date-preset]").forEach((button) => button.classList.remove("active"));
+    });
   });
 
   const host = $("assetControls");
@@ -431,8 +594,8 @@ function renderControls() {
     const row = document.createElement("div");
     row.className = "asset-control";
     row.innerHTML = `
-      <input id="enabled_${asset.key}" type="checkbox" ${asset.enabled ? "checked" : ""} />
-      <input id="weight_${asset.key}" type="range" min="0" max="0.8" step="0.01" value="${asset.target_weight}" />
+      <input id="enabled_${asset.key}" type="checkbox" aria-label="启用${assetName(asset.symbol)}" ${asset.enabled ? "checked" : ""} />
+      <input id="weight_${asset.key}" type="range" min="0" max="0.8" step="0.01" value="${asset.target_weight}" aria-label="${assetName(asset.symbol)}目标权重" />
       <strong id="weight_label_${asset.key}">${fmtPct(asset.target_weight)}</strong>
       <div class="asset-name">
         <span class="asset-title">${assetName(asset.symbol)}</span>
@@ -447,6 +610,7 @@ function renderControls() {
   }
   $("rebalanceBand").addEventListener("input", () => {
     $("bandValue").textContent = fmtPct($("rebalanceBand").value);
+    updateRepoWeight();
   });
   updateRepoWeight();
   renderFeeSummary();
@@ -461,8 +625,8 @@ function renderSp500Control(host) {
   const row = document.createElement("div");
   row.className = "asset-control asset-control-group";
   row.innerHTML = `
-    <input id="enabled_${SP500_CONTROL_KEY}" type="checkbox" ${enabled ? "checked" : ""} />
-    <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" />
+    <input id="enabled_${SP500_CONTROL_KEY}" type="checkbox" aria-label="启用标普500" ${enabled ? "checked" : ""} />
+    <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="标普500目标权重" />
     <strong id="weight_label_${SP500_CONTROL_KEY}">${fmtPct(weight)}</strong>
     <div class="asset-name">
       <span class="asset-title">标普500</span>
@@ -495,6 +659,24 @@ function renderStatus(rows) {
     数据来源: formatSource(row.sources),
   }));
   renderTable("statusTable", ["数据类型", "标的名称", "开始日期", "结束日期", "记录数", "数据来源"], displayRows);
+  updateDataStatus(rows);
+}
+
+function updateDataStatus(rows) {
+  const statusText = $("dataStatusText");
+  const mobileStatus = $("mobileDataStatus");
+  const statusDot = $("dataStatusDot");
+  const validDates = rows.map((row) => row.end_date).filter(Boolean).sort();
+  const latestDate = validDates.at(-1);
+  const text = rows.length
+    ? `${rows.length} 项数据已就绪${latestDate ? ` · 最新 ${latestDate}` : ""}`
+    : "暂无可用数据";
+  if (statusText) statusText.textContent = text;
+  if (mobileStatus) mobileStatus.textContent = rows.length ? `数据最新 ${latestDate || "已就绪"}` : "暂无可用数据";
+  if (statusDot) {
+    statusDot.classList.remove("is-loading", "is-error");
+    statusDot.classList.toggle("is-error", !rows.length);
+  }
 }
 
 function summarizeDataQuality(rows) {
@@ -503,21 +685,43 @@ function summarizeDataQuality(rows) {
   return { total, fixture, real: total - fixture };
 }
 
+function metricMarkup(item) {
+  return `<div class="metric ${item.tone ? `is-${item.tone}` : ""}"><span>${item.label}</span><strong>${item.value}</strong></div>`;
+}
+
+function renderSummaryGroups(primary, secondary) {
+  $("summaryGrid").innerHTML = `
+    <div class="metric-group metric-group-primary">${primary.map(metricMarkup).join("")}</div>
+    <div class="metric-group metric-group-secondary">${secondary.map(metricMarkup).join("")}</div>
+  `;
+}
+
+function renderInitialSummary() {
+  renderSummaryGroups(
+    ["期末总资产", "累计收益", "年化收益", "最大回撤"].map((label) => ({ label, value: "--" })),
+    ["总手续费", "总消费", "浮盈浮亏", "对比期末资产", "再平衡次数", "交易次数", "分红预扣税"]
+      .map((label) => ({ label, value: "--" })),
+  );
+}
+
 function renderSummary(summary) {
-  const items = [
-    ["期末总资产", `￥${fmtMoney(summary.final_asset_cny)}`],
-    ["累计收益", fmtPct(summary.total_return)],
-    ["年化收益", fmtPct(summary.annualized_return)],
-    ["最大回撤", fmtPct(summary.max_drawdown)],
-    ["总手续费", `￥${fmtMoney(summary.total_fees_cny)}`],
-    ["总消费", `￥${fmtMoney(summary.total_spend_cny)}`],
-    ["对比组合期末资产", `￥${fmtMoney(summary.comparison_final_asset_cny)}`],
-    ["浮盈浮亏", `￥${fmtMoney(summary.final_unrealized_pnl_cny)}`],
-    ["再平衡次数", fmtNum(summary.rebalance_count, 0)],
-    ["交易次数", fmtNum(summary.trade_count, 0)],
-    ["分红预扣税", `￥${fmtMoney(summary.withheld_tax_cny)}`],
+  const positiveTone = (value) => Number(value || 0) >= 0 ? "positive" : "negative";
+  const primary = [
+    { label: "期末总资产", value: `￥${fmtMoney(summary.final_asset_cny)}` },
+    { label: "累计收益", value: fmtPct(summary.total_return), tone: positiveTone(summary.total_return) },
+    { label: "年化收益", value: fmtPct(summary.annualized_return), tone: positiveTone(summary.annualized_return) },
+    { label: "最大回撤", value: fmtPct(summary.max_drawdown), tone: "negative" },
   ];
-  $("summaryGrid").innerHTML = items.map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join("");
+  const secondary = [
+    { label: "总手续费", value: `￥${fmtMoney(summary.total_fees_cny)}` },
+    { label: "总消费", value: `￥${fmtMoney(summary.total_spend_cny)}` },
+    { label: "浮盈浮亏", value: `￥${fmtMoney(summary.final_unrealized_pnl_cny)}`, tone: positiveTone(summary.final_unrealized_pnl_cny) },
+    { label: "对比期末资产", value: `￥${fmtMoney(summary.comparison_final_asset_cny)}` },
+    { label: "再平衡次数", value: fmtNum(summary.rebalance_count, 0) },
+    { label: "交易次数", value: fmtNum(summary.trade_count, 0) },
+    { label: "分红预扣税", value: `￥${fmtMoney(summary.withheld_tax_cny)}` },
+  ];
+  renderSummaryGroups(primary, secondary);
 }
 
 function daysBetween(start, end) {
@@ -534,48 +738,24 @@ function stdDev(values) {
 }
 
 function computeSeriesMetrics(rows) {
-  let strategyNav = 1;
-  let strategyPeak = 1;
-  let previousTotal = null;
-  let benchmarkBase = null;
-  let latestBenchmark = null;
-  return rows.map((row) => {
-    const payload = row.payload || {};
-    const total = Number(row.total_asset_cny || 0);
-    const flow = Number(row.flow_cny || 0);
-    const dailyReturn = previousTotal && previousTotal !== 0 ? (total - previousTotal - flow) / previousTotal : 0;
-    strategyNav *= 1 + dailyReturn;
-    strategyPeak = Math.max(strategyPeak, strategyNav);
-    const drawdown = strategyPeak ? strategyNav / strategyPeak - 1 : 0;
-    const rawBenchmark = payload.benchmark_value;
-    if (rawBenchmark != null && Number(rawBenchmark) > 0) {
-      latestBenchmark = Number(rawBenchmark);
-      if (benchmarkBase == null) benchmarkBase = latestBenchmark;
-    }
-    previousTotal = total;
-    return {
-      ...row,
-      payload,
-      daily_return: dailyReturn,
-      cumulative_return: strategyNav - 1,
-      drawdown,
-      benchmark_return: benchmarkBase && latestBenchmark ? latestBenchmark / benchmarkBase - 1 : 0,
-    };
-  });
+  return rows.map((row) => ({
+    ...row,
+    payload: row.payload || {},
+    daily_return: Number(row.daily_return || 0),
+    cumulative_return: Number(row.cumulative_return || 0),
+    drawdown: Number(row.drawdown || 0),
+    benchmark_return: Number(row.benchmark_return || 0),
+  }));
 }
 
 function deriveSummary(summary, series) {
   if (!series.length) return summary;
   const last = series.at(-1);
-  const totalReturn = last.cumulative_return || 0;
-  const years = Math.max(daysBetween(series[0].trade_date, last.trade_date) / 365.25, 1 / 365.25);
   return {
     ...summary,
-    final_asset_cny: last.total_asset_cny,
-    total_return: totalReturn,
-    annualized_return: (1 + totalReturn) ** (1 / years) - 1,
-    max_drawdown: Math.min(...series.map((row) => row.drawdown ?? 0)),
-    volatility: stdDev(series.slice(1).map((row) => row.daily_return || 0)) * Math.sqrt(252),
+    final_asset_cny: summary.final_asset_cny ?? last.total_asset_cny,
+    total_return: summary.total_return ?? last.cumulative_return,
+    max_drawdown: summary.max_drawdown ?? Math.min(...series.map((row) => row.drawdown ?? 0)),
     comparison_final_asset_cny: last.payload?.comparison?.total_asset_cny ?? summary.comparison_final_asset_cny,
   };
 }
@@ -596,18 +776,79 @@ function queueChartResize() {
   chartResizeTimer = window.setTimeout(resizeCharts, 80);
 }
 
+function selectChart(chartId) {
+  activeChartId = chartId;
+  document.querySelectorAll("[data-chart-tab]").forEach((button) => {
+    const active = button.dataset.chartTab === chartId;
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll(".chart-view").forEach((view) => {
+    view.hidden = view.querySelector(".chart")?.id !== chartId;
+  });
+  window.requestAnimationFrame(() => charts[chartId]?.resize());
+}
+
+function selectRecordPanel(panelId) {
+  document.querySelectorAll("[data-record-tab]").forEach((button) => {
+    const active = button.dataset.recordTab === panelId;
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll(".record-panel").forEach((panel) => {
+    panel.hidden = panel.id !== panelId;
+  });
+}
+
 function lineZoomOption() {
   return {
-    grid: { left: 58, right: 20, top: 54, bottom: 58 },
+    animationDuration: 450,
+    grid: { left: 66, right: 26, top: 58, bottom: 62 },
     dataZoom: [
       { type: "inside", xAxisIndex: 0, filterMode: "none", zoomOnMouseWheel: true, moveOnMouseMove: true },
-      { type: "slider", xAxisIndex: 0, filterMode: "none", height: 18, bottom: 14 },
+      {
+        type: "slider",
+        xAxisIndex: 0,
+        filterMode: "none",
+        height: 16,
+        bottom: 15,
+        borderColor: CHART_COLORS.line,
+        backgroundColor: "#f7f9fa",
+        fillerColor: "rgba(8, 122, 85, 0.10)",
+        handleStyle: { color: "#ffffff", borderColor: CHART_COLORS.accent },
+        moveHandleStyle: { color: CHART_COLORS.accent },
+        textStyle: { color: CHART_COLORS.muted, fontSize: 10 },
+      },
     ],
   };
 }
 
+function polishCharts() {
+  Object.values(charts).forEach((chart) => chart.setOption({
+    textStyle: { color: CHART_COLORS.text, fontFamily: '"Segoe UI", "Microsoft YaHei UI", sans-serif' },
+    tooltip: {
+      backgroundColor: "rgba(20, 35, 41, 0.94)",
+      borderWidth: 0,
+      padding: [9, 11],
+      textStyle: { color: "#ffffff", fontSize: 11 },
+    },
+    xAxis: {
+      axisLine: { lineStyle: { color: CHART_COLORS.line } },
+      axisTick: { show: false },
+      axisLabel: { color: CHART_COLORS.muted, fontSize: 10 },
+    },
+    yAxis: {
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: CHART_COLORS.muted, fontSize: 10 },
+      splitLine: { lineStyle: { color: "#e9eef0", type: "dashed" } },
+    },
+  }));
+}
+
 function renderCharts(series) {
   if (!series.length) return;
+  $("analysisEmpty").hidden = true;
   if (!window.echarts) {
     renderFallbackCharts(series);
     return;
@@ -619,7 +860,7 @@ function renderCharts(series) {
     tooltip: { trigger: "axis" },
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", scale: true },
-    series: [{ type: "line", name: "总资产", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none" }],
+    series: [{ type: "line", name: "总资产", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.accent, width: 2.4 }, itemStyle: { color: CHART_COLORS.accent } }],
   });
   ensureChart("comparisonChart").setOption({
     ...lineZoomOption(),
@@ -629,13 +870,15 @@ function renderCharts(series) {
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", scale: true },
     series: [
-      { type: "line", name: "当前策略", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none" },
+      { type: "line", name: "当前策略", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.accent, width: 2.3 }, itemStyle: { color: CHART_COLORS.accent } },
       {
         type: "line",
         name: "沪深300基金加黄金基金加国债逆回购",
         data: series.map((row) => row.payload.comparison?.total_asset_cny ?? null),
         smooth: true,
         symbol: "none",
+        lineStyle: { color: CHART_COLORS.blue, width: 1.8, type: "dashed" },
+        itemStyle: { color: CHART_COLORS.blue },
       },
     ],
   });
@@ -647,8 +890,8 @@ function renderCharts(series) {
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", axisLabel: { formatter: (v) => `${(v * 100).toFixed(0)}%` } },
     series: [
-      { type: "line", name: "策略", data: series.map((row) => row.cumulative_return), smooth: true, symbol: "none" },
-      { type: "line", name: "沪深300", data: series.map((row) => row.benchmark_return), smooth: true, symbol: "none" },
+      { type: "line", name: "策略", data: series.map((row) => row.cumulative_return), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.accent, width: 2.3 }, itemStyle: { color: CHART_COLORS.accent } },
+      { type: "line", name: "沪深300", data: series.map((row) => row.benchmark_return), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.blue, width: 1.8, type: "dashed" }, itemStyle: { color: CHART_COLORS.blue } },
     ],
   });
   ensureChart("dailyReturnChart").setOption({
@@ -657,7 +900,7 @@ function renderCharts(series) {
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", axisLabel: { formatter: (v) => `${(v * 100).toFixed(1)}%` } },
-    series: [{ type: "line", name: "单日收益", data: series.map((row) => row.daily_return), smooth: false, symbol: "none" }],
+    series: [{ type: "line", name: "单日收益", data: series.map((row) => row.daily_return), smooth: false, symbol: "none", lineStyle: { color: CHART_COLORS.violet, width: 1.4 }, itemStyle: { color: CHART_COLORS.violet } }],
   });
   ensureChart("drawdownChart").setOption({
     ...lineZoomOption(),
@@ -665,10 +908,11 @@ function renderCharts(series) {
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", axisLabel: { formatter: (v) => `${(v * 100).toFixed(0)}%` } },
-    series: [{ type: "line", areaStyle: {}, name: "回撤", data: series.map((row) => row.drawdown), symbol: "none" }],
+    series: [{ type: "line", areaStyle: { color: "rgba(211, 66, 63, 0.12)" }, name: "回撤", data: series.map((row) => row.drawdown), symbol: "none", lineStyle: { color: CHART_COLORS.danger, width: 1.8 }, itemStyle: { color: CHART_COLORS.danger } }],
   });
 
   const symbols = Object.keys(series.at(-1)?.payload?.values || {});
+  const weightColors = [CHART_COLORS.accent, CHART_COLORS.blue, CHART_COLORS.amber, CHART_COLORS.violet, "#5c8f99", "#9d6c52", "#7e8d50"];
   ensureChart("weightChart").setOption({
     ...lineZoomOption(),
     title: { text: "资产权重", left: 8, top: 4, textStyle: { fontSize: 14 } },
@@ -676,15 +920,19 @@ function renderCharts(series) {
     legend: { top: 4, right: 10 },
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", max: 1, axisLabel: { formatter: (v) => `${(v * 100).toFixed(0)}%` } },
-    series: symbols.map((symbol) => ({
+    series: symbols.map((symbol, index) => ({
       type: "line",
       stack: "weights",
       areaStyle: {},
       name: assetName(symbol),
       data: series.map((row) => row.payload.weights[symbol] || 0),
       symbol: "none",
+      lineStyle: { width: 1.2, color: weightColors[index % weightColors.length] },
+      itemStyle: { color: weightColors[index % weightColors.length] },
     })),
   });
+  polishCharts();
+  selectChart(activeChartId);
   queueChartResize();
 }
 
@@ -752,7 +1000,7 @@ function drawFallbackChart(id, title, lineSeries, percentAxis, forcedMin = null,
 function renderTable(id, columns, rows) {
   const table = $(id);
   if (!rows.length) {
-    table.innerHTML = "<tbody><tr><td>暂无数据</td></tr></tbody>";
+    table.innerHTML = "<tbody><tr><td class=\"table-empty\">暂无数据</td></tr></tbody>";
     return;
   }
   table.innerHTML = `
@@ -783,6 +1031,12 @@ function formatPerformanceCell(value) {
   return `<span class="${className}">${profitText} / ${rateText}</span>`;
 }
 
+function rebalanceActionLabel(payload = {}) {
+  if (payload.rebalance_action === "trade" || payload.rebalanced === true) return "已调仓";
+  if (payload.rebalance_reason === "within_band") return "未偏离";
+  return "已记录";
+}
+
 function rebalanceDisplayRows(rows) {
   const symbols = [];
   for (const row of rows) {
@@ -794,11 +1048,12 @@ function rebalanceDisplayRows(rows) {
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["日期", "区间", "当回撤", "前资产", "后资产", "成交", "费"];
+  const baseColumns = ["日期", "动作", "区间", "当回撤", "前资产", "后资产", "成交", "费"];
   const assetColumns = orderedSymbols.map((symbol) => SHORT_NAMES[symbol] || assetName(symbol));
   const displayRows = rows.map((row) => {
     const item = {
       日期: row.rebalance_date,
+      动作: rebalanceActionLabel(row.payload),
       区间: row.period_return,
       当回撤: row.payload?.period_max_drawdown ?? 0,
       前资产: row.total_asset_before,
@@ -860,7 +1115,11 @@ async function loadBacktestResultSections(runId) {
 
 async function runBacktest() {
   const button = $("runBtn");
+  const buttonLabel = button.querySelector("span");
   button.disabled = true;
+  button.classList.add("is-running");
+  if (buttonLabel) buttonLabel.textContent = "正在回测";
+  if (window.matchMedia("(max-width: 900px)").matches) setParameterPanel(false);
   setMessage("正在提交回测任务...");
   try {
     const job = await api("/api/backtest/start", {
@@ -907,15 +1166,72 @@ async function runBacktest() {
     setMessage(humanizeError(error.message), true);
   } finally {
     button.disabled = false;
+    button.classList.remove("is-running");
+    if (buttonLabel) buttonLabel.textContent = "运行回测";
   }
 }
 
+function setParameterPanel(open) {
+  document.body.classList.toggle("parameters-open", open);
+  [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => {
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  if (open) window.requestAnimationFrame(() => $("closeParameterPanel")?.focus());
+}
+
+function setupTabs(selector, dataKey, selectPanel) {
+  const buttons = [...document.querySelectorAll(selector)];
+  buttons.forEach((button, index) => {
+    button.addEventListener("click", () => selectPanel(button.dataset[dataKey]));
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      let nextIndex = index;
+      if (event.key === "ArrowLeft") nextIndex = (index - 1 + buttons.length) % buttons.length;
+      if (event.key === "ArrowRight") nextIndex = (index + 1) % buttons.length;
+      if (event.key === "Home") nextIndex = 0;
+      if (event.key === "End") nextIndex = buttons.length - 1;
+      buttons[nextIndex].click();
+      buttons[nextIndex].focus();
+    });
+  });
+}
+
+function setupUiInteractions() {
+  [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => {
+    button.addEventListener("click", () => setParameterPanel(true));
+  });
+  $("closeParameterPanel")?.addEventListener("click", () => setParameterPanel(false));
+  $("parameterBackdrop")?.addEventListener("click", () => setParameterPanel(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("parameters-open")) setParameterPanel(false);
+  });
+  setupTabs("[data-chart-tab]", "chartTab", selectChart);
+  setupTabs("[data-record-tab]", "recordTab", selectRecordPanel);
+  selectChart(activeChartId);
+  selectRecordPanel("statusPanel");
+}
+
 async function init() {
+  setupUiInteractions();
+  renderInitialSummary();
+  renderTable("rebalanceTable", [], []);
+  renderTable("tradesTable", [], []);
   config = await api("/api/default-config");
   renderControls();
-  await loadStatus();
   $("runBtn").addEventListener("click", runBacktest);
   window.addEventListener("resize", queueChartResize);
+  setMessage("准备就绪，可以运行回测");
+  try {
+    await loadStatus();
+  } catch (error) {
+    const statusDot = $("dataStatusDot");
+    statusDot?.classList.remove("is-loading");
+    statusDot?.classList.add("is-error");
+    if ($("dataStatusText")) $("dataStatusText").textContent = "数据状态检查失败";
+    if ($("mobileDataStatus")) $("mobileDataStatus").textContent = "数据状态异常";
+    setMessage(humanizeError(error.message), true);
+  }
 }
 
 init().catch((error) => setMessage(error.message, true));

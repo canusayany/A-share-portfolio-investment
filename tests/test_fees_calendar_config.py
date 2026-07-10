@@ -17,6 +17,7 @@ from app.services.fees import (
     bps_to_rate,
     cn_etf_fee,
     cny_cost_for_hkd,
+    cny_cost_for_usd,
     cny_to_usd,
     hk_connect_etf_trade_fee,
     hk_connect_portfolio_fee,
@@ -49,9 +50,12 @@ class FeeTests(unittest.TestCase):
     def test_fx_round_trip_fees_are_positive(self) -> None:
         cfg = FxFeeConfig(bank_out_spread_bps=30, bank_in_spread_bps=30, outbound_wire_fee_cny=0)
         usd, out_fee = cny_to_usd(7000, 7, cfg, include_wire=False)
+        usd_cost, sized_out_fee = cny_cost_for_usd(500, 7, cfg)
         cny, in_fee = usd_to_cny(usd, 7, cfg, include_wire=False)
         self.assertLess(cny, 7000)
         self.assertGreater(out_fee, 0)
+        self.assertAlmostEqual(usd_cost, 3500 + sized_out_fee)
+        self.assertLess(sized_out_fee, out_fee)
         self.assertGreater(in_fee, 0)
         self.assertEqual(bps_to_rate(30), 0.003)
 
@@ -75,6 +79,7 @@ class FeeTests(unittest.TestCase):
         fee = hk_connect_etf_trade_fee(100000, cfg)
         self.assertAlmostEqual(fee, 42.7)
         self.assertGreater(hk_connect_portfolio_fee(100000, cfg), 0)
+        self.assertAlmostEqual(hk_connect_portfolio_fee(100000, cfg, 3), hk_connect_portfolio_fee(100000, cfg) * 3, places=5)
         cny_cost, buy_fx_fee = cny_cost_for_hkd(10000, 0.9, cfg)
         cny_cash, sell_fx_fee = hkd_to_cny(10000, 0.9, cfg)
         self.assertGreater(cny_cost, 9000)
@@ -98,6 +103,11 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(cfg["fees"]["cn_etf"]["commission_rate"], 0.00005)
         hk_asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")
         self.assertEqual(hk_asset["expense_ratio"], 0.0079)
+        cn_sp500 = next(asset for asset in cfg["assets"] if asset["symbol"] == "513500.SH")
+        self.assertEqual(cn_sp500["exclusive_group"], "sp500")
+        self.assertEqual(cn_sp500["inception_date"], "2013-12-05")
+        self.assertEqual(cn_sp500["management_fee"], 0.006)
+        self.assertEqual(cn_sp500["custodian_fee"], 0.002)
         self.assertEqual(cfg["fees"]["tax"]["us_dividend_withholding_rate"], 0.30)
         self.assertEqual(cfg["fees"]["hk_connect_etf"]["stock_settlement_fee_rate"], 0.000042)
         self.assertEqual(validate_config(cfg), [])

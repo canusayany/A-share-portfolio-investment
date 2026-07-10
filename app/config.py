@@ -48,6 +48,21 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "expense_ratio": 0.0079,
     },
     {
+        "key": "cn_sp500_etf",
+        "symbol": "513500.SH",
+        "name": "标普500ETF博时",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "exclusive_group": "sp500",
+        "choice_label": "A股 513500",
+        "inception_date": "2013-12-05",
+        "management_fee": 0.006,
+        "custodian_fee": 0.002,
+    },
+    {
         "key": "cn_dividend_low_vol",
         "symbol": "512890.SH",
         "name": "红利低波基金",
@@ -72,6 +87,13 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "inception_date": "2012-05-04",
         "management_fee": 0.0015,
         "custodian_fee": 0.0005,
+        "price_fallback": {
+            "kind": "open_fund_nav",
+            "symbol": "160706",
+            "name": "嘉实沪深300ETF联接(LOF)A",
+            "start_date": "2005-08-29",
+            "scale_mode": "splice",
+        },
     },
     {
         "key": "cn_gold_etf",
@@ -85,6 +107,14 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "inception_date": "2013-07-18",
         "management_fee": 0.005,
         "custodian_fee": 0.001,
+        "price_fallback": {
+            "kind": "sge_au9999",
+            "symbol": "Au99.99",
+            "name": "上海金交所 Au99.99",
+            "start_date": "2002-10-30",
+            "scale_mode": "fixed",
+            "price_scale": 0.01,
+        },
     },
 ]
 
@@ -222,6 +252,14 @@ def required_fx_pairs_for_assets(assets: list[dict[str, Any]]) -> list[str]:
         if pair
     }
     return sorted(pairs)
+
+
+def asset_price_start_date(asset: dict[str, Any], default_start: str) -> str:
+    candidates = [str(asset.get("inception_date") or default_start)]
+    fallback = asset.get("price_fallback")
+    if isinstance(fallback, dict) and fallback.get("start_date"):
+        candidates.append(str(fallback["start_date"]))
+    return min(candidates)
 
 
 def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:

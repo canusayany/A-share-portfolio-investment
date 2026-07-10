@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -13,7 +14,7 @@ import subprocess
 import time
 from typing import Any
 from zoneinfo import ZoneInfo
-from app.config import DEFAULT_ASSETS, required_fx_pairs_for_assets
+from app.config import DEFAULT_ASSETS, asset_price_start_date, required_fx_pairs_for_assets
 from app.db import insert_many, upsert_assets, utc_now
 from app.services.calendar import business_days, daterange, parse_date
 
@@ -23,6 +24,19 @@ HTTP_TIMEOUT_SECONDS = 2
 CURL_TIMEOUT_SECONDS = 8
 DATASRC_MARKET_APPSETTINGS = Path.home() / "Documents" / "code" / "DataSrc" / "market-data-platform" / "src" / "Market.Api" / "appsettings.json"
 DATASRC_SOURCE_PRIORITY = {"tushare": 0, "akshare": 1, "amazingdata": 2, "tdx": 3}
+CN_PRICE_SOURCE_PRIORITY = {
+    "tushare:fund_daily": 0,
+    "datasrc:tushare": 1,
+    "datasrc:akshare": 2,
+    "datasrc:amazingdata": 3,
+    "datasrc:tdx": 4,
+    "sohu:hisHq": 5,
+    "eastmoney:fund_kline": 6,
+    "yahoo:": 7,
+}
+PRICE_CROSS_SOURCE_MAX_DEVIATION = 0.15
+PRICE_ISOLATED_JUMP_THRESHOLD = 0.70
+PRICE_NEIGHBOR_MAX_DEVIATION = 0.25
 logger = logging.getLogger(__name__)
 
 
@@ -334,13 +348,14 @@ def required_data_missing(
     for asset in assets:
         if not asset.get("enabled", True):
             continue
-        fetch_start = max(parse_date(start), parse_date(asset.get("inception_date") or start))
-        if fetch_start > requested_end:
-            continue
+        price_fetch_start = max(parse_date(start), parse_date(asset_price_start_date(asset, start)))
+        dividend_fetch_start = max(parse_date(start), parse_date(asset.get("inception_date") or start))
         price_end = effective_price_end_for_asset(asset, end)
-        if fetch_start <= price_end and _coverage_gap(conn, "prices", "symbol", asset["symbol"], "trade_date", fetch_start.isoformat(), price_end.isoformat(), end_tolerance_days=0):
+        if price_fetch_start <= price_end and _coverage_gap(conn, "prices", "symbol", asset["symbol"], "trade_date", price_fetch_start.isoformat(), price_end.isoformat(), end_tolerance_days=0):
             missing.add(f"prices:{asset['symbol']}")
-        if missing_coverage_ranges(conn, "dividends", asset["symbol"], fetch_start.isoformat(), end):
+        if price_fetch_start <= price_end and price_anomaly_ranges(conn, asset["symbol"], price_fetch_start.isoformat(), price_end.isoformat()):
+            missing.add(f"prices:{asset['symbol']}")
+        if dividend_fetch_start <= requested_end and missing_coverage_ranges(conn, "dividends", asset["symbol"], dividend_fetch_start.isoformat(), end):
             missing.add(f"dividends:{asset['symbol']}")
 
     cn_data_end = effective_price_end_for_market("CN", end)
@@ -489,6 +504,182 @@ def merge_rows_by_trade_date(primary: list[dict[str, Any]], fallback: list[dict[
     by_date = {row["trade_date"]: row for row in fallback}
     by_date.update({row["trade_date"]: row for row in primary})
     return [by_date[key] for key in sorted(by_date)]
+
+
+def merge_date_ranges(ranges: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    parsed = sorted((parse_date(start), parse_date(end)) for start, end in ranges if parse_date(start) <= parse_date(end))
+    if not parsed:
+        return []
+    merged: list[tuple[Any, Any]] = []
+    current_start, current_end = parsed[0]
+    for start, end in parsed[1:]:
+        if start <= current_end + timedelta(days=1):
+            current_end = max(current_end, end)
+        else:
+            merged.append((current_start, current_end))
+            current_start, current_end = start, end
+    merged.append((current_start, current_end))
+    return [(start.isoformat(), end.isoformat()) for start, end in merged]
+
+
+def _row_close(row: dict[str, Any]) -> float | None:
+    close = finite_float(row.get("close"))
+    return close if close and close > 0 else None
+
+
+def _relative_deviation(value: float, reference: float) -> float:
+    if reference <= 0:
+        return math.inf
+    return abs(value - reference) / reference
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _source_priority(source: str, priorities: dict[str, int]) -> int:
+    for prefix, priority in priorities.items():
+        if source.startswith(prefix):
+            return priority
+    return 100
+
+
+def _sort_price_candidates(rows: list[dict[str, Any]], priorities: dict[str, int]) -> list[dict[str, Any]]:
+    return sorted(rows, key=lambda row: (_source_priority(str(row.get("source") or ""), priorities), str(row.get("source") or "")))
+
+
+def detect_isolated_price_anomaly_dates(
+    rows: list[dict[str, Any]],
+    *,
+    jump_threshold: float = PRICE_ISOLATED_JUMP_THRESHOLD,
+    neighbor_threshold: float = PRICE_NEIGHBOR_MAX_DEVIATION,
+) -> list[str]:
+    ordered = [row for row in sorted(rows, key=lambda item: item["trade_date"]) if _row_close(row) is not None]
+    result: list[str] = []
+    for index in range(1, len(ordered) - 1):
+        previous_close = _row_close(ordered[index - 1])
+        current_close = _row_close(ordered[index])
+        next_close = _row_close(ordered[index + 1])
+        if previous_close is None or current_close is None or next_close is None:
+            continue
+        if _relative_deviation(previous_close, next_close) > neighbor_threshold:
+            continue
+        if _relative_deviation(current_close, previous_close) > jump_threshold and _relative_deviation(current_close, next_close) > jump_threshold:
+            result.append(str(ordered[index]["trade_date"]))
+    return result
+
+
+def price_anomaly_ranges(conn, symbol: str, start: str, end: str) -> list[tuple[str, str]]:
+    requested_start = parse_date(start)
+    requested_end = parse_date(end)
+    if requested_start > requested_end:
+        return []
+    anchor_start = (requested_start - timedelta(days=10)).isoformat()
+    anchor_end = (requested_end + timedelta(days=10)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT trade_date, close, source FROM prices
+        WHERE symbol=? AND trade_date BETWEEN ? AND ?
+          AND source NOT LIKE 'generated:%'
+        ORDER BY trade_date
+        """,
+        (symbol, anchor_start, anchor_end),
+    ).fetchall()
+    anomaly_dates = [
+        trade_date
+        for trade_date in detect_isolated_price_anomaly_dates([dict(row) for row in rows])
+        if requested_start <= parse_date(trade_date) <= requested_end
+    ]
+    return [(trade_date, trade_date) for trade_date in anomaly_dates]
+
+
+def select_price_rows_from_sources(
+    rows: list[dict[str, Any]],
+    *,
+    expected_dates: set[str] | None = None,
+    existing_rows: list[dict[str, Any]] | None = None,
+    source_priorities: dict[str, int] | None = None,
+    symbol: str = "",
+) -> tuple[list[dict[str, Any]], list[str]]:
+    priorities = source_priorities or {}
+    candidates_by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        trade_date = str(row.get("trade_date") or "")
+        if expected_dates is not None and trade_date not in expected_dates:
+            continue
+        if _row_close(row) is None:
+            continue
+        candidates_by_date.setdefault(trade_date, []).append(row)
+
+    warnings: list[str] = []
+    selected_by_date: dict[str, dict[str, Any]] = {}
+    for trade_date, candidates in sorted(candidates_by_date.items()):
+        ordered = _sort_price_candidates(candidates, priorities)
+        closes = [_row_close(row) for row in ordered]
+        valid_closes = [close for close in closes if close is not None]
+        if len(valid_closes) <= 1:
+            selected_by_date[trade_date] = ordered[0]
+            continue
+        median = _median(valid_closes)
+        near_median = [row for row in ordered if (close := _row_close(row)) is not None and _relative_deviation(close, median) <= PRICE_CROSS_SOURCE_MAX_DEVIATION]
+        selected = near_median[0] if near_median else ordered[0]
+        if selected is not ordered[0]:
+            top_close = _row_close(ordered[0])
+            selected_close = _row_close(selected)
+            warnings.append(
+                "price source anomaly "
+                f"symbol={symbol or selected.get('symbol')} date={trade_date} "
+                f"primary={ordered[0].get('source')} close={top_close:g} "
+                f"median={median:g} selected={selected.get('source')} selected_close={selected_close:g}"
+            )
+        selected_by_date[trade_date] = selected
+
+    context_by_date: dict[str, dict[str, Any]] = {}
+    for row in existing_rows or []:
+        trade_date = str(row.get("trade_date") or "")
+        if trade_date and _row_close(row) is not None:
+            context_by_date[trade_date] = row
+    context_by_date.update(selected_by_date)
+    ordered_dates = sorted(context_by_date)
+    date_index = {trade_date: index for index, trade_date in enumerate(ordered_dates)}
+    for trade_date in sorted(selected_by_date):
+        index = date_index.get(trade_date)
+        if index is None or index <= 0 or index >= len(ordered_dates) - 1:
+            continue
+        previous_close = _row_close(context_by_date[ordered_dates[index - 1]])
+        current_close = _row_close(selected_by_date[trade_date])
+        next_close = _row_close(context_by_date[ordered_dates[index + 1]])
+        if previous_close is None or current_close is None or next_close is None:
+            continue
+        if _relative_deviation(previous_close, next_close) > PRICE_NEIGHBOR_MAX_DEVIATION:
+            continue
+        if _relative_deviation(current_close, previous_close) <= PRICE_ISOLATED_JUMP_THRESHOLD or _relative_deviation(current_close, next_close) <= PRICE_ISOLATED_JUMP_THRESHOLD:
+            continue
+        expected_close = (previous_close + next_close) / 2.0
+        alternatives = [
+            row
+            for row in candidates_by_date.get(trade_date, [])
+            if (close := _row_close(row)) is not None and _relative_deviation(close, expected_close) <= PRICE_NEIGHBOR_MAX_DEVIATION
+        ]
+        if not alternatives:
+            continue
+        alternatives.sort(key=lambda row: (_relative_deviation(_row_close(row) or 0.0, expected_close), _source_priority(str(row.get("source") or ""), priorities)))
+        replacement = alternatives[0]
+        if replacement is not selected_by_date[trade_date]:
+            warnings.append(
+                "isolated price jump replaced "
+                f"symbol={symbol or replacement.get('symbol')} date={trade_date} "
+                f"bad_source={selected_by_date[trade_date].get('source')} bad_close={current_close:g} "
+                f"selected={replacement.get('source')} selected_close={_row_close(replacement):g}"
+            )
+            selected_by_date[trade_date] = replacement
+            context_by_date[trade_date] = replacement
+
+    return [selected_by_date[key] for key in sorted(selected_by_date)], warnings
 
 
 def fetch_datasrc_market_prices(symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
@@ -690,6 +881,16 @@ def yahoo_hk_symbol(symbol: str) -> str:
     return symbol
 
 
+def yahoo_cn_symbol(symbol: str) -> str:
+    code = symbol.split(".")[0]
+    suffix = symbol.split(".")[-1].upper() if "." in symbol else ""
+    if suffix == "SH":
+        return f"{code}.SS"
+    if suffix == "SZ":
+        return f"{code}.SZ"
+    return symbol
+
+
 def restore_symbol(rows: list[dict[str, Any]], symbol: str) -> list[dict[str, Any]]:
     for row in rows:
         row["symbol"] = symbol
@@ -733,8 +934,307 @@ def fetch_eastmoney_prices(symbol: str, start: str, end: str, currency: str, sou
     return rows
 
 
+def iso_date_text(value: Any) -> str:
+    if hasattr(value, "date") and not isinstance(value, str):
+        value = value.date()
+    return parse_date(str(value)[:10]).isoformat()
+
+
+def finite_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(result) or math.isinf(result):
+        return None
+    return result
+
+
+def price_row(
+    symbol: str,
+    trade_date: str,
+    close: float,
+    currency: str,
+    source: str,
+    *,
+    open_: float | None = None,
+    high: float | None = None,
+    low: float | None = None,
+    volume: float = 0.0,
+    amount: float = 0.0,
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "trade_date": trade_date,
+        "open": open_ if open_ is not None else close,
+        "high": high if high is not None else close,
+        "low": low if low is not None else close,
+        "close": close,
+        "adj_close": close,
+        "volume": volume,
+        "amount": amount,
+        "currency": currency,
+        "source": source,
+    }
+
+
+def parse_eastmoney_net_worth_trend(
+    text: str,
+    proxy_symbol: str,
+    target_symbol: str,
+    start: str,
+    end: str,
+    currency: str,
+) -> list[dict[str, Any]]:
+    match = re.search(r"var\s+Data_netWorthTrend\s*=\s*(\[.*?\]);", text, re.DOTALL)
+    if not match:
+        raise SyncWarning(f"Eastmoney fund NAV payload missing Data_netWorthTrend for {proxy_symbol}")
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise SyncWarning(f"Eastmoney fund NAV payload invalid JSON for {proxy_symbol}") from exc
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    rows: list[dict[str, Any]] = []
+    for item in payload:
+        timestamp_ms = item.get("x")
+        nav = finite_float(item.get("y"))
+        if timestamp_ms is None or nav is None or nav <= 0:
+            continue
+        trade_date = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=ZoneInfo("Asia/Shanghai")).date().isoformat()
+        day = parse_date(trade_date)
+        if not (start_date <= day <= end_date):
+            continue
+        rows.append(price_row(target_symbol, trade_date, nav, currency, f"eastmoney:fund_nav:{proxy_symbol}"))
+    if not rows:
+        raise SyncWarning(f"Eastmoney returned no fund NAV rows for {proxy_symbol}")
+    return rows
+
+
+def fetch_eastmoney_fund_nav_proxy_prices(proxy_symbol: str, target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    url = f"https://fund.eastmoney.com/pingzhongdata/{proxy_symbol}.js"
+    try:
+        text = fetch_text(url, timeout=20, referer=f"https://fund.eastmoney.com/{proxy_symbol}.html")
+    except SyncWarning as exc:
+        raise SyncWarning(f"Eastmoney fund NAV fetch failed for {proxy_symbol}: {exc}") from exc
+    return parse_eastmoney_net_worth_trend(text, proxy_symbol, target_symbol, start, end, currency)
+
+
+def fetch_akshare_fund_nav_proxy_prices(proxy_symbol: str, target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    try:
+        import akshare as ak  # type: ignore
+    except ImportError as exc:
+        raise SyncWarning("akshare is not installed; open fund NAV fallback unavailable") from exc
+    try:
+        df = ak.fund_open_fund_info_em(symbol=proxy_symbol)
+    except Exception as exc:
+        raise SyncWarning(f"AKShare open fund NAV fetch failed for {proxy_symbol}: {exc}") from exc
+
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    rows: list[dict[str, Any]] = []
+    for item in df.itertuples(index=False, name=None):
+        if len(item) < 2:
+            continue
+        trade_date = iso_date_text(item[0])
+        day = parse_date(trade_date)
+        if not (start_date <= day <= end_date):
+            continue
+        nav = finite_float(item[1])
+        if nav is None or nav <= 0:
+            continue
+        rows.append(price_row(target_symbol, trade_date, nav, currency, f"akshare:fund_open_fund_info_em:{proxy_symbol}"))
+    if not rows:
+        raise SyncWarning(f"AKShare returned no open fund NAV rows for {proxy_symbol}")
+    return rows
+
+
+def fetch_fund_nav_proxy_prices(proxy_symbol: str, target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    warnings: list[str] = []
+    for fetcher in (fetch_eastmoney_fund_nav_proxy_prices, fetch_akshare_fund_nav_proxy_prices):
+        try:
+            return fetcher(proxy_symbol, target_symbol, start, end, currency)
+        except SyncWarning as exc:
+            warnings.append(str(exc))
+    raise SyncWarning("; ".join(warnings))
+
+
+def fetch_sge_au9999_spot_prices(target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    try:
+        import akshare as ak  # type: ignore
+    except ImportError as exc:
+        raise SyncWarning("akshare is not installed; SGE Au99.99 fallback unavailable") from exc
+    try:
+        df = ak.spot_hist_sge(symbol="Au99.99")
+    except Exception as exc:
+        raise SyncWarning(f"AKShare SGE Au99.99 spot fetch failed: {exc}") from exc
+
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    rows: list[dict[str, Any]] = []
+    for item in df.itertuples(index=False, name=None):
+        if len(item) < 5:
+            continue
+        trade_date = iso_date_text(item[0])
+        day = parse_date(trade_date)
+        if not (start_date <= day <= end_date):
+            continue
+        open_, close, low, high = (finite_float(item[idx]) for idx in (1, 2, 3, 4))
+        if close is None or close <= 0:
+            continue
+        rows.append(
+            price_row(
+                target_symbol,
+                trade_date,
+                close,
+                currency,
+                "akshare:spot_hist_sge:Au99.99",
+                open_=open_,
+                high=high,
+                low=low,
+            )
+        )
+    if not rows:
+        raise SyncWarning("AKShare returned no SGE Au99.99 spot rows")
+    return rows
+
+
+def fetch_sge_au9999_report_prices(target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    try:
+        import akshare as ak  # type: ignore
+    except ImportError as exc:
+        raise SyncWarning("akshare is not installed; SGE Au99.99 report fallback unavailable") from exc
+    try:
+        df = ak.macro_china_au_report()
+    except Exception as exc:
+        raise SyncWarning(f"AKShare SGE Au99.99 report fetch failed: {exc}") from exc
+
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    rows: list[dict[str, Any]] = []
+    for item in df.itertuples(index=False, name=None):
+        if len(item) < 6 or str(item[1]) != "Au99.99":
+            continue
+        trade_date = iso_date_text(item[0])
+        day = parse_date(trade_date)
+        if not (start_date <= day <= end_date):
+            continue
+        open_, high, low, close = (finite_float(item[idx]) for idx in (2, 3, 4, 5))
+        if close is None or close <= 0:
+            continue
+        rows.append(
+            price_row(
+                target_symbol,
+                trade_date,
+                close,
+                currency,
+                "akshare:macro_china_au_report:Au99.99",
+                open_=open_,
+                high=high,
+                low=low,
+                volume=finite_float(item[9]) or 0.0 if len(item) > 9 else 0.0,
+                amount=finite_float(item[10]) or 0.0 if len(item) > 10 else 0.0,
+            )
+        )
+    if not rows:
+        raise SyncWarning("AKShare returned no SGE Au99.99 report rows")
+    return rows
+
+
+def fetch_au9999_proxy_prices(target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    warnings: list[str] = []
+    rows: list[dict[str, Any]] = []
+    try:
+        rows = fetch_sge_au9999_spot_prices(target_symbol, start, end, currency)
+    except SyncWarning as exc:
+        warnings.append(str(exc))
+    expected_dates = {day.isoformat() for day in business_days(start, end)}
+    if expected_dates - {row["trade_date"] for row in rows}:
+        try:
+            report_rows = fetch_sge_au9999_report_prices(target_symbol, start, end, currency)
+            rows = merge_rows_by_trade_date(rows, report_rows)
+        except SyncWarning as exc:
+            warnings.append(str(exc))
+    if not rows:
+        raise SyncWarning("; ".join(warnings) or "no Au99.99 fallback rows")
+    return rows
+
+
+def price_scale_from_overlap(target_rows: list[dict[str, Any]], fallback_rows: list[dict[str, Any]]) -> float | None:
+    target_by_date = {
+        row["trade_date"]: float(row["close"])
+        for row in target_rows
+        if row.get("close") is not None and not str(row.get("source", "")).startswith("generated:")
+    }
+    fallback_by_date = {
+        row["trade_date"]: float(row["close"])
+        for row in fallback_rows
+        if row.get("close") is not None
+    }
+    for trade_date in sorted(set(target_by_date) & set(fallback_by_date)):
+        fallback_close = fallback_by_date[trade_date]
+        target_close = target_by_date[trade_date]
+        if fallback_close > 0 and target_close > 0:
+            return target_close / fallback_close
+    return None
+
+
+def scale_price_rows(rows: list[dict[str, Any]], scale: float, source_suffix: str) -> list[dict[str, Any]]:
+    scaled_rows: list[dict[str, Any]] = []
+    for row in rows:
+        scaled = dict(row)
+        for key in ("open", "high", "low", "close", "adj_close"):
+            if scaled.get(key) is not None:
+                scaled[key] = float(scaled[key]) * scale
+        scaled["source"] = f"{scaled['source']}:{source_suffix}"
+        scaled_rows.append(scaled)
+    return scaled_rows
+
+
+def fetch_price_fallback_rows(
+    asset: dict[str, Any],
+    range_start: str,
+    range_end: str,
+    target_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    fallback = asset.get("price_fallback")
+    if not isinstance(fallback, dict):
+        return []
+    symbol = asset["symbol"]
+    currency = asset.get("currency", "CNY")
+    anchor_days = int(fallback.get("anchor_window_days", 370))
+    fetch_start = (parse_date(range_start) - timedelta(days=anchor_days)).isoformat()
+    fetch_end = (parse_date(range_end) + timedelta(days=anchor_days)).isoformat()
+    kind = fallback.get("kind")
+    if kind == "open_fund_nav":
+        fallback_rows = fetch_fund_nav_proxy_prices(str(fallback["symbol"]), symbol, fetch_start, fetch_end, currency)
+    elif kind == "sge_au9999":
+        fallback_rows = fetch_au9999_proxy_prices(symbol, fetch_start, fetch_end, currency)
+    else:
+        raise SyncWarning(f"unsupported price fallback kind for {symbol}: {kind}")
+
+    if fallback.get("scale_mode") == "fixed":
+        scale = float(fallback.get("price_scale", 1.0))
+        fallback_rows = scale_price_rows(fallback_rows, scale, f"fixed_scale_{scale:g}")
+    elif fallback.get("scale_mode") == "splice":
+        scale = price_scale_from_overlap(target_rows, fallback_rows)
+        if scale is not None:
+            fallback_rows = scale_price_rows(fallback_rows, scale, f"splice_scale_{scale:.8g}")
+    start_date = parse_date(range_start)
+    end_date = parse_date(range_end)
+    return [
+        row
+        for row in fallback_rows
+        if start_date <= parse_date(row["trade_date"]) <= end_date
+    ]
+
+
 def fetch_hk_yahoo_prices(symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
     return restore_symbol(fetch_yahoo_prices(yahoo_hk_symbol(symbol), start, end, currency), symbol)
+
+
+def fetch_cn_yahoo_prices(symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+    return restore_symbol(fetch_yahoo_prices(yahoo_cn_symbol(symbol), start, end, currency), symbol)
 
 
 def fetch_hk_yahoo_dividends(symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
@@ -1527,20 +2027,40 @@ def sync_all(
     asset_dividend_ranges: dict[str, list[tuple[str, str]]] = {}
     for asset in assets:
         symbol = asset["symbol"]
-        inception = asset.get("inception_date") or start
-        fetch_start_date = max(parse_date(start), parse_date(inception))
+        price_fetch_start_date = max(parse_date(start), parse_date(asset_price_start_date(asset, start)))
+        dividend_fetch_start_date = max(parse_date(start), parse_date(asset.get("inception_date") or start))
         price_end = effective_price_end_for_asset(asset, end)
-        fetch_start = fetch_start_date.isoformat()
+        price_fetch_start = price_fetch_start_date.isoformat()
+        dividend_fetch_start = dividend_fetch_start_date.isoformat()
         asset_price_ranges[symbol] = (
-            price_range_func(conn, "prices", "symbol", symbol, "trade_date", fetch_start, price_end.isoformat())
-            if symbol in plan["asset_prices"] and fetch_start_date <= price_end
+            price_range_func(conn, "prices", "symbol", symbol, "trade_date", price_fetch_start, price_end.isoformat())
+            if symbol in plan["asset_prices"] and price_fetch_start_date <= price_end
             else []
         )
+        if symbol in plan["asset_prices"] and price_fetch_start_date <= price_end:
+            asset_price_ranges[symbol] = merge_date_ranges(
+                asset_price_ranges[symbol] + price_anomaly_ranges(conn, symbol, price_fetch_start, price_end.isoformat())
+            )
         asset_dividend_ranges[symbol] = (
-            missing_coverage_ranges(conn, "dividends", symbol, fetch_start, end)
-            if symbol in plan["asset_dividends"]
+            missing_coverage_ranges(conn, "dividends", symbol, dividend_fetch_start, end)
+            if symbol in plan["asset_dividends"] and dividend_fetch_start_date <= parse_date(end)
             else []
         )
+
+    price_anchor_start = (parse_date(start) - timedelta(days=370)).isoformat()
+    price_anchor_end = (parse_date(end) + timedelta(days=370)).isoformat()
+    existing_price_rows: dict[str, list[dict[str, Any]]] = {}
+    for asset in assets:
+        rows = conn.execute(
+            """
+            SELECT trade_date, close, source FROM prices
+            WHERE symbol=? AND trade_date BETWEEN ? AND ?
+              AND source NOT LIKE 'generated:%'
+            ORDER BY trade_date
+            """,
+            (asset["symbol"], price_anchor_start, price_anchor_end),
+        ).fetchall()
+        existing_price_rows[asset["symbol"]] = [dict(row) for row in rows]
 
     def fetch_asset_bundle(asset: dict[str, Any]) -> dict[str, Any]:
         asset_started_at = time.perf_counter()
@@ -1556,24 +2076,34 @@ def sync_all(
             if not allow_network:
                 asset_warnings.append("network disabled for deterministic sync")
             elif asset.get("market") == "CN":
-                try:
-                    range_prices = fetch_cn_fund_prices(token, symbol, range_start, range_end)
-                except SyncWarning as exc:
-                    asset_warnings.append(str(exc))
-                    tushare_asset_available = False
+                expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+                cn_price_sources = [
+                    ("tushare", lambda: fetch_cn_fund_prices(token, symbol, range_start, range_end)),
+                    ("datasrc", lambda: fetch_datasrc_market_prices(symbol, range_start, range_end, "CNY")),
+                    ("sohu", lambda: fetch_sohu_prices(symbol, range_start, range_end, "CNY", "sohu:hisHq")),
+                    ("eastmoney", lambda: fetch_eastmoney_prices(symbol, range_start, range_end, "CNY", "eastmoney:fund_kline")),
+                    ("yahoo-cn", lambda: fetch_cn_yahoo_prices(symbol, range_start, range_end, "CNY")),
+                ]
+                source_rows: list[dict[str, Any]] = []
+                for source_name, fetch_prices in cn_price_sources:
                     try:
-                        range_prices = merge_rows_by_trade_date(fetch_datasrc_market_prices(symbol, range_start, range_end, "CNY"), range_prices)
-                    except SyncWarning as datasrc_exc:
-                        asset_warnings.append(str(datasrc_exc))
-                    try:
-                        range_prices = merge_rows_by_trade_date(range_prices, fetch_sohu_prices(symbol, range_start, range_end, "CNY", "sohu:hisHq"))
-                    except SyncWarning as public_exc:
-                        asset_warnings.append(str(public_exc))
-                    if not range_prices:
-                        try:
-                            range_prices = fetch_eastmoney_prices(symbol, range_start, range_end, "CNY", "eastmoney:fund_kline")
-                        except SyncWarning as public_exc:
-                            asset_warnings.append(str(public_exc))
+                        rows = [row for row in fetch_prices() if row["trade_date"] in expected_price_dates]
+                    except SyncWarning as exc:
+                        if source_name == "tushare":
+                            tushare_asset_available = False
+                        asset_warnings.append(str(exc))
+                        continue
+                    if rows:
+                        source_rows.extend(rows)
+                        logger.info("sync price source complete symbol=%s source=%s range=%s..%s rows=%d", symbol, source_name, range_start, range_end, len(rows))
+                range_prices, quality_warnings = select_price_rows_from_sources(
+                    source_rows,
+                    expected_dates=expected_price_dates,
+                    existing_rows=existing_price_rows.get(symbol, []) + prices,
+                    source_priorities=CN_PRICE_SOURCE_PRIORITY,
+                    symbol=symbol,
+                )
+                asset_warnings.extend(quality_warnings)
             elif asset.get("market") == "HK":
                 expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
                 hk_price_sources = [
@@ -1618,7 +2148,29 @@ def sync_all(
                     if source_rows:
                         range_prices = merge_rows_by_trade_date(range_prices, source_rows)
                         logger.info("sync price source complete symbol=%s source=%s range=%s..%s rows=%d", symbol, source_name, range_start, range_end, len(source_rows))
-            missing_price_dates = {day.isoformat() for day in business_days(range_start, range_end)} - {row["trade_date"] for row in range_prices}
+            expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+            missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
+            if missing_price_dates and allow_network and asset.get("price_fallback"):
+                try:
+                    fallback_rows = fetch_price_fallback_rows(
+                        asset,
+                        range_start,
+                        range_end,
+                        existing_price_rows.get(symbol, []) + range_prices,
+                    )
+                    fallback_rows = [row for row in fallback_rows if row["trade_date"] in missing_price_dates]
+                    if fallback_rows:
+                        range_prices = merge_rows_by_trade_date(range_prices, fallback_rows)
+                        logger.info(
+                            "sync price fallback complete symbol=%s range=%s..%s rows=%d",
+                            symbol,
+                            range_start,
+                            range_end,
+                            len(fallback_rows),
+                        )
+                except SyncWarning as exc:
+                    asset_warnings.append(str(exc))
+            missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
             if missing_price_dates:
                 asset_missing.append(f"prices:{symbol}")
             prices = merge_rows_by_trade_date(prices, range_prices)

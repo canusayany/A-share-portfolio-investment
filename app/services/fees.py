@@ -108,6 +108,17 @@ def cny_to_usd(cny_amount: float, usd_cny_rate: float, config: FxFeeConfig, incl
     return round(usd, 8), round(fee_cny, 6)
 
 
+def cny_cost_for_usd(usd_amount: float, usd_cny_rate: float, config: FxFeeConfig) -> tuple[float, float]:
+    if usd_amount <= 0:
+        return 0.0, 0.0
+    spread = bps_to_rate(config.bank_out_spread_bps)
+    if config.use_ibkr_auto_fx:
+        spread += config.ibkr_auto_fx_markup
+    gross_mid = usd_amount * usd_cny_rate
+    cny = gross_mid * (1.0 + spread)
+    return round(cny, 6), round(cny - gross_mid, 6)
+
+
 def usd_to_cny(usd_amount: float, usd_cny_rate: float, config: FxFeeConfig, include_wire: bool) -> tuple[float, float]:
     spread = bps_to_rate(config.bank_in_spread_bps)
     if config.use_ibkr_auto_fx:
@@ -135,10 +146,10 @@ def hk_connect_etf_trade_fee(gross_amount_hkd: float, config: HkConnectEtfFeeCon
     return round(commission + settlement + pass_through, 6)
 
 
-def hk_connect_portfolio_fee(value_hkd: float, config: HkConnectEtfFeeConfig) -> float:
+def hk_connect_portfolio_fee(value_hkd: float, config: HkConnectEtfFeeConfig, calendar_days: int = 1) -> float:
     if value_hkd <= 0:
         return 0.0
-    return round(value_hkd * config.portfolio_fee_annual_rate / 365.0, 6)
+    return round(value_hkd * config.portfolio_fee_annual_rate * max(calendar_days, 0) / 365.0, 6)
 
 
 def cny_cost_for_hkd(hkd_amount: float, hkd_cny_rate: float, config: HkConnectEtfFeeConfig) -> tuple[float, float]:

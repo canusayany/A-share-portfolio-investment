@@ -4,120 +4,258 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>跨市场组合回测</title>
-    <link rel="stylesheet" href="static/styles.css" />
+    <link rel="stylesheet" href="static/styles.css?v=20260710-ui-rebuild-2" />
     <script src="static/echarts.min.js?v=5.6.0"></script>
   </head>
   <body>
-    <main class="app-shell">
-      <aside class="panel controls">
-        <h1>组合回测</h1>
-        <label>
-          初始资金
-          <input id="initialCapital" type="number" min="10000" step="10000" />
-        </label>
-        <div class="date-row">
-          <label>
-            开始日期
-            <input id="startDate" type="date" />
-          </label>
-          <label>
-            结束日期
-            <input id="endDate" type="date" />
-          </label>
+    <header class="mobile-app-bar">
+      <div>
+        <strong>组合回测</strong>
+        <span id="mobileDataStatus">正在检查数据</span>
+      </div>
+      <button id="mobileParameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">
+        调整参数
+      </button>
+    </header>
+
+    <div class="app-shell">
+      <button id="parameterBackdrop" class="parameter-backdrop" type="button" aria-label="关闭参数面板" tabindex="-1"></button>
+
+      <aside id="parameterPanel" class="controls" aria-label="回测参数">
+        <div class="control-panel-header">
+          <div>
+            <h1>组合回测</h1>
+            <p>设定组合与规则，查看长期收益和风险</p>
+          </div>
+          <button id="closeParameterPanel" class="icon-button close-parameters" type="button" aria-label="关闭参数面板">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18"></path>
+            </svg>
+          </button>
         </div>
-        <label>
-          再平衡频率
-          <select id="rebalanceFrequency">
-            <option value="yearly">每年</option>
-            <option value="semiannual">每半年</option>
-          </select>
-        </label>
-        <label>
-          容忍带 <span id="bandValue"></span>
-          <input id="rebalanceBand" type="range" min="0" max="0.1" step="0.005" />
-        </label>
-        <label>
-          每月消费
-          <input id="monthlySpend" type="number" min="0" step="500" />
-        </label>
-        <label>
-          国债目标模式
-          <select id="repoTargetMode">
-            <option value="residual_weight">按剩余权重</option>
-            <option value="fixed_bucket">固定消费池</option>
-          </select>
-        </label>
-        <div id="repoFixedControls" class="repo-fixed-controls" hidden>
-          <label>
-            国债固定金额
-            <input id="repoFixedTarget" type="number" min="0" step="10000" />
-          </label>
-          <label>
-            国债固定比例 <span id="repoFixedRatioValue"></span>
-            <input id="repoFixedRatio" type="range" min="0" max="0.8" step="0.01" />
-          </label>
+
+        <div class="control-flow">
+          <section class="control-section">
+            <div class="section-heading">
+              <span>1</span>
+              <div>
+                <h2>回测范围</h2>
+                <p>资金、时间与再平衡规则</p>
+              </div>
+            </div>
+            <label>
+              初始资金（元）
+              <input id="initialCapital" type="number" min="10000" step="10000" inputmode="decimal" />
+            </label>
+            <div class="date-row">
+              <label>
+                开始日期
+                <input id="startDate" type="date" />
+              </label>
+              <label>
+                结束日期
+                <input id="endDate" type="date" />
+              </label>
+            </div>
+            <div class="preset-row" aria-label="回测区间快捷选择">
+              <button type="button" data-date-preset="5">近5年</button>
+              <button type="button" data-date-preset="10">近10年</button>
+              <button type="button" data-date-preset="all">全区间</button>
+            </div>
+            <div class="field-row">
+              <label>
+                再平衡频率
+                <select id="rebalanceFrequency">
+                  <option value="yearly">每年</option>
+                  <option value="semiannual">每半年</option>
+                </select>
+              </label>
+              <label>
+                每月消费（元）
+                <input id="monthlySpend" type="number" min="0" step="500" inputmode="decimal" />
+              </label>
+            </div>
+            <label class="range-field">
+              <span>再平衡容忍带 <strong id="bandValue"></strong></span>
+              <input id="rebalanceBand" type="range" min="0" max="0.1" step="0.005" />
+            </label>
+          </section>
+
+          <section class="control-section">
+            <div class="section-heading">
+              <span>2</span>
+              <div>
+                <h2>国债与消费池</h2>
+                <p>设置现金缓冲与逆回购期限</p>
+              </div>
+            </div>
+            <label class="visually-hidden">
+              国债目标模式
+              <select id="repoTargetMode">
+                <option value="residual_weight">按剩余权重</option>
+                <option value="fixed_bucket">固定消费池</option>
+              </select>
+            </label>
+            <div class="mode-tabs" aria-label="国债目标模式">
+              <button type="button" data-repo-mode="residual_weight">按剩余权重</button>
+              <button type="button" data-repo-mode="fixed_bucket">固定消费池</button>
+            </div>
+            <div id="repoFixedControls" class="repo-fixed-controls" hidden>
+              <label>
+                国债固定金额（元）
+                <input id="repoFixedTarget" type="number" min="0" step="10000" inputmode="decimal" />
+              </label>
+              <label class="range-field">
+                <span>国债固定比例 <strong id="repoFixedRatioValue"></strong></span>
+                <input id="repoFixedRatio" type="range" min="0" max="0.8" step="0.01" />
+              </label>
+            </div>
+            <label>
+              逆回购期限
+              <select id="repoSymbol"></select>
+            </label>
+            <div class="repo-weight">
+              <span>当前国债目标</span>
+              <strong id="repoWeight">0%</strong>
+            </div>
+          </section>
+
+          <section class="control-section">
+            <div class="section-heading">
+              <span>3</span>
+              <div>
+                <h2 id="assetWeightTitle">资产配置</h2>
+                <p>启用资产并调整目标比例</p>
+              </div>
+            </div>
+            <div id="allocationSummary" class="allocation-summary"></div>
+            <div id="assetControls" class="asset-controls"></div>
+          </section>
+
+          <details class="control-details">
+            <summary>
+              <span>可调整费用假设</span>
+              <small>佣金、汇兑与税率</small>
+            </summary>
+            <div class="details-content">
+              <label>境内基金佣金率 <input id="cnCommission" type="number" min="0" step="0.00001" /></label>
+              <label>美国券商费率类型
+                <select id="ibkrPlan">
+                  <option value="pro_fixed">固定费率</option>
+                  <option value="pro_tiered">阶梯费率</option>
+                  <option value="lite">免佣类型</option>
+                </select>
+              </label>
+              <label>出金和购汇点差（基点） <input id="fxOutBps" type="number" min="0" step="1" /></label>
+              <label>入金和结汇点差（基点） <input id="fxInBps" type="number" min="0" step="1" /></label>
+              <label>港股通佣金率 <input id="hkCommission" type="number" min="0" step="0.00001" /></label>
+              <label>港股通汇兑点差（基点） <input id="hkFxBps" type="number" min="0" step="1" /></label>
+              <label>港股通组合费年率 <input id="hkPortfolioFee" type="number" min="0" step="0.00001" /></label>
+              <label>美国分红税率 <input id="usDividendTax" type="number" min="0" max="0.3" step="0.01" /></label>
+            </div>
+          </details>
+          <details class="control-details">
+            <summary>
+              <span>固定费率与成本对照</span>
+              <small>查看计算口径</small>
+            </summary>
+            <div id="feeSummary" class="fee-summary details-content"></div>
+          </details>
         </div>
-        <section>
-          <h2 id="assetWeightTitle">资产权重</h2>
-          <div id="assetControls"></div>
-          <div class="repo-weight">国债逆回购：<strong id="repoWeight">0%</strong></div>
-          <label>
-            逆回购期限
-            <select id="repoSymbol"></select>
-          </label>
-        </section>
-        <details>
-          <summary>可调整费用假设</summary>
-          <label>境内基金佣金率 <input id="cnCommission" type="number" min="0" step="0.00001" /></label>
-          <label>美国券商费率类型
-            <select id="ibkrPlan">
-              <option value="pro_fixed">固定费率</option>
-              <option value="pro_tiered">阶梯费率</option>
-              <option value="lite">免佣类型</option>
-            </select>
-          </label>
-          <label>出金和购汇点差（基点） <input id="fxOutBps" type="number" min="0" step="1" /></label>
-          <label>入金和结汇点差（基点） <input id="fxInBps" type="number" min="0" step="1" /></label>
-          <label>港股通佣金率 <input id="hkCommission" type="number" min="0" step="0.00001" /></label>
-          <label>港股通汇兑点差（基点） <input id="hkFxBps" type="number" min="0" step="1" /></label>
-          <label>港股通组合费年率 <input id="hkPortfolioFee" type="number" min="0" step="0.00001" /></label>
-          <label>美国分红税率 <input id="usDividendTax" type="number" min="0" max="0.3" step="0.01" /></label>
-        </details>
-        <details>
-          <summary>固定费率与成本对照</summary>
-          <div id="feeSummary" class="fee-summary"></div>
-        </details>
-        <div class="button-row">
-          <button id="runBtn">运行回测</button>
+
+        <div class="run-dock">
+          <button id="runBtn" class="button button-primary" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"></path></svg>
+            <span>运行回测</span>
+          </button>
+          <div id="message" class="message" role="status" aria-live="polite">准备就绪，可以运行回测</div>
         </div>
-        <div id="message" class="message"></div>
       </aside>
-      <section class="content">
-        <section class="summary-grid" id="summaryGrid"></section>
-        <section class="chart-grid">
-          <div class="chart-panel"><div id="assetChart" class="chart"></div></div>
-          <div class="chart-panel"><div id="returnChart" class="chart"></div></div>
-          <div class="chart-panel"><div id="dailyReturnChart" class="chart"></div></div>
-          <div class="chart-panel"><div id="drawdownChart" class="chart"></div></div>
-          <div class="chart-panel"><div id="weightChart" class="chart"></div></div>
-          <div class="chart-panel wide-chart"><div id="comparisonChart" class="chart"></div></div>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <h2>回测结果</h2>
+            <p>先看收益和回撤，再深入检查资产走势与交易记录</p>
+          </div>
+          <button id="parameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">
+            调整参数
+          </button>
+        </header>
+
+        <section class="context-strip" aria-label="当前配置与数据状态">
+          <div>
+            <h3>当前配置</h3>
+            <div id="controlSummary" class="control-summary"></div>
+          </div>
+          <div class="status-line">
+            <span id="dataStatusDot" class="status-dot is-loading" aria-hidden="true"></span>
+            <span id="dataStatusText">正在检查数据状态</span>
+            <span class="status-divider" aria-hidden="true"></span>
+            <span id="resultStatusText">尚未运行回测</span>
+          </div>
         </section>
-        <section class="table-grid">
-          <div class="panel">
-            <h2>数据状态</h2>
-            <table id="statusTable"></table>
+
+        <section id="summaryGrid" class="summary-grid" aria-label="核心指标" aria-live="polite"></section>
+
+        <section class="analysis-panel" aria-labelledby="analysisTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="analysisTitle">走势与风险</h2>
+              <p>切换指标，定位收益来源和风险阶段</p>
+            </div>
           </div>
-          <div class="panel">
-            <h2>再平衡记录</h2>
-            <table id="rebalanceTable"></table>
+          <div class="tab-strip chart-tabs" role="tablist" aria-label="图表指标">
+            <button id="chartTabAsset" type="button" role="tab" aria-selected="true" aria-controls="assetChartView" data-chart-tab="assetChart">总资产</button>
+            <button id="chartTabReturn" type="button" role="tab" aria-selected="false" aria-controls="returnChartView" data-chart-tab="returnChart">收益率</button>
+            <button id="chartTabDaily" type="button" role="tab" aria-selected="false" aria-controls="dailyReturnChartView" data-chart-tab="dailyReturnChart">单日收益</button>
+            <button id="chartTabDrawdown" type="button" role="tab" aria-selected="false" aria-controls="drawdownChartView" data-chart-tab="drawdownChart">回撤</button>
+            <button id="chartTabWeight" type="button" role="tab" aria-selected="false" aria-controls="weightChartView" data-chart-tab="weightChart">资产权重</button>
+            <button id="chartTabComparison" type="button" role="tab" aria-selected="false" aria-controls="comparisonChartView" data-chart-tab="comparisonChart">总资产对比</button>
           </div>
-          <div class="panel wide">
-            <h2>交易流水</h2>
-            <table id="tradesTable"></table>
+          <div class="chart-stage">
+            <div id="analysisEmpty" class="empty-state">
+              <svg viewBox="0 0 64 64" aria-hidden="true">
+                <path d="M10 49V17M10 49h44M17 41l10-10 9 6 13-17"></path>
+                <circle cx="17" cy="41" r="2"></circle><circle cx="27" cy="31" r="2"></circle><circle cx="36" cy="37" r="2"></circle><circle cx="49" cy="20" r="2"></circle>
+              </svg>
+              <strong>运行回测后查看完整走势</strong>
+              <span>核心指标、风险曲线与资产权重会集中显示在这里</span>
+            </div>
+            <div id="assetChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabAsset"><div id="assetChart" class="chart"></div></div>
+            <div id="returnChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabReturn" hidden><div id="returnChart" class="chart"></div></div>
+            <div id="dailyReturnChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabDaily" hidden><div id="dailyReturnChart" class="chart"></div></div>
+            <div id="drawdownChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabDrawdown" hidden><div id="drawdownChart" class="chart"></div></div>
+            <div id="weightChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabWeight" hidden><div id="weightChart" class="chart"></div></div>
+            <div id="comparisonChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabComparison" hidden><div id="comparisonChart" class="chart"></div></div>
           </div>
         </section>
-      </section>
-    </main>
-    <script src="static/app.js?v=20260707-repo-fixed-bucket"></script>
+
+        <section class="records-panel" aria-labelledby="recordsTitle">
+          <div class="panel-heading records-heading">
+            <div>
+              <h2 id="recordsTitle">数据与记录</h2>
+              <p>核对数据覆盖，再追踪再平衡和每笔交易</p>
+            </div>
+          </div>
+          <div class="tab-strip record-tabs" role="tablist" aria-label="数据与记录">
+            <button id="recordTabStatus" type="button" role="tab" aria-selected="true" aria-controls="statusPanel" data-record-tab="statusPanel">数据状态</button>
+            <button id="recordTabRebalance" type="button" role="tab" aria-selected="false" aria-controls="rebalancePanel" data-record-tab="rebalancePanel">再平衡记录</button>
+            <button id="recordTabTrades" type="button" role="tab" aria-selected="false" aria-controls="tradesPanel" data-record-tab="tradesPanel">交易流水</button>
+          </div>
+          <div id="statusPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabStatus">
+            <div class="table-scroll"><table id="statusTable"></table></div>
+          </div>
+          <div id="rebalancePanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRebalance" hidden>
+            <div class="table-scroll"><table id="rebalanceTable"></table></div>
+          </div>
+          <div id="tradesPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabTrades" hidden>
+            <div class="table-scroll"><table id="tradesTable"></table></div>
+          </div>
+          <div class="table-hint">表格可横向滚动查看完整字段</div>
+        </section>
+      </main>
+    </div>
+    <script src="static/app.js?v=20260710-ui-rebuild-2"></script>
   </body>
 </html>

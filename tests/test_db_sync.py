@@ -680,6 +680,152 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(result["inserted"]["prices"], 1)
         self.assertNotIn("prices:VOO", result["missing_data"])
 
+    def test_targeted_cn_price_sync_uses_configured_price_fallback(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        original_fetch_cn = data_sync_module.fetch_cn_fund_prices
+        original_datasrc = data_sync_module.fetch_datasrc_market_prices
+        original_sohu = data_sync_module.fetch_sohu_prices
+        original_eastmoney = data_sync_module.fetch_eastmoney_prices
+        original_yahoo = data_sync_module.fetch_cn_yahoo_prices
+        original_fallback = data_sync_module.fetch_price_fallback_rows
+
+        def fail_source(*_args, **_kwargs):
+            raise data_sync_module.SyncWarning("source unavailable")
+
+        def fake_fallback(asset, range_start, range_end, target_rows):
+            self.assertEqual(asset["symbol"], "510300.SH")
+            self.assertEqual((range_start, range_end), ("2020-01-10", "2020-01-10"))
+            self.assertTrue(target_rows)
+            return [
+                {
+                    "symbol": "510300.SH",
+                    "trade_date": "2020-01-10",
+                    "open": 3.1,
+                    "high": 3.1,
+                    "low": 3.1,
+                    "close": 3.1,
+                    "adj_close": 3.1,
+                    "volume": 0.0,
+                    "amount": 0.0,
+                    "currency": "CNY",
+                    "source": "test:price_fallback",
+                }
+            ]
+
+        try:
+            data_sync_module.fetch_cn_fund_prices = fail_source
+            data_sync_module.fetch_datasrc_market_prices = fail_source
+            data_sync_module.fetch_sohu_prices = fail_source
+            data_sync_module.fetch_eastmoney_prices = fail_source
+            data_sync_module.fetch_cn_yahoo_prices = fail_source
+            data_sync_module.fetch_price_fallback_rows = fake_fallback
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='510300.SH' AND trade_date='2020-01-10'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["prices:510300.SH"])
+                row = conn.execute("SELECT close, source FROM prices WHERE symbol='510300.SH' AND trade_date='2020-01-10'").fetchone()
+        finally:
+            data_sync_module.fetch_cn_fund_prices = original_fetch_cn
+            data_sync_module.fetch_datasrc_market_prices = original_datasrc
+            data_sync_module.fetch_sohu_prices = original_sohu
+            data_sync_module.fetch_eastmoney_prices = original_eastmoney
+            data_sync_module.fetch_cn_yahoo_prices = original_yahoo
+            data_sync_module.fetch_price_fallback_rows = original_fallback
+
+        self.assertEqual(result["inserted"]["prices"], 1)
+        self.assertNotIn("prices:510300.SH", result["missing_data"])
+        self.assertEqual(dict(row), {"close": 3.1, "source": "test:price_fallback"})
+
+    def test_hs300_fallback_nav_is_scaled_to_target_price_level(self) -> None:
+        cfg = normalize_config({})
+        asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "510300.SH")
+        original_fetch_nav = data_sync_module.fetch_fund_nav_proxy_prices
+
+        def fake_fetch_nav(_proxy_symbol, target_symbol, _start, _end, currency):
+            return [
+                {
+                    "symbol": target_symbol,
+                    "trade_date": "2020-01-09",
+                    "open": 2.0,
+                    "high": 2.0,
+                    "low": 2.0,
+                    "close": 2.0,
+                    "adj_close": 2.0,
+                    "volume": 0.0,
+                    "amount": 0.0,
+                    "currency": currency,
+                    "source": "test:nav",
+                },
+                {
+                    "symbol": target_symbol,
+                    "trade_date": "2020-01-10",
+                    "open": 3.0,
+                    "high": 3.0,
+                    "low": 3.0,
+                    "close": 3.0,
+                    "adj_close": 3.0,
+                    "volume": 0.0,
+                    "amount": 0.0,
+                    "currency": currency,
+                    "source": "test:nav",
+                },
+            ]
+
+        try:
+            data_sync_module.fetch_fund_nav_proxy_prices = fake_fetch_nav
+            rows = data_sync_module.fetch_price_fallback_rows(
+                asset,
+                "2020-01-10",
+                "2020-01-10",
+                [{"trade_date": "2020-01-09", "close": 6.0, "source": "fixture:price"}],
+            )
+        finally:
+            data_sync_module.fetch_fund_nav_proxy_prices = original_fetch_nav
+
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["close"], 9.0)
+        self.assertIn("splice_scale_3", rows[0]["source"])
+
+    def test_gold_fallback_au9999_price_is_scaled_to_etf_share_price(self) -> None:
+        cfg = normalize_config({})
+        asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "518880.SH")
+        original_fetch_gold = data_sync_module.fetch_au9999_proxy_prices
+
+        def fake_fetch_gold(target_symbol, _start, _end, currency):
+            return [
+                {
+                    "symbol": target_symbol,
+                    "trade_date": "2020-01-10",
+                    "open": 900.0,
+                    "high": 901.0,
+                    "low": 899.0,
+                    "close": 900.0,
+                    "adj_close": 900.0,
+                    "volume": 0.0,
+                    "amount": 0.0,
+                    "currency": currency,
+                    "source": "test:au9999",
+                }
+            ]
+
+        try:
+            data_sync_module.fetch_au9999_proxy_prices = fake_fetch_gold
+            rows = data_sync_module.fetch_price_fallback_rows(asset, "2020-01-10", "2020-01-10", [])
+        finally:
+            data_sync_module.fetch_au9999_proxy_prices = original_fetch_gold
+
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["close"], 9.0)
+        self.assertIn("fixed_scale_0.01", rows[0]["source"])
+
+    def test_required_data_missing_uses_fallback_price_start_but_not_dividend_start(self) -> None:
+        db_path, cfg = build_synced_db("2012-01-01", "2012-01-31")
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM prices WHERE symbol='510300.SH' AND trade_date='2012-01-31'")
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+
+        self.assertIn("prices:510300.SH", missing)
+        self.assertNotIn("dividends:510300.SH", missing)
+
     def test_targeted_us_price_sync_fills_missing_dates_from_multiple_sources(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         original_yahoo = data_sync_module.fetch_yahoo_prices
@@ -778,6 +924,134 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertNotIn("prices:03195.HK", result["missing_data"])
         self.assertEqual([row["source"] for row in rows], ["test:datasrc", "test:eastmoney", "test:tencent"])
 
+    def test_targeted_cn_price_sync_replaces_bad_primary_source_with_public_consensus(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        cn_sp500 = next(asset for asset in cfg["assets"] if asset["symbol"] == "513500.SH")
+        cn_sp500["enabled"] = True
+        original_fetch_cn = data_sync_module.fetch_cn_fund_prices
+        original_datasrc = data_sync_module.fetch_datasrc_market_prices
+        original_sohu = data_sync_module.fetch_sohu_prices
+        original_eastmoney = data_sync_module.fetch_eastmoney_prices
+        original_yahoo = data_sync_module.fetch_cn_yahoo_prices
+        original_adj = data_sync_module.fetch_adj_factors
+
+        def price_row(source, trade_date, close):
+            return {
+                "symbol": "513500.SH",
+                "trade_date": trade_date,
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "adj_close": close,
+                "volume": 0.0,
+                "amount": 0.0,
+                "currency": "CNY",
+                "source": source,
+            }
+
+        try:
+            data_sync_module.fetch_cn_fund_prices = lambda *_args, **_kwargs: [
+                price_row("tushare:fund_daily", "2020-01-08", 9.0),
+                price_row("tushare:fund_daily", "2020-01-09", 1.02),
+                price_row("tushare:fund_daily", "2020-01-10", 1.03),
+            ]
+            data_sync_module.fetch_datasrc_market_prices = lambda *_args, **_kwargs: []
+            data_sync_module.fetch_sohu_prices = lambda *_args, **_kwargs: [
+                price_row("sohu:hisHq", "2020-01-08", 1.01),
+                price_row("sohu:hisHq", "2020-01-09", 1.02),
+                price_row("sohu:hisHq", "2020-01-10", 1.03),
+            ]
+            data_sync_module.fetch_eastmoney_prices = lambda *_args, **_kwargs: [
+                price_row("eastmoney:fund_kline", "2020-01-08", 1.01),
+                price_row("eastmoney:fund_kline", "2020-01-09", 1.02),
+                price_row("eastmoney:fund_kline", "2020-01-10", 1.03),
+            ]
+            data_sync_module.fetch_cn_yahoo_prices = lambda *_args, **_kwargs: [
+                price_row("yahoo:query1:chart", "2020-01-08", 1.01),
+                price_row("yahoo:query1:chart", "2020-01-09", 1.02),
+                price_row("yahoo:query1:chart", "2020-01-10", 1.03),
+            ]
+            data_sync_module.fetch_adj_factors = lambda *_args, **_kwargs: []
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='513500.SH' AND trade_date >= '2020-01-08'")
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["prices:513500.SH"])
+                rows = rows_to_dicts(
+                    conn.execute(
+                        "SELECT trade_date, close, source FROM prices WHERE symbol='513500.SH' AND trade_date >= '2020-01-08' ORDER BY trade_date"
+                    )
+                )
+        finally:
+            data_sync_module.fetch_cn_fund_prices = original_fetch_cn
+            data_sync_module.fetch_datasrc_market_prices = original_datasrc
+            data_sync_module.fetch_sohu_prices = original_sohu
+            data_sync_module.fetch_eastmoney_prices = original_eastmoney
+            data_sync_module.fetch_cn_yahoo_prices = original_yahoo
+            data_sync_module.fetch_adj_factors = original_adj
+
+        self.assertEqual(result["inserted"]["prices"], 3)
+        self.assertNotIn("prices:513500.SH", result["missing_data"])
+        self.assertEqual(rows[0], {"trade_date": "2020-01-08", "close": 1.01, "source": "sohu:hisHq"})
+        self.assertEqual(rows[1]["source"], "tushare:fund_daily")
+
+    def test_existing_cn_price_anomaly_triggers_targeted_resync(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        cn_sp500 = next(asset for asset in cfg["assets"] if asset["symbol"] == "513500.SH")
+        cn_sp500["enabled"] = True
+        original_fetch_cn = data_sync_module.fetch_cn_fund_prices
+        original_datasrc = data_sync_module.fetch_datasrc_market_prices
+        original_sohu = data_sync_module.fetch_sohu_prices
+        original_eastmoney = data_sync_module.fetch_eastmoney_prices
+        original_yahoo = data_sync_module.fetch_cn_yahoo_prices
+        original_adj = data_sync_module.fetch_adj_factors
+
+        def price_row(source, trade_date, close):
+            return {
+                "symbol": "513500.SH",
+                "trade_date": trade_date,
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "adj_close": close,
+                "volume": 0.0,
+                "amount": 0.0,
+                "currency": "CNY",
+                "source": source,
+            }
+
+        try:
+            data_sync_module.fetch_cn_fund_prices = lambda *_args, **_kwargs: [price_row("tushare:fund_daily", "2020-01-08", 1.01)]
+            data_sync_module.fetch_datasrc_market_prices = lambda *_args, **_kwargs: []
+            data_sync_module.fetch_sohu_prices = lambda *_args, **_kwargs: [price_row("sohu:hisHq", "2020-01-08", 1.01)]
+            data_sync_module.fetch_eastmoney_prices = lambda *_args, **_kwargs: [price_row("eastmoney:fund_kline", "2020-01-08", 1.01)]
+            data_sync_module.fetch_cn_yahoo_prices = lambda *_args, **_kwargs: []
+            data_sync_module.fetch_adj_factors = lambda *_args, **_kwargs: []
+            with db_session(db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE prices
+                    SET open=100.0, high=100.0, low=100.0, close=100.0, adj_close=100.0, source='test:bad'
+                    WHERE symbol='513500.SH' AND trade_date='2020-01-08'
+                    """
+                )
+                missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+                result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=missing)
+                row = conn.execute(
+                    "SELECT trade_date, close, source FROM prices WHERE symbol='513500.SH' AND trade_date='2020-01-08'"
+                ).fetchone()
+        finally:
+            data_sync_module.fetch_cn_fund_prices = original_fetch_cn
+            data_sync_module.fetch_datasrc_market_prices = original_datasrc
+            data_sync_module.fetch_sohu_prices = original_sohu
+            data_sync_module.fetch_eastmoney_prices = original_eastmoney
+            data_sync_module.fetch_cn_yahoo_prices = original_yahoo
+            data_sync_module.fetch_adj_factors = original_adj
+
+        self.assertIn("prices:513500.SH", missing)
+        self.assertEqual(result["inserted"]["prices"], 1)
+        self.assertEqual(dict(row), {"trade_date": "2020-01-08", "close": 1.01, "source": "tushare:fund_daily"})
+
     def test_json_and_row_helpers(self) -> None:
         db_path = temp_db_path()
         init_db(db_path)
@@ -825,6 +1099,42 @@ class DbAndSyncTests(unittest.TestCase):
             [{"trade_date": "2026-06-01", "close": 10}, {"trade_date": "2026-06-02", "close": 2}],
         )
         self.assertEqual([row["close"] for row in merged], [10, 20])
+        self.assertEqual(data_sync_module.iso_date_text("2020-01-02"), "2020-01-02")
+        self.assertEqual(data_sync_module.finite_float("3.14"), 3.14)
+        self.assertIsNone(data_sync_module.finite_float("bad"))
+        self.assertIsNone(data_sync_module.finite_float(float("nan")))
+        row = data_sync_module.price_row("X", "2020-01-02", 100.0, "CNY", "test")
+        self.assertEqual(row["open"], 100.0)
+        self.assertEqual(row["source"], "test")
+        self.assertEqual(
+            data_sync_module.price_scale_from_overlap(
+                [{"trade_date": "2020-01-02", "close": 6.0, "source": "fixture"}],
+                [{"trade_date": "2020-01-02", "close": 2.0, "source": "fallback"}],
+            ),
+            3.0,
+        )
+        scaled = data_sync_module.scale_price_rows([row], 0.01, "scaled")
+        self.assertEqual(scaled[0]["close"], 1.0)
+        self.assertIn("scaled", scaled[0]["source"])
+        nav_rows = data_sync_module.parse_eastmoney_net_worth_trend(
+            'var Data_netWorthTrend = [{"x":1577923200000,"y":1.23,"equityReturn":0}];',
+            "160706",
+            "510300.SH",
+            "2020-01-01",
+            "2020-01-03",
+            "CNY",
+        )
+        self.assertEqual(nav_rows[0]["trade_date"], "2020-01-02")
+        self.assertEqual(nav_rows[0]["close"], 1.23)
+        self.assertEqual(nav_rows[0]["source"], "eastmoney:fund_nav:160706")
+        self.assertEqual(data_sync_module.fetch_price_fallback_rows({"symbol": "X", "currency": "CNY"}, "2020-01-02", "2020-01-02", []), [])
+        with self.assertRaises(data_sync_module.SyncWarning):
+            data_sync_module.fetch_price_fallback_rows(
+                {"symbol": "X", "currency": "CNY", "price_fallback": {"kind": "unknown"}},
+                "2020-01-02",
+                "2020-01-02",
+                [],
+            )
 
 
 if __name__ == "__main__":
