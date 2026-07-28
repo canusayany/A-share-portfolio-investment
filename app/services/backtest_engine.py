@@ -12,7 +12,16 @@ from typing import Any
 
 import numpy as np
 
-from app.config import fx_pair_for_currency, normalize_config, required_fx_pairs_for_assets, validate_config
+from app.config import (
+    backtest_assets,
+    fx_pair_for_currency,
+    normalize_config,
+    repo_rate_symbol,
+    required_fx_pairs_for_assets,
+    selected_bond_etf_asset,
+    selected_repo_option,
+    validate_config,
+)
 from app.db import insert_many, json_dumps, utc_now
 from app.services.calendar import add_business_days, business_days, first_business_day_by_month, parse_date, rebalance_days, repo_actual_days
 from app.services.fees import (
@@ -37,7 +46,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 5
+BACKTEST_ENGINE_VERSION = 9
 
 
 @dataclass
@@ -71,6 +80,7 @@ class PortfolioState:
     total_fees_cny: float = 0.0
     total_spend_cny: float = 0.0
     total_withheld_tax_cny: float = 0.0
+    total_dividend_cny: float = 0.0
 
 
 class BacktestError(ValueError):
@@ -117,18 +127,20 @@ def get_cached_backtest_run(conn, user_config: dict[str, Any] | None = None) -> 
     }
 
 
-def load_price_map(conn, symbols: list[str], start: str, end: str) -> dict[str, dict[str, float]]:
+def load_price_map(conn, symbols: list[str], start: str, end: str, field: str = "close") -> dict[str, dict[str, float]]:
+    if field not in {"open", "close"}:
+        raise ValueError("price field must be open or close")
     result: dict[str, dict[str, float]] = {}
     for symbol in symbols:
         rows = conn.execute(
-            """
-            SELECT trade_date, close FROM prices
+            f"""
+            SELECT trade_date, COALESCE({field}, close) AS price FROM prices
             WHERE symbol=? AND trade_date BETWEEN ? AND ?
             ORDER BY trade_date
             """,
             (symbol, start, end),
         ).fetchall()
-        result[symbol] = {row["trade_date"]: float(row["close"]) for row in rows}
+        result[symbol] = {row["trade_date"]: float(row["price"]) for row in rows}
     return result
 
 
@@ -148,14 +160,31 @@ def price_proxy_asset(asset: dict[str, Any]) -> dict[str, Any] | None:
         "price_proxy_for": asset["symbol"],
     }
     proxy.pop("price_fallback", None)
+    proxy.pop("replacement_assets", None)
     return proxy
+
+
+def replacement_assets(asset: dict[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for replacement in asset.get("replacement_assets", []):
+        candidate = {
+            **asset,
+            **replacement,
+            "target_weight": asset.get("target_weight", 0.0),
+            "enabled": asset.get("enabled", True),
+            "replacement_for": asset["symbol"],
+        }
+        candidate.pop("price_fallback", None)
+        candidate.pop("replacement_assets", None)
+        result.append(candidate)
+    return result
 
 
 def simulation_assets(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     for asset in assets:
-        for candidate in (asset, price_proxy_asset(asset)):
+        for candidate in (asset, *replacement_assets(asset), price_proxy_asset(asset)):
             if not candidate or candidate["symbol"] in seen:
                 continue
             result.append(candidate)
@@ -264,9 +293,30 @@ def active_assets(config: dict[str, Any], day: date, latest_prices: dict[str, fl
     for asset in config["assets"]:
         if not asset.get("enabled", True):
             continue
-        primary_start = parse_date(asset.get("inception_date") or config["start_date"])
-        if day >= primary_start and latest_prices.get(asset["symbol"]) is not None:
-            result.append(asset)
+        candidates = replacement_assets(asset) + [asset]
+        candidates.sort(
+            key=lambda item: parse_date(
+                item.get("allocation_start_date") or item.get("trade_start_date") or item.get("inception_date") or config["start_date"]
+            ),
+            reverse=True,
+        )
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if day
+                >= parse_date(
+                    candidate.get("allocation_start_date")
+                    or candidate.get("trade_start_date")
+                    or candidate.get("inception_date")
+                    or config["start_date"]
+                )
+                and latest_prices.get(candidate["symbol"]) is not None
+            ),
+            None,
+        )
+        if selected:
+            result.append(selected)
             continue
         proxy = price_proxy_asset(asset)
         if not proxy:
@@ -317,6 +367,16 @@ def effective_weights(
             weights[asset["symbol"]] = weight
             total_risk += weight
         weights["REPO"] = max(1.0 - total_risk, 0.0)
+    bond_asset = selected_bond_etf_asset(config)
+    if bond_asset:
+        repo_weight = weights.pop("REPO", 0.0)
+        trade_start = parse_date(bond_asset.get("trade_start_date") or bond_asset.get("inception_date"))
+        bond_symbol = bond_asset["symbol"]
+        if day >= trade_start and latest_prices.get(bond_symbol) is not None:
+            if repo_weight > 0:
+                weights[bond_symbol] = weights.get(bond_symbol, 0.0) + repo_weight
+        else:
+            weights["REPO"] = repo_weight
     return weights
 
 
@@ -705,10 +765,12 @@ def _rebalance_state_to_band(
 
 
 def repo_tenor_days(config: dict[str, Any]) -> int:
-    symbol = config.get("repo_symbol", "204001")
-    for option in config.get("repo_options", []):
-        if option.get("symbol") == symbol:
-            return int(option.get("tenor_days") or 1)
+    option = selected_repo_option(config)
+    symbol = option.get("symbol", "204001")
+    if option.get("instrument_type", "repo") != "repo":
+        return 1
+    if option:
+        return int(option.get("tenor_days") or 1)
     try:
         return int(str(symbol)[-3:])
     except ValueError:
@@ -817,6 +879,7 @@ def _apply_dividend_events(
             net_dividend_cny = dividend * (1.0 - tax_rate)
         pay_date = str(event.get("pay_date") or day_str)
         state.dividend_receivable_cny += net_dividend_cny
+        state.total_dividend_cny += net_dividend_cny
         state.dividend_receivables_by_pay_date[pay_date] = (
             state.dividend_receivables_by_pay_date.get(pay_date, 0.0) + net_dividend_cny
         )
@@ -894,15 +957,22 @@ def _asset_period_performance(
 
 def comparison_assets(config: dict[str, Any]) -> list[dict[str, Any]]:
     by_symbol = {asset["symbol"]: asset for asset in config["assets"]}
+    broad_assets = [
+        asset
+        for asset in config["assets"]
+        if asset.get("exclusive_group") == "cn_broad_etf" and asset.get("enabled", True)
+    ]
+    broad_asset = broad_assets[0] if broad_assets else by_symbol.get("510300.SH")
     hs300_weight = sum(
         float(by_symbol[symbol].get("target_weight", 0.0))
-        for symbol in ("VOO", "03195.HK", "513500.SH", "510300.SH", "512890.SH")
+        for symbol in ("VOO", "03195.HK", "513500.SH", "512890.SH")
         if by_symbol.get(symbol, {}).get("enabled", True)
     )
+    if broad_asset and broad_asset.get("enabled", True):
+        hs300_weight += float(broad_asset.get("target_weight", 0.0))
     result: list[dict[str, Any]] = []
-    hs300 = by_symbol.get("510300.SH")
-    if hs300 and hs300_weight > 0:
-        result.append({**hs300, "target_weight": hs300_weight, "enabled": True})
+    if broad_asset and hs300_weight > 0:
+        result.append({**broad_asset, "target_weight": hs300_weight, "enabled": True})
     gold = by_symbol.get("518880.SH")
     if gold and gold.get("enabled", True) and float(gold.get("target_weight", 0.0)) > 0:
         result.append({**gold, "enabled": True})
@@ -1024,7 +1094,16 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     raise_if_cancelled(should_cancel)
     start = config["start_date"]
     end = config["end_date"]
-    logger.info("run_backtest start range=%s..%s assets=%s repo=%s", start, end, [asset["symbol"] for asset in config["assets"]], config["repo_symbol"])
+    all_assets = backtest_assets(config)
+    repo_symbol = repo_rate_symbol(config)
+    logger.info(
+        "run_backtest start range=%s..%s assets=%s treasury=%s repo_rate=%s",
+        start,
+        end,
+        [asset["symbol"] for asset in all_assets],
+        config["repo_symbol"],
+        repo_symbol,
+    )
     stale_generated = []
     for table, date_col in (
         ("prices", "trade_date"),
@@ -1042,18 +1121,19 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     if stale_generated:
         raise BacktestError("database contains generated/mock data in the requested range; purge and resync real/public data first: " + ", ".join(stale_generated))
     raise_if_cancelled(should_cancel)
-    base_symbols = [asset["symbol"] for asset in config["assets"]]
-    sim_assets = simulation_assets(config["assets"])
+    sim_assets = simulation_assets(all_assets)
     symbols = [asset["symbol"] for asset in sim_assets]
     benchmark_symbol = "000300.SH"
     load_started_at = time.perf_counter()
     price_maps = load_price_map(conn, symbols + [benchmark_symbol], start, end)
-    attach_proxy_price_maps(price_maps, config["assets"])
-    needed_fx_pairs = required_fx_pairs_for_assets(config["assets"])
+    open_price_maps = load_price_map(conn, symbols + [benchmark_symbol], start, end, "open")
+    attach_proxy_price_maps(price_maps, all_assets)
+    attach_proxy_price_maps(open_price_maps, all_assets)
+    needed_fx_pairs = required_fx_pairs_for_assets(all_assets)
     fx_maps = load_fx_maps(conn, needed_fx_pairs, start, end)
-    repo_map = load_repo_map(conn, config["repo_symbol"], start, end)
+    repo_map = load_repo_map(conn, repo_symbol, start, end)
     one_day_repo_map = load_repo_map(conn, "204001", start, end)
-    ex_events, pay_events = load_dividend_events(conn, base_symbols, start, end)
+    ex_events, pay_events = load_dividend_events(conn, symbols, start, end)
     days = reference_trading_days(start, end, price_maps.get(benchmark_symbol, {}), repo_map)
     logger.info(
         "run_backtest data loaded days=%d price_rows=%d fx_rows=%d repo_rows=%d one_day_repo_rows=%d dividend_events=%d seconds=%.3f",
@@ -1086,6 +1166,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     monthly_spend_days = first_business_day_by_month(days)
     reb_days = rebalance_days(days, config["rebalance_frequency"])
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
+    latest_open_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
     latest_fx_rates: dict[str, float | None] = {pair: None for pair in needed_fx_pairs}
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
@@ -1098,7 +1179,18 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     performance_symbols = [asset["symbol"] for asset in sim_assets] + ["REPO"]
     period_external_flows: dict[str, float] = {"REPO": 0.0}
     initial_rebalance_done = False
+    bond_etf = selected_bond_etf_asset(config)
+    previous_treasury_target = "REPO"
     previous_fee_day: date | None = None
+    pending_rebalance: dict[str, Any] | None = None
+    year_nav = 1.0
+    year_peak_nav = 1.0
+    year_max_drawdown = 0.0
+    year_fee_start = 0.0
+    year_start_values: dict[str, float] = {"REPO": float(config["initial_capital_cny"])}
+    year_external_flows: dict[str, float] = {"REPO": 0.0}
+    current_year: int | None = None
+    last_close_values: dict[str, float] = {"REPO": float(config["initial_capital_cny"])}
 
     loop_started_at = time.perf_counter()
     for idx, day in enumerate(days):
@@ -1106,6 +1198,8 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             raise_if_cancelled(should_cancel)
         day_str = day.isoformat()
         flow = 0.0
+        for symbol in latest_open_prices:
+            latest_open_prices[symbol] = forward_value(open_price_maps.get(symbol, {}), day, latest_open_prices.get(symbol))
         for symbol in latest_prices:
             latest_prices[symbol] = forward_value(price_maps.get(symbol, {}), day, latest_prices.get(symbol))
         for pair in latest_fx_rates:
@@ -1122,6 +1216,62 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
 
         _mature_repo_lots(state, day)
         _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
+        if pending_rebalance and pending_rebalance.get("execution_date") == day_str:
+            open_prices = {
+                symbol: latest_open_prices.get(symbol) if latest_open_prices.get(symbol) is not None else latest_prices.get(symbol)
+                for symbol in latest_prices
+            }
+            before_open_total, before_open_values = _portfolio_value(state, open_prices, fx_rates, day)
+            open_weights = {key: (value / before_open_total if before_open_total else 0.0) for key, value in before_open_values.items()}
+            rebalance_needed = bool(pending_rebalance["rebalance_needed"])
+            if rebalance_needed:
+                before_rebalance, after_rebalance, turnover, fee_cny, desired_weights = _rebalance_state_to_band(
+                    state,
+                    sim_assets,
+                    day,
+                    open_prices,
+                    fx_rates,
+                    config["fees"],
+                    trades,
+                    bool(config.get("allow_fractional_us_shares", True)),
+                    pending_rebalance["targets"],
+                    float(config["rebalance_band"]),
+                    config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                )
+                _after_total, after_values = _portfolio_value(state, open_prices, fx_rates, day)
+                rebalance_action = "trade"
+                rebalance_reason = pending_rebalance.get("rebalance_reason", "scheduled_open")
+            else:
+                before_rebalance = before_open_total
+                after_rebalance = before_open_total
+                turnover = 0.0
+                fee_cny = 0.0
+                desired_weights = minimal_rebalance_weights(open_weights, pending_rebalance["targets"], float(config["rebalance_band"]))
+                after_values = before_open_values
+                rebalance_action = "record_only"
+                rebalance_reason = "within_band"
+            payload = {
+                **pending_rebalance["payload"],
+                "desired_weights": desired_weights,
+                "rebalance_action": rebalance_action,
+                "rebalance_reason": rebalance_reason,
+                "rebalanced": rebalance_needed,
+            }
+            rebalance_rows.append(
+                {
+                    "run_id": run_id,
+                    "rebalance_date": day_str,
+                    "period_return": pending_rebalance["period_return"],
+                    "total_asset_before": before_rebalance,
+                    "total_asset_after": after_rebalance,
+                    "turnover_cny": turnover,
+                    "fee_cny": fee_cny,
+                    "payload_json": json_dumps(payload),
+                }
+            )
+            previous_rebalance_values = after_values
+            initial_rebalance_done = True
+            pending_rebalance = None
         fee_days = max((day - previous_fee_day).days, 1) if previous_fee_day else 1
         _apply_hk_connect_portfolio_fee(state, latest_prices, fx_rates, config["fees"], fee_days)
         previous_fee_day = day
@@ -1135,11 +1285,16 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             state.total_spend_cny += actual_spend
             flow -= actual_spend
             period_external_flows["REPO"] = period_external_flows.get("REPO", 0.0) - actual_spend
+            year_external_flows["REPO"] = year_external_flows.get("REPO", 0.0) - actual_spend
 
         before_total, before_values = _portfolio_value(state, latest_prices, fx_rates, day)
         targets = effective_weights(config, day, latest_prices, before_total)
+        treasury_target = bond_etf["symbol"] if bond_etf and targets.get(bond_etf["symbol"], 0.0) > 0 else "REPO"
+        treasury_became_available = bool(
+            bond_etf and previous_treasury_target == "REPO" and treasury_target == bond_etf["symbol"]
+        )
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
-        is_rebalance_day = day in reb_days or not initial_rebalance_done
+        is_rebalance_day = not initial_rebalance_done or treasury_became_available
         should_record_rebalance = is_rebalance_day and has_investable_asset_target(targets)
         if should_record_rebalance:
             rebalance_band = float(config["rebalance_band"])
@@ -1168,7 +1323,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
                 )
                 _after_total, after_values = _portfolio_value(state, latest_prices, fx_rates, day)
                 rebalance_action = "trade"
-                rebalance_reason = "threshold_exceeded"
+                rebalance_reason = "treasury_available" if treasury_became_available else "threshold_exceeded"
             else:
                 before_rebalance = before_total
                 after_rebalance = before_total
@@ -1194,7 +1349,8 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
                             "targets": targets,
                             "desired_weights": desired_weights,
                             "repo_target_mode": config.get("repo_target_mode", "residual_weight"),
-                            "repo_target_value_cny": before_rebalance * desired_weights.get("REPO", 0.0),
+                            "repo_target_value_cny": before_rebalance * desired_weights.get(treasury_target, 0.0),
+                            "treasury_instrument": config.get("repo_symbol", "204001"),
                             "asset_performance": asset_performance,
                             "period_max_drawdown": event_max_drawdown,
                             "previous_total": previous_total,
@@ -1213,6 +1369,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             initial_rebalance_done = True
         elif is_rebalance_day and not initial_rebalance_done and has_deferred_inception_target(config, day):
             initial_rebalance_done = True
+        previous_treasury_target = treasury_target
 
         _invest_repo_cash(
             state,
@@ -1231,6 +1388,15 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         daily_flows.append(flow)
         benchmark_values.append(latest_prices.get(benchmark_symbol))
 
+        if current_year != day.year:
+            current_year = day.year
+            year_nav = 1.0
+            year_peak_nav = 1.0
+            year_max_drawdown = 0.0
+            year_fee_start = state.total_fees_cny
+            year_start_values = dict(last_close_values)
+            year_external_flows = {"REPO": 0.0}
+
         period_previous_total = (
             daily_total_assets[-2]
             if len(daily_total_assets) > 1
@@ -1242,6 +1408,58 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             period_peak_nav = max(period_peak_nav, nav_for_period)
             period_drawdown = nav_for_period / period_peak_nav - 1.0 if period_peak_nav else 0.0
             period_max_drawdown = min(period_max_drawdown, period_drawdown)
+            year_nav *= 1.0 + ret_for_period
+            year_peak_nav = max(year_peak_nav, year_nav)
+            year_drawdown = year_nav / year_peak_nav - 1.0 if year_peak_nav else 0.0
+            year_max_drawdown = min(year_max_drawdown, year_drawdown)
+
+        next_day = days[idx + 1] if idx + 1 < len(days) else None
+        should_schedule_next_open = (
+            next_day is not None
+            and next_day in reb_days
+            and initial_rebalance_done
+            and pending_rebalance is None
+            and has_investable_asset_target(targets)
+        )
+        if should_schedule_next_open:
+            close_weights = {key: (value / total if total else 0.0) for key, value in values.items()}
+            rebalance_band = float(config["rebalance_band"])
+            scheduled_price_view = dict(latest_prices)
+            next_day_str = next_day.isoformat()
+            for symbol in scheduled_price_view:
+                next_open = open_price_maps.get(symbol, {}).get(next_day_str)
+                if next_open is not None:
+                    scheduled_price_view[symbol] = next_open
+            scheduled_targets = effective_weights(config, next_day, scheduled_price_view, total)
+            desired_weights = minimal_rebalance_weights(close_weights, scheduled_targets, rebalance_band)
+            year_asset_performance = _asset_period_performance(year_start_values, values, performance_symbols, year_external_flows)
+            pending_rebalance = {
+                "execution_date": next_day.isoformat(),
+                "decision_date": day_str,
+                "targets": scheduled_targets,
+                "rebalance_needed": should_rebalance(close_weights, scheduled_targets, rebalance_band),
+                "rebalance_reason": "scheduled_open",
+                "period_return": nav_for_period / period_start_nav - 1.0,
+                "payload": {
+                    "decision_date": day_str,
+                    "targets": scheduled_targets,
+                    "desired_weights": desired_weights,
+                    "repo_target_mode": config.get("repo_target_mode", "residual_weight"),
+                    "treasury_instrument": config.get("repo_symbol", "204001"),
+                    "asset_performance": _asset_period_performance(previous_rebalance_values, values, performance_symbols, period_external_flows),
+                    "period_max_drawdown": period_max_drawdown,
+                    "year_return": year_nav - 1.0,
+                    "year_max_drawdown": year_max_drawdown,
+                    "year_fee_cny": state.total_fees_cny - year_fee_start,
+                    "year_asset_performance": year_asset_performance,
+                    "decision_total_asset_cny": total,
+                    "previous_total": period_previous_total,
+                },
+            }
+            period_external_flows = {"REPO": 0.0}
+            period_start_nav = nav_for_period
+            period_peak_nav = nav_for_period
+            period_max_drawdown = 0.0
 
         unrealized = {
             symbol: values.get(symbol, 0.0) - pos.cost_basis_cny
@@ -1250,6 +1468,8 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         payload = {
             "cash_cny": state.cash_cny,
             "dividend_receivable_cny": state.dividend_receivable_cny,
+            "treasury_instrument": config.get("repo_symbol", "204001"),
+            "treasury_fallback_active": bool(bond_etf and targets.get("REPO", 0.0) > 0),
             "values": values,
             "weights": {key: value / total if total else 0.0 for key, value in values.items()},
             "targets": targets,
@@ -1271,6 +1491,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
                 "payload_json": "",
             }
         )
+        last_close_values = dict(values)
 
     if not daily_rows:
         raise BacktestError("no daily rows created; check data coverage")
@@ -1334,6 +1555,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         "total_fees_cny": state.total_fees_cny,
         "total_spend_cny": state.total_spend_cny,
         "withheld_tax_cny": state.total_withheld_tax_cny,
+        "total_dividend_cny": state.total_dividend_cny,
         "trade_count": len(trades),
         "rebalance_count": len(rebalance_rows),
         "final_unrealized_pnl_cny": sum(final_payload.get("unrealized_pnl_cny", {}).values()),

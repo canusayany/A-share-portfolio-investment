@@ -137,6 +137,9 @@ CREATE TABLE IF NOT EXISTS trades (
   payload_json TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_trades_run_id_date
+ON trades(run_id, trade_date);
+
 CREATE TABLE IF NOT EXISTS rebalance_events (
   run_id TEXT NOT NULL,
   rebalance_date TEXT NOT NULL,
@@ -148,6 +151,9 @@ CREATE TABLE IF NOT EXISTS rebalance_events (
   payload_json TEXT NOT NULL,
   PRIMARY KEY (run_id, rebalance_date)
 );
+
+CREATE INDEX IF NOT EXISTS idx_rebalance_events_run_id_date
+ON rebalance_events(run_id, rebalance_date);
 """
 
 
@@ -211,6 +217,18 @@ def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_backtest_runs_config_hash_created
         ON backtest_runs(config_hash, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_trades_run_id_date
+        ON trades(run_id, trade_date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_rebalance_events_run_id_date
+        ON rebalance_events(run_id, rebalance_date)
         """
     )
 

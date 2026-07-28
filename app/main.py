@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import gzip
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
@@ -15,7 +16,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 import uuid
 
-from app.config import STATIC_DIR, default_config, get_settings, normalize_config
+from app.config import backtest_assets, repo_rate_symbol, STATIC_DIR, default_config, get_settings, normalize_config
 from app.db import data_status, db_session, init_db, json_loads, rows_to_dicts
 from app.services.backtest_engine import BacktestCancelled, BacktestError, get_cached_backtest_run, run_backtest
 from app.services.data_sync import required_data_missing, sync_all
@@ -59,6 +60,63 @@ def response_bytes(data: object) -> bytes:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def columnar_chart_payload(rows: list[dict], max_points: int = 1000) -> dict:
+    """Return chart data as compact arrays instead of repeating JSON keys per day."""
+    source_points = len(rows)
+    if source_points > max_points:
+        indices = sorted({round(index * (source_points - 1) / (max_points - 1)) for index in range(max_points)})
+        rows = [rows[index] for index in indices]
+    chart = {
+        "source_points": source_points,
+        "display_points": len(rows),
+        "dates": [],
+        "total_assets": [],
+        "daily_returns": [],
+        "cumulative_returns": [],
+        "drawdowns": [],
+        "benchmark_returns": [],
+        "comparison_total_assets": [],
+        "weights": {},
+    }
+    parsed_payloads: list[dict] = []
+    symbols: list[str] = []
+    for row in rows:
+        payload = json_loads(row.pop("payload_json"), {})
+        parsed_payloads.append(payload)
+        for symbol in payload.get("weights", {}):
+            if symbol not in symbols:
+                symbols.append(symbol)
+    chart["weights"] = {symbol: [] for symbol in symbols}
+    for row, payload in zip(rows, parsed_payloads):
+        chart["dates"].append(row["trade_date"])
+        chart["total_assets"].append(row["total_asset_cny"])
+        chart["daily_returns"].append(row["daily_return"])
+        chart["cumulative_returns"].append(row["cumulative_return"])
+        chart["drawdowns"].append(row["drawdown"])
+        chart["benchmark_returns"].append(row["benchmark_return"])
+        chart["comparison_total_assets"].append(payload.get("comparison", {}).get("total_asset_cny"))
+        weights = payload.get("weights", {})
+        for symbol in symbols:
+            chart["weights"][symbol].append(weights.get(symbol, 0.0))
+    return chart
+
+
+def rebalance_display_payload(payload: dict) -> dict:
+    return {
+        key: payload.get(key)
+        for key in (
+            "decision_date",
+            "year_return",
+            "year_max_drawdown",
+            "year_fee_cny",
+            "year_asset_performance",
+            "asset_performance",
+            "period_max_drawdown",
+        )
+        if key in payload
+    }
+
+
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -83,6 +141,8 @@ def raise_if_cancelled(should_cancel=None) -> None:
 def execute_backtest_request(settings, write_lock: Lock, config: dict, should_cancel=None) -> dict:
     request_id = str(uuid.uuid4())[:8]
     started_at = time.perf_counter()
+    data_assets = backtest_assets(config)
+    rate_symbol = repo_rate_symbol(config)
     raise_if_cancelled(should_cancel)
     logger.info(
         "backtest request start id=%s range=%s..%s repo=%s assets=%s",
@@ -98,7 +158,7 @@ def execute_backtest_request(settings, write_lock: Lock, config: dict, should_ca
         logger.info("backtest lock acquired id=%s wait_seconds=%.3f", request_id, lock_acquired_at - started_at)
         with db_session(settings.db_path) as conn:
             missing_started_at = time.perf_counter()
-            missing_before = required_data_missing(conn, config["start_date"], config["end_date"], config["assets"], config["repo_symbol"])
+            missing_before = required_data_missing(conn, config["start_date"], config["end_date"], data_assets, rate_symbol)
             logger.info("backtest data check id=%s seconds=%.3f missing=%s", request_id, time.perf_counter() - missing_started_at, missing_before)
             raise_if_cancelled(should_cancel)
             if not missing_before:
@@ -121,15 +181,15 @@ def execute_backtest_request(settings, write_lock: Lock, config: dict, should_ca
                     settings.tushare_token,
                     config["start_date"],
                     config["end_date"],
-                    config["assets"],
-                    config["repo_symbol"],
+                    data_assets,
+                    rate_symbol,
                     missing_items=missing_before,
                 )
                 logger.info("backtest sync complete id=%s seconds=%.3f result=%s", request_id, time.perf_counter() - sync_started_at, sync_result)
             raise_if_cancelled(should_cancel)
             with db_session(settings.db_path) as conn:
                 missing_after_started_at = time.perf_counter()
-                missing_after = required_data_missing(conn, config["start_date"], config["end_date"], config["assets"], config["repo_symbol"])
+                missing_after = required_data_missing(conn, config["start_date"], config["end_date"], data_assets, rate_symbol)
                 logger.info("backtest post-sync data check id=%s seconds=%.3f missing=%s", request_id, time.perf_counter() - missing_after_started_at, missing_after)
             if missing_after:
                 raise BacktestError("自动补足数据后仍缺少：" + "、".join(missing_after))
@@ -338,8 +398,14 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def send_json(self, status: int, data: object) -> None:
         body = response_bytes(data)
+        use_gzip = len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+        if use_gzip:
+            body = gzip.compress(body, compresslevel=5)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -358,10 +424,19 @@ class ApiHandler(BaseHTTPRequestHandler):
             return "/"
         if path.startswith("/portfolio/"):
             return path[len("/portfolio") :]
+        for detail_path in ("/backtest/permanent-investment", "/backtest/cross-market"):
+            if path == detail_path:
+                return "/"
+            if path.startswith(f"{detail_path}/"):
+                return path[len(detail_path) :]
         return path
 
     def serve_static(self, path: str, head_only: bool = False) -> None:
-        if path in {"", "/"}:
+        is_index = path in {"", "/"}
+        if path in {"/backtest", "/backtest/"}:
+            file_path = STATIC_DIR / "backtest-index.html"
+            is_index = True
+        elif path in {"", "/"}:
             file_path = STATIC_DIR / "index.html"
         else:
             relative = path.lstrip("/")
@@ -374,10 +449,29 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         body = file_path.read_bytes()
+        use_gzip = (
+            len(body) > 1024
+            and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+            and (content_type.startswith("text/") or content_type in {"application/javascript", "application/json"})
+        )
+        if use_gzip:
+            body = gzip.compress(body, compresslevel=5)
+        is_versioned = bool(parse_qs(urlparse(self.path).query).get("v"))
+        if is_index:
+            cache_control = "public, max-age=60, s-maxage=300, stale-while-revalidate=60"
+        elif is_versioned:
+            cache_control = "public, max-age=31536000, immutable"
+        else:
+            cache_control = "public, max-age=3600"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("CDN-Cache-Control", cache_control)
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self._response_bytes = len(body)
         if not head_only:
@@ -425,6 +519,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload = self.read_json()
             if path == "/api/data/sync":
                 config = normalize_config(payload.get("config") or payload)
+                data_assets = backtest_assets(config)
                 with self.write_lock:
                     with db_session(self.settings.db_path) as conn:
                         result = sync_all(
@@ -432,8 +527,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                             self.settings.tushare_token,
                             config["start_date"],
                             config["end_date"],
-                            config["assets"],
-                            config["repo_symbol"],
+                            data_assets,
+                            repo_rate_symbol(config),
                         )
                         result["status"] = data_status(conn)
                 self.send_json(HTTPStatus.OK, result)
@@ -523,15 +618,41 @@ class ApiHandler(BaseHTTPRequestHandler):
                 for row in rows:
                     row["payload"] = json_loads(row.pop("payload_json"), {})
                 self.send_json(HTTPStatus.OK, {"series": rows})
+            elif section == "chart-series":
+                rows = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT trade_date,total_asset_cny,flow_cny,
+                               daily_return,cumulative_return,drawdown,benchmark_return,payload_json
+                        FROM portfolio_daily WHERE run_id=? ORDER BY trade_date
+                        """,
+                        (run_id,),
+                    )
+                )
+                self.send_json(HTTPStatus.OK, {"chart": columnar_chart_payload(rows)})
             elif section == "rebalance":
-                rows = rows_to_dicts(conn.execute("SELECT * FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date", (run_id,)))
+                rows = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT rebalance_date,period_return,fee_cny,payload_json
+                        FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date
+                        """,
+                        (run_id,),
+                    )
+                )
                 for row in rows:
-                    row["payload"] = json_loads(row.pop("payload_json"), {})
+                    row["payload"] = rebalance_display_payload(json_loads(row.pop("payload_json"), {}))
                 self.send_json(HTTPStatus.OK, {"rebalance": rows})
             elif section == "trades":
-                rows = rows_to_dicts(conn.execute("SELECT * FROM trades WHERE run_id=? ORDER BY trade_date", (run_id,)))
-                for row in rows:
-                    row["payload"] = json_loads(row.pop("payload_json"), {})
+                rows = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT trade_date,symbol,side,quantity,price,gross_amount,fee,currency,reason
+                        FROM trades WHERE run_id=? ORDER BY trade_date
+                        """,
+                        (run_id,),
+                    )
+                )
                 self.send_json(HTTPStatus.OK, {"trades": rows})
             elif section == "positions":
                 limit = int((query.get("limit") or ["30"])[0])

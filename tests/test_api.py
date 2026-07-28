@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import gzip
 import json
 import time
 from threading import Thread
@@ -23,6 +24,13 @@ def http_json(url: str, payload: dict | None = None) -> dict:
     req = request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
     with opener.open(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def http_get_raw(url: str, headers: dict[str, str] | None = None) -> tuple[dict[str, str], bytes]:
+    opener = request.build_opener(request.ProxyHandler({}))
+    req = request.Request(url, headers=headers or {})
+    with opener.open(req, timeout=10) as resp:
+        return dict(resp.headers), resp.read()
 
 
 class ApiTests(unittest.TestCase):
@@ -54,6 +62,7 @@ class ApiTests(unittest.TestCase):
         self.assertGreater(result["summary"]["final_asset_cny"], 0)
         detail = http_json(f"{self.base_url}/api/backtest/{run_id}")
         series = http_json(f"{self.base_url}/api/backtest/{run_id}/series")
+        chart_series = http_json(f"{self.base_url}/api/backtest/{run_id}/chart-series")
         rebalance = http_json(f"{self.base_url}/api/backtest/{run_id}/rebalance")
         trades = http_json(f"{self.base_url}/api/backtest/{run_id}/trades")
         positions = http_json(f"{self.base_url}/api/backtest/{run_id}/positions?limit=2")
@@ -65,6 +74,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn("benchmark_return", series["series"][0])
         self.assertAlmostEqual(series["series"][-1]["cumulative_return"], result["summary"]["total_return"])
         self.assertIn("benchmark_value", series["series"][0]["payload"])
+        chart = chart_series["chart"]
+        self.assertEqual(len(chart["dates"]), len(series["series"]))
+        self.assertEqual(chart["source_points"], len(series["series"]))
+        self.assertEqual(chart["display_points"], len(chart["dates"]))
+        self.assertEqual(len(chart["total_assets"]), len(series["series"]))
+        self.assertEqual(len(chart["comparison_total_assets"]), len(series["series"]))
+        self.assertTrue(chart["weights"])
+        self.assertNotIn("repo_lots", chart)
         self.assertGreaterEqual(len(rebalance["rebalance"]), 1)
         self.assertGreater(len(trades["trades"]), 0)
         self.assertLessEqual(len(positions["positions"]), 2)
@@ -72,11 +89,56 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(cached["run_id"], run_id)
         self.assertTrue(cached["cache"]["hit"])
 
+    def test_z_large_json_and_static_assets_can_use_gzip(self) -> None:
+        result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        headers, body = http_get_raw(
+            f"{self.base_url}/api/backtest/{result['run_id']}/chart-series",
+            {"Accept-Encoding": "gzip"},
+        )
+        self.assertEqual(headers.get("Content-Encoding"), "gzip")
+        decoded = json.loads(gzip.decompress(body).decode("utf-8"))
+        self.assertTrue(decoded["chart"]["dates"])
+
+        static_headers, static_body = http_get_raw(
+            f"{self.base_url}/static/app.js",
+            {"Accept-Encoding": "gzip"},
+        )
+        self.assertEqual(static_headers.get("Content-Encoding"), "gzip")
+        self.assertEqual(static_headers.get("Cache-Control"), "public, max-age=3600")
+        self.assertIn(b"currentRunId", gzip.decompress(static_body))
+
+        versioned_headers, _versioned_body = http_get_raw(
+            f"{self.base_url}/static/app.js?v=20260715-perf-2",
+            {"Accept-Encoding": "gzip"},
+        )
+        self.assertIn("immutable", versioned_headers.get("Cache-Control", ""))
+        self.assertEqual(versioned_headers.get("CDN-Cache-Control"), versioned_headers.get("Cache-Control"))
+
+    def test_chart_payload_downsamples_long_series_and_keeps_endpoints(self) -> None:
+        rows = [
+            {
+                "trade_date": f"day-{index:04d}",
+                "total_asset_cny": float(index),
+                "daily_return": 0.0,
+                "cumulative_return": 0.0,
+                "drawdown": 0.0,
+                "benchmark_return": 0.0,
+                "payload_json": json.dumps({"weights": {"REPO": 1.0}}),
+            }
+            for index in range(2501)
+        ]
+        chart = main_module.columnar_chart_payload(rows, max_points=1000)
+        self.assertEqual(chart["source_points"], 2501)
+        self.assertEqual(chart["display_points"], 1000)
+        self.assertEqual(chart["dates"][0], "day-0000")
+        self.assertEqual(chart["dates"][-1], "day-2500")
+
     def test_static_index_is_served(self) -> None:
         opener = request.build_opener(request.ProxyHandler({}))
         with opener.open(f"{self.base_url}/", timeout=10) as resp:
             html = resp.read().decode("utf-8")
-        self.assertIn("跨市场组合回测", html)
+            self.assertIn("s-maxage=300", resp.headers.get("Cache-Control", ""))
+        self.assertIn("永久投资策略", html)
         self.assertIn("dailyReturnChart", html)
         self.assertIn("repoTargetMode", html)
         self.assertIn("assetWeightTitle", html)
@@ -86,6 +148,28 @@ class ApiTests(unittest.TestCase):
         self.assertIn("static/echarts.min.js", html)
         self.assertNotIn("cdn.jsdelivr.net", html)
         self.assertNotIn("syncBtn", html)
+
+    def test_backtest_catalog_and_nested_backtest_are_served(self) -> None:
+        opener = request.build_opener(request.ProxyHandler({}))
+        with opener.open(f"{self.base_url}/backtest/", timeout=10) as resp:
+            catalog = resp.read().decode("utf-8")
+            self.assertEqual(resp.status, 200)
+        self.assertIn("永久投资策略", catalog)
+        self.assertIn('href="permanent-investment/"', catalog)
+        self.assertIn("全天候资产配置回测", catalog)
+        self.assertIn('href="all-weather/"', catalog)
+
+        with opener.open(f"{self.base_url}/backtest/permanent-investment/", timeout=10) as resp:
+            detail = resp.read().decode("utf-8")
+            self.assertEqual(resp.status, 200)
+        self.assertIn("永久投资策略", detail)
+
+        with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
+            app_js = resp.read().decode("utf-8")
+        self.assertIn("/backtest/permanent-investment", app_js)
+
+        nested_config = http_json(f"{self.base_url}/backtest/permanent-investment/api/default-config")
+        self.assertIn("assets", nested_config)
 
     def test_run_backtest_auto_syncs_when_data_is_missing(self) -> None:
         db_path = temp_db_path()

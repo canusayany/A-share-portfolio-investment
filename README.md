@@ -1,4 +1,4 @@
-# 跨市场 ETF + 国债逆回购组合回测
+# 永久投资策略回测
 
 这是 `portfolio_backtest_implementation_plan.md` 的落地实现：Python + SQLite 后端、单页面 JavaScript + ECharts 前端。
 

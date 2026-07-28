@@ -2,11 +2,16 @@ let config = null;
 let currentRunId = null;
 const charts = {};
 let activeChartId = "assetChart";
-const APP_BASE_PATH = window.location.pathname.startsWith("/portfolio/") || window.location.pathname === "/portfolio"
-  ? "/portfolio"
-  : "";
+const pendingChartOptions = {};
+const APP_BASE_PATH = (() => {
+  const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
+  const knownAppPaths = ["/backtest/permanent-investment", "/backtest/cross-market", "/portfolio"];
+  return knownAppPaths.find((path) => pathname === path || pathname.startsWith(`${path}/`)) || "";
+})();
 const SP500_GROUP = "sp500";
 const SP500_CONTROL_KEY = "sp500_group";
+const BROAD_ETF_GROUP = "cn_broad_etf";
+const BROAD_ETF_CONTROL_KEY = "cn_broad_etf_group";
 
 const $ = (id) => document.getElementById(id);
 const fmtMoney = (v) => Number(v || 0).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
@@ -20,8 +25,10 @@ const STATIC_NAMES = {
   "513500.SH": "标普500ETF博时",
   "512890.SH": "红利低波基金",
   "510300.SH": "沪深300基金",
+  "159631.SZ": "招商中证A100ETF",
   "160706": "嘉实沪深300ETF联接(LOF)A",
   "518880.SH": "黄金基金",
+  "518850.SH": "华夏黄金ETF（518850）",
   "Au99.99": "上海金交所 Au99.99",
   "000300.SH": "沪深300指数",
   "204001": "1天国债逆回购",
@@ -33,6 +40,9 @@ const STATIC_NAMES = {
   "204028": "28天国债逆回购",
   "204091": "91天国债逆回购",
   "204182": "182天国债逆回购",
+  "511010.SH": "5年期国债ETF（511010）",
+  "511260.SH": "10年期国债ETF（511260）",
+  "511090.SH": "30年期国债ETF（511090）",
   "USD/CNY": "美元兑人民币汇率",
   REPO: "国债逆回购",
 };
@@ -43,9 +53,14 @@ const SHORT_NAMES = {
   "513500.SH": "A股标普",
   "512890.SH": "红利",
   "510300.SH": "沪深300",
+  "159631.SZ": "中证A100",
   "160706": "嘉实300",
   "518880.SH": "黄金",
+  "518850.SH": "黄金低费率",
   "Au99.99": "AU99.99",
+  "511010.SH": "5年国债",
+  "511260.SH": "10年国债",
+  "511090.SH": "30年国债",
   REPO: "逆回购",
 };
 
@@ -80,6 +95,8 @@ const SOURCE_NAMES = {
   "frankfurter:USD-CNY": "欧洲公开汇率",
   "tushare:fund_daily": "专业基金日线",
   "tushare:index_daily": "专业指数日线",
+  "sohu:index_kline": "搜狐指数历史行情",
+  "eastmoney:index_kline": "东方财富指数行情",
   "tushare:fund_div": "专业基金分红",
   "tushare:fund_adj": "专业复权因子",
   "eastmoney:hk_kline": "东方财富港股行情",
@@ -107,8 +124,25 @@ const SP500_ROUTE_DETAILS = {
   ],
 };
 
+const BROAD_ETF_ROUTE_DETAILS = {
+  cn_hs300_etf: [
+    ["市场", "A股场内"],
+    ["指数", "沪深300"],
+    ["费用", "场内ETF佣金/管理托管"],
+  ],
+  cn_a100_etf: [
+    ["市场", "A股场内"],
+    ["指数", "中证A100"],
+    ["费用", "场内ETF佣金/管理托管"],
+  ],
+};
+
 function isSp500Asset(asset) {
   return asset.exclusive_group === SP500_GROUP || ["us_sp500", "hk_sp500_connect"].includes(asset.key);
+}
+
+function isBroadEtfAsset(asset) {
+  return asset.exclusive_group === BROAD_ETF_GROUP;
 }
 
 function sp500Assets() {
@@ -129,8 +163,31 @@ function sp500RouteDetails(key) {
   return SP500_ROUTE_DETAILS[key] || [];
 }
 
+function broadEtfAssets() {
+  return (config?.assets || []).filter(isBroadEtfAsset);
+}
+
+function selectedBroadEtfAsset() {
+  const assets = broadEtfAssets();
+  return assets.find((asset) => asset.enabled) || assets[0];
+}
+
+function selectedBroadEtfWeight() {
+  const selected = selectedBroadEtfAsset();
+  return Number(selected?.target_weight || 0);
+}
+
+function broadEtfRouteDetails(key) {
+  return BROAD_ETF_ROUTE_DETAILS[key] || [];
+}
+
 function assetBySymbol(symbol) {
-  return config?.assets?.find((asset) => asset.symbol === symbol);
+  for (const asset of config?.assets || []) {
+    if (asset.symbol === symbol) return asset;
+    const replacement = asset.replacement_assets?.find((item) => item.symbol === symbol);
+    if (replacement) return replacement;
+  }
+  return undefined;
 }
 
 function fallbackBySymbol(symbol) {
@@ -319,6 +376,9 @@ function readConfig() {
   const sp500SelectedKey = $("sp500Type")?.value;
   const sp500Enabled = $("enabled_sp500_group")?.checked ?? false;
   const sp500Weight = Number($("weight_sp500_group")?.value ?? 0);
+  const broadEtfSelectedKey = $("broadEtfType")?.value;
+  const broadEtfEnabled = $("enabled_cn_broad_etf_group")?.checked ?? false;
+  const broadEtfWeight = Number($("weight_cn_broad_etf_group")?.value ?? 0);
   next.initial_capital_cny = Number($("initialCapital").value);
   next.start_date = $("startDate").value;
   next.end_date = $("endDate").value;
@@ -336,6 +396,14 @@ function readConfig() {
         ...asset,
         enabled: sp500Enabled && selected,
         target_weight: selected ? sp500Weight : 0,
+      };
+    }
+    if (isBroadEtfAsset(asset)) {
+      const selected = asset.key === broadEtfSelectedKey;
+      return {
+        ...asset,
+        enabled: broadEtfEnabled && selected,
+        target_weight: selected ? broadEtfWeight : 0,
       };
     }
     return {
@@ -359,6 +427,20 @@ function repoModeLabel(mode) {
   return mode === "fixed_bucket" ? "固定消费池" : "按剩余权重";
 }
 
+function selectedTreasuryOption() {
+  const symbol = $("repoSymbol")?.value || config.repo_symbol;
+  return config?.repo_options?.find((option) => option.symbol === symbol);
+}
+
+function updateTreasuryHint() {
+  const hint = $("treasuryFallbackHint");
+  if (!hint) return;
+  const option = selectedTreasuryOption();
+  hint.textContent = option?.instrument_type === "cn_bond_etf"
+    ? `可交易日起按调仓规则持有；此前或缺少真实价格时自动使用 1 天国债逆回购补足。`
+    : `闲置资金按所选期限滚动投资；临近消费日或调仓日时自动缩短期限。`;
+}
+
 function currentRepoMode() {
   return $("repoTargetMode")?.value || config.repo_target_mode || "residual_weight";
 }
@@ -372,7 +454,14 @@ function currentAssetControls() {
       weight: Number($(`weight_${SP500_CONTROL_KEY}`).value || 0),
     });
   }
-  for (const asset of config.assets.filter((item) => !isSp500Asset(item))) {
+  if ($(`enabled_${BROAD_ETF_CONTROL_KEY}`)) {
+    controls.push({
+      key: BROAD_ETF_CONTROL_KEY,
+      enabled: $(`enabled_${BROAD_ETF_CONTROL_KEY}`).checked,
+      weight: Number($(`weight_${BROAD_ETF_CONTROL_KEY}`).value || 0),
+    });
+  }
+  for (const asset of config.assets.filter((item) => !isSp500Asset(item) && !isBroadEtfAsset(item))) {
     controls.push({
       key: asset.key,
       enabled: $(`enabled_${asset.key}`)?.checked ?? Boolean(asset.enabled),
@@ -431,7 +520,15 @@ function renderControlSummary(plan) {
   const end = $("endDate")?.value || config.end_date;
   const initialCapital = Number($("initialCapital")?.value || config.initial_capital_cny || 0);
   const monthlySpend = Number($("monthlySpend")?.value || config.monthly_spend_cny || 0);
-  const frequency = $("rebalanceFrequency")?.value === "semiannual" ? "每半年" : "每年";
+  const frequencyLabels = {
+    daily: "每日",
+    weekly: "每周",
+    monthly: "每月",
+    quarterly: "每季度",
+    semiannual: "每半年",
+    yearly: "每年",
+  };
+  const frequency = frequencyLabels[$("rebalanceFrequency")?.value] || "每年";
   const repoValue = plan.mode === "fixed_bucket"
     ? `￥${fmtMoney(plan.repoTargetValue)} / ${fmtPct(plan.repoWeight)}`
     : fmtPct(plan.repoWeight);
@@ -440,6 +537,7 @@ function renderControlSummary(plan) {
     ["初始资金", `￥${fmtMoney(initialCapital)}`],
     ["再平衡", frequency],
     ["模式", repoModeLabel(plan.mode)],
+    ["国债品种", selectedTreasuryOption()?.name || assetName(config.repo_symbol)],
     ["国债", repoValue],
     ["月消费", `￥${fmtMoney(monthlySpend)}`],
   ];
@@ -512,6 +610,9 @@ function updateRepoWeight() {
   if ($("enabled_sp500_group")) {
     updateSp500Route();
   }
+  if ($("enabled_cn_broad_etf_group")) {
+    updateBroadEtfRoute();
+  }
   const mode = currentRepoMode();
   const controls = currentAssetControls();
   const enabledWeight = controls.reduce((sum, item) => sum + (item.enabled ? item.weight : 0), 0);
@@ -520,6 +621,7 @@ function updateRepoWeight() {
   if (fixedControls) fixedControls.hidden = mode !== "fixed_bucket";
   if ($("repoFixedRatioValue")) $("repoFixedRatioValue").textContent = fmtPct(Number($("repoFixedRatio")?.value || 0));
   const plan = currentRepoPlan(mode, enabledWeight);
+  updateTreasuryHint();
   syncRepoModeTabs();
   renderControlSummary(plan);
   renderAllocationSummary(plan);
@@ -546,6 +648,15 @@ function updateSp500Route() {
     .join("");
 }
 
+function updateBroadEtfRoute() {
+  const route = $("broadEtfRoute");
+  const selectedKey = $("broadEtfType")?.value;
+  if (!route || !selectedKey) return;
+  route.innerHTML = broadEtfRouteDetails(selectedKey)
+    .map(([label, value]) => `<span><em>${label}</em>${value}</span>`)
+    .join("");
+}
+
 function renderControls() {
   $("initialCapital").value = config.initial_capital_cny;
   $("startDate").value = config.start_date;
@@ -560,6 +671,7 @@ function renderControls() {
   $("repoFixedRatioValue").textContent = fmtPct(config.repo_fixed_target_ratio ?? 0);
   $("repoSymbol").innerHTML = (config.repo_options || []).map((option) => `<option value="${option.symbol}">${option.name}</option>`).join("");
   $("repoSymbol").value = config.repo_symbol;
+  $("repoSymbol").addEventListener("change", updateRepoWeight);
   $("cnCommission").value = config.fees.cn_etf.commission_rate;
   $("ibkrPlan").value = config.fees.ibkr_us_etf.plan;
   $("fxOutBps").value = config.fees.fx.bank_out_spread_bps;
@@ -590,7 +702,8 @@ function renderControls() {
   const host = $("assetControls");
   host.innerHTML = "";
   renderSp500Control(host);
-  for (const asset of config.assets.filter((item) => !isSp500Asset(item))) {
+  renderBroadEtfControl(host);
+  for (const asset of config.assets.filter((item) => !isSp500Asset(item) && !isBroadEtfAsset(item))) {
     const row = document.createElement("div");
     row.className = "asset-control";
     row.innerHTML = `
@@ -614,6 +727,37 @@ function renderControls() {
   });
   updateRepoWeight();
   renderFeeSummary();
+}
+
+function renderBroadEtfControl(host) {
+  const assets = broadEtfAssets();
+  if (!assets.length) return;
+  const selected = selectedBroadEtfAsset();
+  const enabled = Boolean(selected?.enabled);
+  const weight = selectedBroadEtfWeight();
+  const row = document.createElement("div");
+  row.className = "asset-control asset-control-group";
+  row.innerHTML = `
+    <input id="enabled_${BROAD_ETF_CONTROL_KEY}" type="checkbox" aria-label="启用宽基ETF" ${enabled ? "checked" : ""} />
+    <input id="weight_${BROAD_ETF_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="宽基ETF目标权重" />
+    <strong id="weight_label_${BROAD_ETF_CONTROL_KEY}">${fmtPct(weight)}</strong>
+    <div class="asset-name">
+      <span class="asset-title">宽基 ETF</span>
+      <span id="effective_${BROAD_ETF_CONTROL_KEY}" class="asset-effective" hidden></span>
+    </div>
+    <label class="asset-type">
+      类型
+      <select id="broadEtfType">
+        ${assets.map((asset) => `<option value="${asset.key}" ${asset.key === selected?.key ? "selected" : ""}>${asset.choice_label || assetName(asset.symbol)}</option>`).join("")}
+      </select>
+    </label>
+    <div id="broadEtfRoute" class="asset-route"></div>
+  `;
+  host.appendChild(row);
+  row.querySelector(`#enabled_${BROAD_ETF_CONTROL_KEY}`).addEventListener("change", updateRepoWeight);
+  row.querySelector(`#weight_${BROAD_ETF_CONTROL_KEY}`).addEventListener("input", updateRepoWeight);
+  row.querySelector("#broadEtfType").addEventListener("change", updateRepoWeight);
+  updateBroadEtfRoute();
 }
 
 function renderSp500Control(host) {
@@ -699,7 +843,7 @@ function renderSummaryGroups(primary, secondary) {
 function renderInitialSummary() {
   renderSummaryGroups(
     ["期末总资产", "累计收益", "年化收益", "最大回撤"].map((label) => ({ label, value: "--" })),
-    ["总手续费", "总消费", "浮盈浮亏", "对比期末资产", "再平衡次数", "交易次数", "分红预扣税"]
+    ["总手续费", "现金分红", "总消费", "浮盈浮亏", "对比期末资产", "再平衡次数", "交易次数", "分红预扣税"]
       .map((label) => ({ label, value: "--" })),
   );
 }
@@ -714,6 +858,7 @@ function renderSummary(summary) {
   ];
   const secondary = [
     { label: "总手续费", value: `￥${fmtMoney(summary.total_fees_cny)}` },
+    { label: "现金分红", value: `￥${fmtMoney(summary.total_dividend_cny)}` },
     { label: "总消费", value: `￥${fmtMoney(summary.total_spend_cny)}` },
     { label: "浮盈浮亏", value: `￥${fmtMoney(summary.final_unrealized_pnl_cny)}`, tone: positiveTone(summary.final_unrealized_pnl_cny) },
     { label: "对比期末资产", value: `￥${fmtMoney(summary.comparison_final_asset_cny)}` },
@@ -745,6 +890,25 @@ function computeSeriesMetrics(rows) {
     cumulative_return: Number(row.cumulative_return || 0),
     drawdown: Number(row.drawdown || 0),
     benchmark_return: Number(row.benchmark_return || 0),
+  }));
+}
+
+function expandChartSeries(data) {
+  if (Array.isArray(data?.series)) return data.series;
+  const chart = data?.chart || {};
+  const dates = chart.dates || [];
+  const weights = chart.weights || {};
+  return dates.map((tradeDate, index) => ({
+    trade_date: tradeDate,
+    total_asset_cny: chart.total_assets?.[index] ?? null,
+    daily_return: chart.daily_returns?.[index] ?? 0,
+    cumulative_return: chart.cumulative_returns?.[index] ?? 0,
+    drawdown: chart.drawdowns?.[index] ?? 0,
+    benchmark_return: chart.benchmark_returns?.[index] ?? 0,
+    payload: {
+      comparison: { total_asset_cny: chart.comparison_total_assets?.[index] ?? null },
+      weights: Object.fromEntries(Object.entries(weights).map(([symbol, values]) => [symbol, values[index] ?? 0])),
+    },
   }));
 }
 
@@ -786,7 +950,10 @@ function selectChart(chartId) {
   document.querySelectorAll(".chart-view").forEach((view) => {
     view.hidden = view.querySelector(".chart")?.id !== chartId;
   });
-  window.requestAnimationFrame(() => charts[chartId]?.resize());
+  window.requestAnimationFrame(() => {
+    applyChartOption(chartId);
+    charts[chartId]?.resize();
+  });
 }
 
 function selectRecordPanel(panelId) {
@@ -823,8 +990,8 @@ function lineZoomOption() {
   };
 }
 
-function polishCharts() {
-  Object.values(charts).forEach((chart) => chart.setOption({
+function polishChart(chart) {
+  chart.setOption({
     textStyle: { color: CHART_COLORS.text, fontFamily: '"Segoe UI", "Microsoft YaHei UI", sans-serif' },
     tooltip: {
       backgroundColor: "rgba(20, 35, 41, 0.94)",
@@ -843,7 +1010,20 @@ function polishCharts() {
       axisLabel: { color: CHART_COLORS.muted, fontSize: 10 },
       splitLine: { lineStyle: { color: "#e9eef0", type: "dashed" } },
     },
-  }));
+  });
+}
+
+function queueChartOption(id, option) {
+  pendingChartOptions[id] = option;
+}
+
+function applyChartOption(id) {
+  const option = pendingChartOptions[id];
+  if (!option || !window.echarts) return;
+  const chart = ensureChart(id);
+  chart.setOption(option, true);
+  polishChart(chart);
+  delete pendingChartOptions[id];
 }
 
 function renderCharts(series) {
@@ -854,7 +1034,7 @@ function renderCharts(series) {
     return;
   }
   const dates = series.map((row) => row.trade_date);
-  ensureChart("assetChart").setOption({
+  queueChartOption("assetChart", {
     ...lineZoomOption(),
     title: { text: "总资产", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis" },
@@ -862,7 +1042,7 @@ function renderCharts(series) {
     yAxis: { type: "value", scale: true },
     series: [{ type: "line", name: "总资产", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.accent, width: 2.4 }, itemStyle: { color: CHART_COLORS.accent } }],
   });
-  ensureChart("comparisonChart").setOption({
+  queueChartOption("comparisonChart", {
     ...lineZoomOption(),
     title: { text: "总资产对比", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => `￥${fmtMoney(v)}` },
@@ -882,7 +1062,7 @@ function renderCharts(series) {
       },
     ],
   });
-  ensureChart("returnChart").setOption({
+  queueChartOption("returnChart", {
     ...lineZoomOption(),
     title: { text: "收益率对比沪深300", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
@@ -894,7 +1074,7 @@ function renderCharts(series) {
       { type: "line", name: "沪深300", data: series.map((row) => row.benchmark_return), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.blue, width: 1.8, type: "dashed" }, itemStyle: { color: CHART_COLORS.blue } },
     ],
   });
-  ensureChart("dailyReturnChart").setOption({
+  queueChartOption("dailyReturnChart", {
     ...lineZoomOption(),
     title: { text: "单日收益", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
@@ -902,7 +1082,7 @@ function renderCharts(series) {
     yAxis: { type: "value", axisLabel: { formatter: (v) => `${(v * 100).toFixed(1)}%` } },
     series: [{ type: "line", name: "单日收益", data: series.map((row) => row.daily_return), smooth: false, symbol: "none", lineStyle: { color: CHART_COLORS.violet, width: 1.4 }, itemStyle: { color: CHART_COLORS.violet } }],
   });
-  ensureChart("drawdownChart").setOption({
+  queueChartOption("drawdownChart", {
     ...lineZoomOption(),
     title: { text: "回撤", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
@@ -913,7 +1093,7 @@ function renderCharts(series) {
 
   const symbols = Object.keys(series.at(-1)?.payload?.values || {});
   const weightColors = [CHART_COLORS.accent, CHART_COLORS.blue, CHART_COLORS.amber, CHART_COLORS.violet, "#5c8f99", "#9d6c52", "#7e8d50"];
-  ensureChart("weightChart").setOption({
+  queueChartOption("weightChart", {
     ...lineZoomOption(),
     title: { text: "资产权重", left: 8, top: 4, textStyle: { fontSize: 14 } },
     tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
@@ -931,7 +1111,6 @@ function renderCharts(series) {
       itemStyle: { color: weightColors[index % weightColors.length] },
     })),
   });
-  polishCharts();
   selectChart(activeChartId);
   queueChartResize();
 }
@@ -997,18 +1176,27 @@ function drawFallbackChart(id, title, lineSeries, percentAxis, forcedMin = null,
   `;
 }
 
-function renderTable(id, columns, rows) {
+function renderTable(id, columns, rows, options = {}) {
   const table = $(id);
   if (!rows.length) {
     table.innerHTML = "<tbody><tr><td class=\"table-empty\">暂无数据</td></tr></tbody>";
     return;
   }
+  const pageSize = Number(options.pageSize || rows.length);
+  const visibleCount = Math.min(Number(options.visibleCount || pageSize), rows.length);
+  const orderedRows = options.newestFirst ? [...rows].reverse() : rows;
+  const visibleRows = orderedRows.slice(0, visibleCount);
+  const remaining = rows.length - visibleCount;
   table.innerHTML = `
     <thead><tr>${columns.map((col) => `<th>${col}</th>`).join("")}</tr></thead>
     <tbody>
-      ${rows.map((row) => `<tr>${columns.map((col) => `<td>${formatCell(row[col])}</td>`).join("")}</tr>`).join("")}
+      ${visibleRows.map((row) => `<tr>${columns.map((col) => `<td>${formatCell(row[col])}</td>`).join("")}</tr>`).join("")}
     </tbody>
+    ${remaining > 0 ? `<tfoot><tr><td colspan="${columns.length}"><button type="button" class="table-more">再显示 ${Math.min(pageSize, remaining)} 条（剩余 ${remaining} 条）</button></td></tr></tfoot>` : ""}
   `;
+  table.querySelector(".table-more")?.addEventListener("click", () => {
+    renderTable(id, columns, rows, { ...options, visibleCount: visibleCount + pageSize });
+  });
 }
 
 function formatCell(value) {
@@ -1048,21 +1236,18 @@ function rebalanceDisplayRows(rows) {
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["日期", "动作", "区间", "当回撤", "前资产", "后资产", "成交", "费"];
+  const baseColumns = ["执行日", "决策日", "当年收益", "当年最大回撤", "当年手续费"];
   const assetColumns = orderedSymbols.map((symbol) => SHORT_NAMES[symbol] || assetName(symbol));
   const displayRows = rows.map((row) => {
     const item = {
-      日期: row.rebalance_date,
-      动作: rebalanceActionLabel(row.payload),
-      区间: row.period_return,
-      当回撤: row.payload?.period_max_drawdown ?? 0,
-      前资产: row.total_asset_before,
-      后资产: row.total_asset_after,
-      成交: row.turnover_cny,
-      费: row.fee_cny,
+      执行日: row.rebalance_date,
+      决策日: row.payload?.decision_date || row.rebalance_date,
+      当年收益: row.payload?.year_return ?? row.period_return,
+      当年最大回撤: row.payload?.year_max_drawdown ?? row.payload?.period_max_drawdown ?? 0,
+      当年手续费: row.payload?.year_fee_cny ?? row.fee_cny,
     };
     for (const symbol of orderedSymbols) {
-      const perf = row.payload?.asset_performance?.[symbol] || {};
+      const perf = row.payload?.year_asset_performance?.[symbol] || row.payload?.asset_performance?.[symbol] || {};
       item[SHORT_NAMES[symbol] || assetName(symbol)] = {
         kind: "performance",
         profit: perf.profit_cny ?? "",
@@ -1099,17 +1284,19 @@ async function waitForBacktestJob(jobId) {
     if (job.status === "cancelled") throw new Error(job.error || job.message || "回测任务已取消");
     setMessage(job.message || (job.status === "running" ? "正在运行回测..." : "回测任务排队中..."));
     pollCount += 1;
-    await sleep(Math.min(1200 + pollCount * 200, 5000));
+    await sleep(Math.min(650 + pollCount * 100, 1500));
   }
 }
 
-async function loadBacktestResultSections(runId) {
-  setMessage("回测完成，正在加载净值曲线...");
-  const series = await api(`/api/backtest/${runId}/series`, { attempts: 6, retryDelayMs: 700 });
-  setMessage("正在加载再平衡记录...");
-  const rebalance = await api(`/api/backtest/${runId}/rebalance`, { attempts: 5, retryDelayMs: 700 });
-  setMessage("正在加载交易流水...");
-  const trades = await api(`/api/backtest/${runId}/trades`, { attempts: 5, retryDelayMs: 700 });
+async function loadBacktestResultSections(runId, onSeries) {
+  setMessage("计算完成，正在生成图表...");
+  const seriesPromise = api(`/api/backtest/${runId}/chart-series`, { attempts: 6, retryDelayMs: 700 });
+  const rebalancePromise = api(`/api/backtest/${runId}/rebalance`, { attempts: 5, retryDelayMs: 700 });
+  const tradesPromise = api(`/api/backtest/${runId}/trades`, { attempts: 5, retryDelayMs: 700 });
+  const series = computeSeriesMetrics(expandChartSeries(await seriesPromise));
+  onSeries?.(series);
+  setMessage("图表已显示，正在加载调仓与交易记录...");
+  const [rebalance, trades] = await Promise.all([rebalancePromise, tradesPromise]);
   return { series, rebalance, trades };
 }
 
@@ -1133,12 +1320,14 @@ async function runBacktest() {
     const result = await waitForBacktestJob(job.job_id);
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
-    const { series, rebalance, trades } = await loadBacktestResultSections(currentRunId);
-    const computedSeries = computeSeriesMetrics(series.series || []);
-    renderSummary(deriveSummary(result.summary, computedSeries));
-    renderCharts(computedSeries);
+    renderSummary(result.summary);
+    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, (computedSeries) => {
+      renderSummary(deriveSummary(result.summary, computedSeries));
+      renderCharts(computedSeries);
+    });
     const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || []);
-    renderTable("rebalanceTable", rebalanceTable.columns, rebalanceTable.rows);
+    renderTable("rebalanceTable", rebalanceTable.columns, rebalanceTable.rows, { pageSize: 200, newestFirst: true });
+    $("recordTabRebalance").textContent = `再平衡记录（${rebalanceTable.rows.length}）`;
     renderTable(
       "tradesTable",
       ["交易日期", "标的名称", "方向", "份额", "价格", "成交额", "费用", "币种", "原因"],
@@ -1153,7 +1342,9 @@ async function runBacktest() {
         币种: CURRENCY_NAMES[row.currency] || row.currency,
         原因: REASON_NAMES[row.reason] || row.reason,
       })),
+      { pageSize: 300, newestFirst: true },
     );
+    $("recordTabTrades").textContent = `交易流水（${(trades.trades || []).length}）`;
     if (result.cache?.hit) {
       setMessage("参数一致，已直接读取历史回测结果");
     } else if (result.data_sync?.triggered) {

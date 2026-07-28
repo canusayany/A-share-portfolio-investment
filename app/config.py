@@ -84,7 +84,11 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "currency": "CNY",
         "market": "CN",
         "asset_type": "cn_etf",
+        "exclusive_group": "cn_broad_etf",
+        "choice_label": "沪深300 510300",
         "inception_date": "2012-05-04",
+        "trade_start_date": "2012-05-28",
+        "allocation_start_date": "2013-01-01",
         "management_fee": 0.0015,
         "custodian_fee": 0.0005,
         "price_fallback": {
@@ -96,9 +100,31 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         },
     },
     {
+        "key": "cn_a100_etf",
+        "symbol": "159631.SZ",
+        "name": "招商中证A100ETF",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "exclusive_group": "cn_broad_etf",
+        "choice_label": "中证A100 159631",
+        "inception_date": "2022-08-18",
+        "management_fee": 0.005,
+        "custodian_fee": 0.001,
+        "price_fallback": {
+            "kind": "index",
+            "symbol": "000903.SH",
+            "name": "中证100/中证A100指数",
+            "start_date": "2005-12-30",
+            "scale_mode": "splice",
+        },
+    },
+    {
         "key": "cn_gold_etf",
         "symbol": "518880.SH",
-        "name": "黄金基金",
+        "name": "黄金基金（2021年起自动切换518850）",
         "target_weight": 0.10,
         "enabled": True,
         "currency": "CNY",
@@ -115,19 +141,70 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
             "scale_mode": "fixed",
             "price_scale": 0.01,
         },
+        "replacement_assets": [
+            {
+                "key": "cn_gold_etf_518850",
+                "symbol": "518850.SH",
+                "name": "华夏黄金ETF（518850）",
+                "currency": "CNY",
+                "market": "CN",
+                "asset_type": "cn_etf",
+                "inception_date": "2020-04-13",
+                "trade_start_date": "2020-06-05",
+                "allocation_start_date": "2021-01-01",
+                "management_fee": 0.0015,
+                "custodian_fee": 0.0005,
+            }
+        ],
     },
 ]
 
 REPO_OPTIONS: list[dict[str, Any]] = [
-    {"symbol": "204001", "name": "1天国债逆回购", "tenor_days": 1},
-    {"symbol": "204002", "name": "2天国债逆回购", "tenor_days": 2},
-    {"symbol": "204003", "name": "3天国债逆回购", "tenor_days": 3},
-    {"symbol": "204004", "name": "4天国债逆回购", "tenor_days": 4},
-    {"symbol": "204007", "name": "7天国债逆回购", "tenor_days": 7},
-    {"symbol": "204014", "name": "14天国债逆回购", "tenor_days": 14},
-    {"symbol": "204028", "name": "28天国债逆回购", "tenor_days": 28},
-    {"symbol": "204091", "name": "91天国债逆回购", "tenor_days": 91},
-    {"symbol": "204182", "name": "182天国债逆回购", "tenor_days": 182},
+    {"symbol": "204001", "name": "1天国债逆回购", "instrument_type": "repo", "tenor_days": 1},
+    {"symbol": "204002", "name": "2天国债逆回购", "instrument_type": "repo", "tenor_days": 2},
+    {"symbol": "204003", "name": "3天国债逆回购", "instrument_type": "repo", "tenor_days": 3},
+    {"symbol": "204004", "name": "4天国债逆回购", "instrument_type": "repo", "tenor_days": 4},
+    {"symbol": "204007", "name": "7天国债逆回购", "instrument_type": "repo", "tenor_days": 7},
+    {"symbol": "204014", "name": "14天国债逆回购", "instrument_type": "repo", "tenor_days": 14},
+    {"symbol": "204028", "name": "28天国债逆回购", "instrument_type": "repo", "tenor_days": 28},
+    {"symbol": "204091", "name": "91天国债逆回购", "instrument_type": "repo", "tenor_days": 91},
+    {"symbol": "204182", "name": "182天国债逆回购", "instrument_type": "repo", "tenor_days": 182},
+    {
+        "key": "cn_bond_etf_511010",
+        "symbol": "511010.SH",
+        "display_symbol": "511010",
+        "name": "5年期国债ETF（511010）",
+        "instrument_type": "cn_bond_etf",
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "inception_date": "2013-03-05",
+        "trade_start_date": "2013-03-25",
+    },
+    {
+        "key": "cn_bond_etf_511260",
+        "symbol": "511260.SH",
+        "display_symbol": "511260",
+        "name": "10年期国债ETF（511260）",
+        "instrument_type": "cn_bond_etf",
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "inception_date": "2017-08-04",
+        "trade_start_date": "2017-08-24",
+    },
+    {
+        "key": "cn_bond_etf_511090",
+        "symbol": "511090.SH",
+        "display_symbol": "511090",
+        "name": "30年期国债ETF（511090）",
+        "instrument_type": "cn_bond_etf",
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "inception_date": "2023-05-19",
+        "trade_start_date": "2023-06-13",
+    },
 ]
 
 
@@ -254,12 +331,65 @@ def required_fx_pairs_for_assets(assets: list[dict[str, Any]]) -> list[str]:
     return sorted(pairs)
 
 
+def selected_repo_option(config: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(config.get("repo_symbol") or "204001")
+    return next(
+        (deepcopy(option) for option in config.get("repo_options", REPO_OPTIONS) if option.get("symbol") == symbol),
+        {"symbol": "204001", "name": "1天国债逆回购", "instrument_type": "repo", "tenor_days": 1},
+    )
+
+
+def selected_bond_etf_asset(config: dict[str, Any]) -> dict[str, Any] | None:
+    option = selected_repo_option(config)
+    if option.get("instrument_type") != "cn_bond_etf":
+        return None
+    return {
+        **option,
+        "key": option.get("key") or f"cn_bond_etf_{str(option['symbol']).split('.')[0]}",
+        "target_weight": 0.0,
+        "enabled": True,
+    }
+
+
+def backtest_assets(config: dict[str, Any]) -> list[dict[str, Any]]:
+    assets = deepcopy(config.get("assets", []))
+    for asset in list(assets):
+        for replacement in asset.get("replacement_assets", []):
+            replacement_asset = {
+                **deepcopy(replacement),
+                "target_weight": 0.0,
+                "enabled": bool(asset.get("enabled", True)),
+                "replacement_for": asset["symbol"],
+            }
+            replacement_asset.pop("replacement_assets", None)
+            if all(item.get("symbol") != replacement_asset["symbol"] for item in assets):
+                assets.append(replacement_asset)
+    bond_asset = selected_bond_etf_asset(config)
+    if bond_asset and all(asset.get("symbol") != bond_asset["symbol"] for asset in assets):
+        assets.append(bond_asset)
+    return assets
+
+
+def repo_rate_symbol(config: dict[str, Any]) -> str:
+    option = selected_repo_option(config)
+    return str(option.get("symbol") or "204001") if option.get("instrument_type", "repo") == "repo" else "204001"
+
+
 def asset_price_start_date(asset: dict[str, Any], default_start: str) -> str:
-    candidates = [str(asset.get("inception_date") or default_start)]
+    candidates = [asset_trade_start_date(asset, default_start)]
     fallback = asset.get("price_fallback")
     if isinstance(fallback, dict) and fallback.get("start_date"):
         candidates.append(str(fallback["start_date"]))
     return min(candidates)
+
+
+def asset_trade_start_date(asset: dict[str, Any], default_start: str) -> str:
+    return str(
+        asset.get("allocation_start_date")
+        or asset.get("trade_start_date")
+        or asset.get("inception_date")
+        or default_start
+    )
 
 
 def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:
@@ -308,8 +438,9 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             errors.append(f"exclusive asset group {group} can enable only one asset")
     if float(config.get("initial_capital_cny", 0)) <= 0:
         errors.append("initial_capital_cny must be positive")
-    if config.get("rebalance_frequency") not in {"yearly", "semiannual"}:
-        errors.append("rebalance_frequency must be yearly or semiannual")
+    valid_rebalance_frequencies = {"daily", "weekly", "monthly", "quarterly", "semiannual", "yearly"}
+    if config.get("rebalance_frequency") not in valid_rebalance_frequencies:
+        errors.append("rebalance_frequency must be daily, weekly, monthly, quarterly, semiannual, or yearly")
     if repo_target_mode not in {"residual_weight", "fixed_bucket"}:
         errors.append("repo_target_mode must be residual_weight or fixed_bucket")
     try:

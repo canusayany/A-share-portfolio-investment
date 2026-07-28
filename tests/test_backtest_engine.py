@@ -5,7 +5,7 @@ import unittest
 from datetime import date
 
 from app.config import normalize_config
-from app.db import db_session, rows_to_dicts
+from app.db import db_session, init_db, rows_to_dicts
 from app.services.backtest_engine import (
     BacktestError,
     PortfolioState,
@@ -30,7 +30,7 @@ from app.services.backtest_engine import (
     has_investable_asset_target,
     should_rebalance,
 )
-from tests.helpers import build_synced_db
+from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
 class BacktestEngineTests(unittest.TestCase):
@@ -235,9 +235,9 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertFalse(has_investable_asset_target({"REPO": 1.0}))
         self.assertTrue(has_investable_asset_target({"VOO": 0.2, "REPO": 0.8}))
 
-    def test_price_proxy_switches_to_primary_asset_on_next_rebalance(self) -> None:
-        db_path, cfg = build_synced_db("2012-01-01", "2012-08-31")
-        cfg["rebalance_frequency"] = "semiannual"
+    def test_hs300_price_proxy_switches_to_510300_from_2013(self) -> None:
+        db_path, cfg = build_synced_db("2012-01-01", "2013-01-31")
+        cfg["rebalance_frequency"] = "yearly"
         cfg["monthly_spend_cny"] = 0.0
         for asset in cfg["assets"]:
             is_hs300 = asset["symbol"] == "510300.SH"
@@ -260,8 +260,8 @@ class BacktestEngineTests(unittest.TestCase):
             )
 
         self.assertTrue(any(trade["symbol"] == "160706" and trade["side"] == "BUY" for trade in trades))
-        self.assertTrue(any(trade["symbol"] == "160706" and trade["side"] == "SELL" and trade["trade_date"] >= "2012-07-01" for trade in trades))
-        self.assertTrue(any(trade["symbol"] == "510300.SH" and trade["side"] == "BUY" and trade["trade_date"] >= "2012-07-01" for trade in trades))
+        self.assertTrue(any(trade["symbol"] == "160706" and trade["side"] == "SELL" and trade["trade_date"] >= "2013-01-01" for trade in trades))
+        self.assertTrue(any(trade["symbol"] == "510300.SH" and trade["side"] == "BUY" and trade["trade_date"] >= "2013-01-01" for trade in trades))
         first_targets = json.loads(rebalances[0]["payload_json"])["targets"]
         switch_targets = json.loads(rebalances[1]["payload_json"])["targets"]
         self.assertIn("160706", first_targets)
@@ -496,6 +496,24 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(state.cash_cny, 300.0)
         self.assertEqual(state.dividend_receivable_cny, 0.0)
 
+    def test_raw_ex_dividend_price_drop_plus_cash_dividend_preserves_value(self) -> None:
+        cfg = normalize_config({})
+        state = PortfolioState(cash_cny=0.0)
+        state.positions["510300.SH"] = Position("510300.SH", "CN", "CNY", "cn_etf", quantity=100)
+        before, _ = _portfolio_value(state, {"510300.SH": 10.0}, {}, date(2022, 1, 18))
+        event = {
+            "symbol": "510300.SH",
+            "ex_date": "2022-01-19",
+            "pay_date": "2022-01-21",
+            "div_cash": 1.0,
+            "currency": "CNY",
+        }
+        _apply_dividend_events(state, "2022-01-19", {"2022-01-19": [event]}, {}, {}, cfg["fees"])
+        after, values = _portfolio_value(state, {"510300.SH": 9.0}, {}, date(2022, 1, 19))
+        self.assertAlmostEqual(before, after)
+        self.assertAlmostEqual(values["REPO"], 100.0)
+        self.assertAlmostEqual(state.total_dividend_cny, 100.0)
+
     def test_fund_dividend_payment_is_available_before_rebalance(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2021-01-08")
         cfg["monthly_spend_cny"] = 0.0
@@ -531,6 +549,7 @@ class BacktestEngineTests(unittest.TestCase):
         assets = comparison_assets(cfg)
         weights = {asset["symbol"]: asset["target_weight"] for asset in assets}
         self.assertAlmostEqual(weights["510300.SH"], 0.40)
+
         self.assertAlmostEqual(weights["518880.SH"], 0.10)
         next(asset for asset in cfg["assets"] if asset["symbol"] == "VOO")["enabled"] = False
         cn_sp500 = next(asset for asset in cfg["assets"] if asset["symbol"] == "513500.SH")
@@ -539,6 +558,16 @@ class BacktestEngineTests(unittest.TestCase):
         assets = comparison_assets(cfg)
         weights = {asset["symbol"]: asset["target_weight"] for asset in assets}
         self.assertAlmostEqual(weights["510300.SH"], 0.40)
+
+        a100 = next(asset for asset in cfg["assets"] if asset["symbol"] == "159631.SZ")
+        hs300 = next(asset for asset in cfg["assets"] if asset["symbol"] == "510300.SH")
+        hs300["enabled"] = False
+        a100["enabled"] = True
+        a100["target_weight"] = 0.12
+        assets = comparison_assets(cfg)
+        weights = {asset["symbol"]: asset["target_weight"] for asset in assets}
+        self.assertNotIn("510300.SH", weights)
+        self.assertAlmostEqual(weights["159631.SZ"], 0.40)
 
     def test_benchmark_forward_fill_and_rebalance_band(self) -> None:
         self.assertAlmostEqual(benchmark_returns([None, 100, None, 110])[-1], 0.1)
@@ -579,6 +608,119 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertNotIn("510300.SH", weights)
         self.assertIn("Au99.99", weights)
         self.assertNotIn("518880.SH", weights)
+
+    def test_a100_uses_csi100_proxy_before_etf_inception(self) -> None:
+        cfg = normalize_config({"start_date": "2021-01-01"})
+        for asset in cfg["assets"]:
+            is_a100 = asset["symbol"] == "159631.SZ"
+            asset["enabled"] = is_a100
+            asset["target_weight"] = 0.50 if is_a100 else 0.0
+
+        prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
+        prices.update({"159631.SZ": None, "000903.SH": 1000.0})
+        before = effective_weights(cfg, date(2021, 12, 31), prices)
+        prices["159631.SZ"] = 1.2
+        after = effective_weights(cfg, date(2022, 8, 18), prices)
+
+        self.assertAlmostEqual(before["000903.SH"], 0.50)
+        self.assertNotIn("159631.SZ", before)
+        self.assertAlmostEqual(after["159631.SZ"], 0.50)
+        self.assertNotIn("000903.SH", after)
+
+    def test_gold_switches_from_518880_to_518850_from_2021(self) -> None:
+        cfg = normalize_config({})
+        prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
+        prices.update({"518880.SH": 4.0, "518850.SH": 4.0})
+        before = effective_weights(cfg, date(2020, 12, 31), prices)
+        after = effective_weights(cfg, date(2021, 1, 4), prices)
+        self.assertIn("518880.SH", before)
+        self.assertNotIn("518850.SH", before)
+        self.assertIn("518850.SH", after)
+        self.assertNotIn("518880.SH", after)
+
+    def test_gold_backtest_switches_symbol_and_collects_replacement_dividend(self) -> None:
+        cfg = normalize_config(
+            {
+                "start_date": "2020-12-21",
+                "end_date": "2021-07-02",
+                "monthly_spend_cny": 0,
+            }
+        )
+        for asset in cfg["assets"]:
+            is_gold = asset["symbol"] == "518880.SH"
+            asset["enabled"] = is_gold
+            asset["target_weight"] = 0.9 if is_gold else 0.0
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
+            result = run_backtest(conn, cfg)
+            trades = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date,symbol,side FROM trades WHERE run_id=? ORDER BY trade_date,side",
+                    (result["run_id"],),
+                )
+            )
+        self.assertTrue(any(row["symbol"] == "518880.SH" and row["side"] == "BUY" for row in trades))
+        self.assertTrue(
+            any(
+                row["symbol"] == "518880.SH" and row["side"] == "SELL" and row["trade_date"] >= "2021-01-01"
+                for row in trades
+            )
+        )
+        self.assertTrue(
+            any(
+                row["symbol"] == "518850.SH" and row["side"] == "BUY" and row["trade_date"] >= "2021-01-01"
+                for row in trades
+            )
+        )
+        self.assertGreater(result["summary"]["total_dividend_cny"], 0.0)
+
+    def test_bond_etf_target_falls_back_to_repo_until_trade_start_and_price(self) -> None:
+        for symbol, before, trade_start in (
+            ("511010.SH", date(2013, 3, 22), date(2013, 3, 25)),
+            ("511260.SH", date(2017, 8, 23), date(2017, 8, 24)),
+            ("511090.SH", date(2023, 6, 12), date(2023, 6, 13)),
+        ):
+            cfg = normalize_config({"repo_symbol": symbol})
+            prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
+            prices[symbol] = 100.0
+            fallback = effective_weights(cfg, before, prices)
+            available = effective_weights(cfg, trade_start, prices)
+            missing_price = effective_weights(cfg, trade_start, {**prices, symbol: None})
+            self.assertGreater(fallback.get("REPO", 0.0), 0)
+            self.assertNotIn(symbol, fallback)
+            self.assertGreater(available.get(symbol, 0.0), 0)
+            self.assertNotIn("REPO", available)
+            self.assertGreater(missing_price.get("REPO", 0.0), 0)
+
+    def test_bond_etf_backtest_rolls_one_day_repo_until_first_tradable_day(self) -> None:
+        cfg = normalize_config(
+            {
+                "start_date": "2013-03-20",
+                "end_date": "2013-04-05",
+                "repo_symbol": "511010.SH",
+                "monthly_spend_cny": 0,
+            }
+        )
+        cfg["assets"] = [{**asset, "enabled": False, "target_weight": 0.0} for asset in cfg["assets"]]
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
+            result = run_backtest(conn, cfg)
+            daily = rows_to_dicts(
+                conn.execute("SELECT trade_date,payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date", (result["run_id"],))
+            )
+            trades = rows_to_dicts(
+                conn.execute("SELECT trade_date,symbol,side FROM trades WHERE run_id=? ORDER BY trade_date", (result["run_id"],))
+            )
+        before_listing = [json.loads(row["payload_json"]) for row in daily if row["trade_date"] < "2013-03-25"]
+        self.assertTrue(before_listing)
+        self.assertTrue(all(payload["treasury_fallback_active"] for payload in before_listing))
+        bond_buys = [trade for trade in trades if trade["symbol"] == "511010.SH" and trade["side"] == "BUY"]
+        self.assertTrue(bond_buys)
+        self.assertGreaterEqual(bond_buys[0]["trade_date"], "2013-03-25")
 
 
 if __name__ == "__main__":

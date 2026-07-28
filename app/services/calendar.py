@@ -41,15 +41,31 @@ def first_business_day_by_month(days: list[date]) -> set[date]:
 
 def rebalance_days(days: list[date], frequency: str) -> set[date]:
     result: set[date] = set()
-    seen: set[tuple[int, int]] = set()
-    months = {1} if frequency == "yearly" else {1, 7}
+    seen: set[tuple[int, ...]] = set()
+    if frequency == "daily":
+        return set(days)
     for day in days:
-        if day.month not in months:
+        if frequency == "weekly":
+            iso_year, iso_week, _ = day.isocalendar()
+            key = (iso_year, iso_week)
+        elif frequency == "monthly":
+            key = (day.year, day.month)
+        elif frequency == "quarterly":
+            if day.month not in {1, 4, 7, 10}:
+                continue
+            key = (day.year, day.month)
+        elif frequency == "semiannual":
+            if day.month not in {1, 7}:
+                continue
+            key = (day.year, day.month)
+        else:
+            if day.month != 1:
+                continue
+            key = (day.year, day.month)
+        if key in seen:
             continue
-        key = (day.year, day.month)
-        if key not in seen:
-            result.add(day)
-            seen.add(key)
+        result.add(day)
+        seen.add(key)
     if days:
         result.add(days[0])
     return result

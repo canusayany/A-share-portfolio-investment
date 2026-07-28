@@ -6,6 +6,7 @@ import unittest
 from app.config import normalize_config
 from app.db import connect, data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
 import app.services.data_sync as data_sync_module
+from app.services.calendar import business_days
 from app.services.data_sync import (
     chunk_date_ranges,
     eastmoney_secid,
@@ -23,6 +24,7 @@ from app.services.data_sync import (
     missing_date_ranges,
     missing_tail_date_ranges,
     parse_sohu_jsonp,
+    parse_sina_etf_cumulative_dividends,
     required_data_missing,
     select_best_datasrc_price_rows,
     sohu_code_and_referer,
@@ -36,6 +38,22 @@ from tests.helpers import build_synced_db, fixture_dividends, fixture_fx_rates, 
 
 
 class DbAndSyncTests(unittest.TestCase):
+    def test_sina_cumulative_etf_dividends_are_converted_to_period_cash(self) -> None:
+        rows = parse_sina_etf_cumulative_dividends(
+            "511010.SH",
+            [
+                {"日期": "2013-06-03", "累计分红": 0.28},
+                {"日期": "2015-10-09", "累计分红": 1.28},
+                {"日期": "2025-09-23", "累计分红": 2.73},
+            ],
+            "2014-01-01",
+            "2025-12-31",
+        )
+        self.assertEqual([row["ex_date"] for row in rows], ["2015-10-09", "2025-09-23"])
+        self.assertAlmostEqual(rows[0]["div_cash"], 1.0)
+        self.assertAlmostEqual(rows[1]["div_cash"], 1.45)
+        self.assertTrue(all(row["source"] == "sina:etf_cumulative_dividend" for row in rows))
+
     def test_sync_all_reports_missing_data_instead_of_mocking(self) -> None:
         db_path = temp_db_path()
         init_db(db_path)
@@ -613,6 +631,7 @@ class DbAndSyncTests(unittest.TestCase):
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
         original_fetch_fund_dividends = data_sync_module.fetch_fund_dividends
         original_fetch_eastmoney_dividends = data_sync_module.fetch_eastmoney_fund_dividends
+        original_fetch_sina_dividends = data_sync_module.fetch_sina_etf_dividends
 
         def fail_tushare(*_args, **_kwargs):
             raise data_sync_module.SyncWarning("TUSHARE_TOKEN is not configured")
@@ -620,6 +639,7 @@ class DbAndSyncTests(unittest.TestCase):
         try:
             data_sync_module.fetch_fund_dividends = fail_tushare
             data_sync_module.fetch_eastmoney_fund_dividends = lambda *_args, **_kwargs: []
+            data_sync_module.fetch_sina_etf_dividends = lambda *_args, **_kwargs: []
             with db_session(db_path) as conn:
                 conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='510300.SH'")
                 result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["dividends:510300.SH"])
@@ -629,15 +649,17 @@ class DbAndSyncTests(unittest.TestCase):
         finally:
             data_sync_module.fetch_fund_dividends = original_fetch_fund_dividends
             data_sync_module.fetch_eastmoney_fund_dividends = original_fetch_eastmoney_dividends
+            data_sync_module.fetch_sina_etf_dividends = original_fetch_sina_dividends
 
         self.assertEqual(result["inserted"]["dividends"], 0)
         self.assertNotIn("dividends:510300.SH", result["missing_data"])
-        self.assertEqual(coverage[0]["source"], "eastmoney:fund_dividend")
+        self.assertEqual(coverage[0]["source"], "sina:etf_cumulative_dividend")
 
     def test_dividend_sync_marks_empty_coverage_when_public_sources_fail(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
         original_fetch_fund_dividends = data_sync_module.fetch_fund_dividends
         original_fetch_eastmoney_dividends = data_sync_module.fetch_eastmoney_fund_dividends
+        original_fetch_sina_dividends = data_sync_module.fetch_sina_etf_dividends
 
         def fail_source(*_args, **_kwargs):
             raise data_sync_module.SyncWarning("public dividend source timeout")
@@ -645,6 +667,7 @@ class DbAndSyncTests(unittest.TestCase):
         try:
             data_sync_module.fetch_fund_dividends = fail_source
             data_sync_module.fetch_eastmoney_fund_dividends = fail_source
+            data_sync_module.fetch_sina_etf_dividends = fail_source
             with db_session(db_path) as conn:
                 conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='510300.SH'")
                 result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["dividends:510300.SH"])
@@ -654,6 +677,7 @@ class DbAndSyncTests(unittest.TestCase):
         finally:
             data_sync_module.fetch_fund_dividends = original_fetch_fund_dividends
             data_sync_module.fetch_eastmoney_fund_dividends = original_fetch_eastmoney_dividends
+            data_sync_module.fetch_sina_etf_dividends = original_fetch_sina_dividends
 
         self.assertEqual(result["inserted"]["dividends"], 0)
         self.assertNotIn("dividends:510300.SH", result["missing_data"])
@@ -692,10 +716,11 @@ class DbAndSyncTests(unittest.TestCase):
         def fail_source(*_args, **_kwargs):
             raise data_sync_module.SyncWarning("source unavailable")
 
-        def fake_fallback(asset, range_start, range_end, target_rows):
+        def fake_fallback(asset, range_start, range_end, target_rows, token=""):
             self.assertEqual(asset["symbol"], "510300.SH")
             self.assertEqual((range_start, range_end), ("2020-01-10", "2020-01-10"))
             self.assertTrue(target_rows)
+            self.assertEqual(token, "")
             return [
                 {
                     "symbol": "510300.SH",
@@ -785,6 +810,46 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["close"], 9.0)
         self.assertIn("splice_scale_3", rows[0]["source"])
 
+    def test_a100_fallback_uses_historical_index_and_splices_to_etf_price_level(self) -> None:
+        cfg = normalize_config({})
+        asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "159631.SZ")
+        original_fetch_index = data_sync_module.fetch_index_prices
+
+        def fake_fetch_index(_token, proxy_symbol, start, end):
+            return [
+                {
+                    "symbol": proxy_symbol,
+                    "trade_date": trade_date.isoformat(),
+                    "open": 240.0,
+                    "high": 240.0,
+                    "low": 240.0,
+                    "close": 240.0,
+                    "adj_close": None,
+                    "volume": 0.0,
+                    "amount": 0.0,
+                    "currency": "CNY",
+                    "source": "test:index_daily",
+                }
+                for trade_date in business_days(start, end)
+            ]
+
+        try:
+            data_sync_module.fetch_index_prices = fake_fetch_index
+            rows = data_sync_module.fetch_price_fallback_rows(
+                asset,
+                "2022-01-03",
+                "2023-01-03",
+                [{"trade_date": "2022-08-18", "close": 1.2, "source": "fixture:price"}],
+                token="test-token",
+            )
+        finally:
+            data_sync_module.fetch_index_prices = original_fetch_index
+
+        row = next(row for row in rows if row["trade_date"] == "2022-01-03")
+        self.assertEqual(row["symbol"], "159631.SZ")
+        self.assertAlmostEqual(row["close"], 1.2)
+        self.assertIn("splice_scale_0.005", row["source"])
+
     def test_gold_fallback_au9999_price_is_scaled_to_etf_share_price(self) -> None:
         cfg = normalize_config({})
         asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "518880.SH")
@@ -825,6 +890,17 @@ class DbAndSyncTests(unittest.TestCase):
 
         self.assertIn("prices:510300.SH", missing)
         self.assertNotIn("dividends:510300.SH", missing)
+
+    def test_required_data_missing_detects_a100_gap_before_etf_inception(self) -> None:
+        db_path, cfg = build_synced_db("2021-01-01", "2023-01-03")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "159631.SZ"
+            asset["target_weight"] = 0.5 if asset["enabled"] else 0.0
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM prices WHERE symbol='159631.SZ' AND trade_date < '2022-08-26'")
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+
+        self.assertIn("prices:159631.SZ", missing)
 
     def test_targeted_us_price_sync_fills_missing_dates_from_multiple_sources(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
@@ -1083,6 +1159,7 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertGreater(yahoo_period("2020-01-02"), yahoo_period("2020-01-01"))
         self.assertEqual(chunk_date_ranges("2020-01-01", "2020-03-31", 90), [("2020-01-01", "2020-03-30"), ("2020-03-31", "2020-03-31")])
         self.assertEqual(sohu_code_and_referer("000300.SH")[0], "zs_000300")
+        self.assertEqual(sohu_code_and_referer("000903.SH")[0], "zs_000903")
         self.assertEqual(sohu_code_and_referer("510300.SH")[0], "cn_510300")
         parsed = parse_sohu_jsonp('historySearchHandler([{"status":0,"hq":[["2026-06-01","1","2","0","0%","0.9","2.1","10","20","0%"]]}])')
         self.assertEqual(parsed[0]["hq"][0][0], "2026-06-01")

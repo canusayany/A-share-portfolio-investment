@@ -14,7 +14,7 @@ import subprocess
 import time
 from typing import Any
 from zoneinfo import ZoneInfo
-from app.config import DEFAULT_ASSETS, asset_price_start_date, required_fx_pairs_for_assets
+from app.config import DEFAULT_ASSETS, asset_price_start_date, asset_trade_start_date, required_fx_pairs_for_assets
 from app.db import insert_many, upsert_assets, utc_now
 from app.services.calendar import business_days, daterange, parse_date
 
@@ -349,9 +349,24 @@ def required_data_missing(
         if not asset.get("enabled", True):
             continue
         price_fetch_start = max(parse_date(start), parse_date(asset_price_start_date(asset, start)))
-        dividend_fetch_start = max(parse_date(start), parse_date(asset.get("inception_date") or start))
+        dividend_fetch_start = max(parse_date(start), parse_date(asset_trade_start_date(asset, start)))
         price_end = effective_price_end_for_asset(asset, end)
-        if price_fetch_start <= price_end and _coverage_gap(conn, "prices", "symbol", asset["symbol"], "trade_date", price_fetch_start.isoformat(), price_end.isoformat(), end_tolerance_days=0):
+        fallback = asset.get("price_fallback")
+        fallback_covers_pre_inception = (
+            isinstance(fallback, dict)
+            and price_fetch_start < parse_date(asset_trade_start_date(asset, start))
+        )
+        if price_fetch_start <= price_end and _coverage_gap(
+            conn,
+            "prices",
+            "symbol",
+            asset["symbol"],
+            "trade_date",
+            price_fetch_start.isoformat(),
+            price_end.isoformat(),
+            require_start=fallback_covers_pre_inception,
+            end_tolerance_days=0,
+        ):
             missing.add(f"prices:{asset['symbol']}")
         if price_fetch_start <= price_end and price_anomaly_ranges(conn, asset["symbol"], price_fetch_start.isoformat(), price_end.isoformat()):
             missing.add(f"prices:{asset['symbol']}")
@@ -1196,6 +1211,7 @@ def fetch_price_fallback_rows(
     range_start: str,
     range_end: str,
     target_rows: list[dict[str, Any]],
+    token: str = "",
 ) -> list[dict[str, Any]]:
     fallback = asset.get("price_fallback")
     if not isinstance(fallback, dict):
@@ -1210,6 +1226,15 @@ def fetch_price_fallback_rows(
         fallback_rows = fetch_fund_nav_proxy_prices(str(fallback["symbol"]), symbol, fetch_start, fetch_end, currency)
     elif kind == "sge_au9999":
         fallback_rows = fetch_au9999_proxy_prices(symbol, fetch_start, fetch_end, currency)
+    elif kind == "index":
+        fallback_rows = fetch_index_proxy_prices(
+            token,
+            str(fallback["symbol"]),
+            symbol,
+            fetch_start,
+            fetch_end,
+            currency,
+        )
     else:
         raise SyncWarning(f"unsupported price fallback kind for {symbol}: {kind}")
 
@@ -1283,7 +1308,7 @@ def fetch_tencent_hk_prices(symbol: str, start: str, end: str, currency: str) ->
 
 def sohu_code_and_referer(symbol: str) -> tuple[str, str]:
     code = symbol.split(".")[0]
-    if symbol.upper() == "000300.SH":
+    if symbol.upper() in {"000300.SH", "000903.SH"}:
         return f"zs_{code}", f"https://q.stock.sohu.com/zs/{code}/lshq.shtml"
     return f"cn_{code}", f"https://q.stock.sohu.com/cn/{code}/lshq.shtml"
 
@@ -1353,6 +1378,38 @@ def fetch_index_prices(token: str, symbol: str, start: str, end: str) -> list[di
     ]
 
 
+def fetch_index_proxy_prices(
+    token: str,
+    proxy_symbol: str,
+    target_symbol: str,
+    start: str,
+    end: str,
+    currency: str,
+) -> list[dict[str, Any]]:
+    """Fetch an index proxy with the same public-source fallback chain as benchmarks."""
+    attempts: list[str] = []
+    fetchers = []
+    if token:
+        fetchers.append(("tushare:index_daily", lambda: fetch_index_prices(token, proxy_symbol, start, end)))
+    fetchers.extend(
+        [
+            ("datasrc:index", lambda: fetch_datasrc_market_prices(proxy_symbol, start, end, currency)),
+            ("sohu:index_kline", lambda: fetch_sohu_prices(proxy_symbol, start, end, currency, "sohu:index_kline")),
+            ("eastmoney:index_kline", lambda: fetch_eastmoney_prices(proxy_symbol, start, end, currency, "eastmoney:index_kline")),
+        ]
+    )
+    for source_name, fetcher in fetchers:
+        try:
+            rows = fetcher()
+        except SyncWarning as exc:
+            attempts.append(f"{source_name}: {exc}")
+            continue
+        if rows:
+            return restore_symbol(rows, target_symbol)
+    detail = "; ".join(attempts) or "no index price source configured"
+    raise SyncWarning(f"index proxy fetch failed for {proxy_symbol}: {detail}")
+
+
 def fetch_fund_dividends(token: str, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
     rows = tushare_call(
         token,
@@ -1419,6 +1476,63 @@ def fetch_eastmoney_fund_dividends(symbol: str, start: str, end: str) -> list[di
     if "content" in text or "<table" in text:
         return []
     raise SyncWarning(f"Eastmoney returned unrecognized dividend payload for {symbol}")
+
+
+def parse_sina_etf_cumulative_dividends(
+    symbol: str,
+    records: list[dict[str, Any]],
+    start: str,
+    end: str,
+) -> list[dict[str, Any]]:
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    previous_cumulative = 0.0
+    rows: list[dict[str, Any]] = []
+    for record in sorted(records, key=lambda item: str(item.get("日期") or "")):
+        ex_date = str(record.get("日期") or "")[:10]
+        if not ex_date:
+            continue
+        try:
+            ex = parse_date(ex_date)
+            cumulative = float(record.get("累计分红") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        dividend = cumulative - previous_cumulative
+        previous_cumulative = cumulative
+        if not (start_date <= ex <= end_date) or dividend <= 0:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "ann_date": ex_date,
+                "record_date": ex_date,
+                "ex_date": ex_date,
+                "pay_date": ex_date,
+                "div_cash": dividend,
+                "currency": "CNY",
+                "source": "sina:etf_cumulative_dividend",
+            }
+        )
+    return rows
+
+
+def fetch_sina_etf_dividends(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
+    try:
+        import akshare as ak  # type: ignore
+    except Exception as exc:
+        raise SyncWarning(f"AKShare is unavailable for ETF dividends: {exc}") from exc
+    code = symbol.split(".")[0]
+    market = "sh" if symbol.upper().endswith(".SH") or code.startswith(("5", "6")) else "sz"
+    try:
+        frame = ak.fund_etf_dividend_sina(symbol=f"{market}{code}")
+    except Exception as exc:
+        raise SyncWarning(f"Sina ETF dividend fetch failed for {symbol}: {exc}") from exc
+    if frame is None or frame.empty:
+        return []
+    required_columns = {"日期", "累计分红"}
+    if not required_columns.issubset(frame.columns):
+        raise SyncWarning(f"Sina returned unrecognized ETF dividend payload for {symbol}")
+    return parse_sina_etf_cumulative_dividends(symbol, frame.to_dict("records"), start, end)
 
 
 def fetch_adj_factors(token: str, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
@@ -2028,12 +2142,13 @@ def sync_all(
     for asset in assets:
         symbol = asset["symbol"]
         price_fetch_start_date = max(parse_date(start), parse_date(asset_price_start_date(asset, start)))
-        dividend_fetch_start_date = max(parse_date(start), parse_date(asset.get("inception_date") or start))
+        dividend_fetch_start_date = max(parse_date(start), parse_date(asset_trade_start_date(asset, start)))
         price_end = effective_price_end_for_asset(asset, end)
         price_fetch_start = price_fetch_start_date.isoformat()
         dividend_fetch_start = dividend_fetch_start_date.isoformat()
+        fallback_range_func = missing_date_ranges if asset.get("price_fallback") else price_range_func
         asset_price_ranges[symbol] = (
-            price_range_func(conn, "prices", "symbol", symbol, "trade_date", price_fetch_start, price_end.isoformat())
+            fallback_range_func(conn, "prices", "symbol", symbol, "trade_date", price_fetch_start, price_end.isoformat())
             if symbol in plan["asset_prices"] and price_fetch_start_date <= price_end
             else []
         )
@@ -2157,6 +2272,7 @@ def sync_all(
                         range_start,
                         range_end,
                         existing_price_rows.get(symbol, []) + range_prices,
+                        token=token,
                     )
                     fallback_rows = [row for row in fallback_rows if row["trade_date"] in missing_price_dates]
                     if fallback_rows:
@@ -2189,8 +2305,18 @@ def sync_all(
                         dividend_source = "tushare:fund_div"
                     except SyncWarning as tushare_exc:
                         asset_warnings.append(str(tushare_exc))
-                        range_dividends = fetch_eastmoney_fund_dividends(symbol, range_start, range_end)
-                        dividend_source = "eastmoney:fund_dividend"
+                        try:
+                            range_dividends = fetch_eastmoney_fund_dividends(symbol, range_start, range_end)
+                            dividend_source = "eastmoney:fund_dividend"
+                        except SyncWarning as eastmoney_exc:
+                            asset_warnings.append(str(eastmoney_exc))
+                            range_dividends = []
+                    if not range_dividends:
+                        try:
+                            range_dividends = fetch_sina_etf_dividends(symbol, range_start, range_end)
+                            dividend_source = "sina:etf_cumulative_dividend"
+                        except SyncWarning as sina_exc:
+                            asset_warnings.append(str(sina_exc))
                 elif asset.get("market") == "HK":
                     range_dividends = fetch_hk_yahoo_dividends(symbol, range_start, range_end, asset.get("currency", "HKD"))
                     dividend_source = "yahoo:chart:dividend"

@@ -2197,3 +2197,75 @@
 2026-07-10 13:15:22,816 INFO __main__ http request method=GET path=/api/backtest/b5586863-cec1-407b-beca-f7f3d3fd0877/series status=200 bytes=1561699 seconds=0.053 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36
 2026-07-10 13:15:22,830 INFO __main__ http request method=GET path=/api/backtest/b5586863-cec1-407b-beca-f7f3d3fd0877/rebalance status=200 bytes=13047 seconds=0.005 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36
 2026-07-10 13:15:22,834 INFO __main__ http request method=GET path=/api/backtest/b5586863-cec1-407b-beca-f7f3d3fd0877/trades status=200 bytes=1555 seconds=0.004 client=127.0.0.1 ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36
+2026-07-10 13:22:15,226 INFO __main__ backtest jobs cleaned count=1
+2026-07-10 13:23:15,306 INFO __main__ backtest jobs cleaned count=1
+2026-07-10 13:23:30,323 INFO __main__ backtest jobs cleaned count=1
+2026-07-10 13:23:50,352 INFO __main__ backtest jobs cleaned count=1
+2026-07-10 13:24:15,404 INFO __main__ backtest jobs cleaned count=1
+2026-07-10 13:24:40,455 INFO __main__ backtest jobs cleaned count=1
+2026-07-10 13:25:25,526 INFO __main__ backtest jobs cleaned count=1
+2026-07-10 13:54:07,798 INFO __main__ http request method=GET path=/ status=200 bytes=13597 seconds=0.040 client=127.0.0.1 ua=curl/8.19.0
+2026-07-10 13:54:07,823 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4861 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-07-10 13:54:30,599 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4861 seconds=0.012 client=127.0.0.1 ua=Python-urllib/3.12
+2026-07-10 13:54:30,615 INFO __main__ backtest request start id=6290c0cf range=2026-06-01..2026-06-10 repo=511010.SH assets=[]
+2026-07-10 13:54:30,616 INFO __main__ backtest lock acquired id=6290c0cf wait_seconds=0.000
+2026-07-10 13:54:30,626 INFO __main__ backtest data check id=6290c0cf seconds=0.008 missing=['dividends:511010.SH', 'prices:511010.SH']
+2026-07-10 13:54:30,629 INFO app.services.data_sync sync_all start range=2026-06-01..2026-06-10 missing_items=['dividends:511010.SH', 'prices:511010.SH'] plan_prices=['511010.SH'] plan_dividends=['511010.SH'] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-10 13:54:30,640 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:30,640 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:30,640 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:30,641 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:30,641 INFO app.services.data_sync sync asset complete symbol=513500.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:30,641 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:31,013 INFO app.services.data_sync sync price source complete symbol=511010.SH source=sohu range=2026-06-01..2026-06-10 rows=8
+2026-07-10 13:54:31,377 INFO app.services.data_sync sync price source complete symbol=511010.SH source=eastmoney range=2026-06-01..2026-06-10 rows=8
+2026-07-10 13:54:31,857 INFO app.services.data_sync sync price source complete symbol=511010.SH source=yahoo-cn range=2026-06-01..2026-06-10 rows=8
+2026-07-10 13:54:32,180 INFO app.services.data_sync sync asset complete symbol=511010.SH prices=8 dividends=0 adj=0 seconds=1.541 warnings=4 missing=[]
+2026-07-10 13:54:32,182 INFO app.services.data_sync sync_all complete seconds=1.553 inserted={'prices': 8, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=[] warnings=3
+2026-07-10 13:54:32,182 INFO __main__ backtest sync complete id=6290c0cf seconds=1.554 result={'inserted': {'prices': 8, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['TUSHARE_TOKEN is not configured', 'psycopg is not installed; DataSrc Postgres cache unavailable', 'skip Tushare adj for 511010.SH because primary Tushare price source is unavailable'], 'missing_data': []}
+2026-07-10 13:54:32,198 INFO __main__ backtest post-sync data check id=6290c0cf seconds=0.000 missing=[]
+2026-07-10 13:54:32,398 INFO __main__ backtest cache invalidated id=6290c0cf seconds=0.197
+2026-07-10 13:54:32,399 INFO app.services.backtest_engine run_backtest start range=2026-06-01..2026-06-10 assets=['VOO', '03195.HK', '513500.SH', '512890.SH', '510300.SH', '518880.SH', '511010.SH'] treasury=511010.SH repo_rate=204001
+2026-07-10 13:54:32,483 INFO app.services.backtest_engine run_backtest data loaded days=8 price_rows=80 fx_rows=0 repo_rows=8 one_day_repo_rows=8 dividend_events=0 seconds=0.000
+2026-07-10 13:54:32,484 INFO app.services.backtest_engine run_backtest main loop complete rows=8 trades=1 rebalance=1 seconds=0.000
+2026-07-10 13:54:32,485 INFO app.services.backtest_engine run_backtest comparison complete rows=8 seconds=0.000
+2026-07-10 13:54:32,485 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.000
+2026-07-10 13:54:32,486 INFO app.services.backtest_engine run_backtest persisted run_id=124fe6fe-e475-4886-ada9-a9e65e51b228 rows=8 trades=1 rebalance=1 seconds=0.000 total_seconds=0.087
+2026-07-10 13:54:32,486 INFO __main__ backtest engine complete id=6290c0cf seconds=0.088 cache={'hit': False, 'mode': '重新计算'}
+2026-07-10 13:54:32,525 INFO __main__ backtest status complete id=6290c0cf seconds=0.040 rows=16
+2026-07-10 13:54:32,526 INFO __main__ backtest request complete id=6290c0cf total_seconds=1.911
+2026-07-10 13:54:32,539 INFO __main__ http request method=POST path=/api/backtest/run status=200 bytes=3102 seconds=1.939 client=127.0.0.1 ua=Python-urllib/3.12
+2026-07-10 13:54:32,558 INFO __main__ http request method=GET path=/api/backtest/124fe6fe-e475-4886-ada9-a9e65e51b228/trades status=200 bytes=289 seconds=0.018 client=127.0.0.1 ua=Python-urllib/3.12
+2026-07-10 13:54:45,032 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4861 seconds=0.014 client=127.0.0.1 ua=Python-urllib/3.12
+2026-07-10 13:54:45,047 INFO __main__ backtest request start id=6b7cd238 range=2026-06-01..2026-06-10 repo=511260.SH assets=[]
+2026-07-10 13:54:45,048 INFO __main__ backtest lock acquired id=6b7cd238 wait_seconds=0.000
+2026-07-10 13:54:45,050 INFO __main__ backtest data check id=6b7cd238 seconds=0.000 missing=['dividends:511260.SH', 'prices:511260.SH']
+2026-07-10 13:54:45,053 INFO app.services.data_sync sync_all start range=2026-06-01..2026-06-10 missing_items=['dividends:511260.SH', 'prices:511260.SH'] plan_prices=['511260.SH'] plan_dividends=['511260.SH'] plan_index=False plan_repo=[] plan_fx=[]
+2026-07-10 13:54:45,056 INFO app.services.data_sync sync asset complete symbol=518880.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:45,057 INFO app.services.data_sync sync asset complete symbol=512890.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:45,057 INFO app.services.data_sync sync asset complete symbol=03195.HK prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:45,057 INFO app.services.data_sync sync asset complete symbol=VOO prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:45,057 INFO app.services.data_sync sync asset complete symbol=510300.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:45,058 INFO app.services.data_sync sync asset complete symbol=513500.SH prices=0 dividends=0 adj=0 seconds=0.000 warnings=0 missing=[]
+2026-07-10 13:54:45,263 INFO app.services.data_sync sync price source complete symbol=511260.SH source=sohu range=2026-06-01..2026-06-10 rows=8
+2026-07-10 13:54:45,439 INFO app.services.data_sync sync price source complete symbol=511260.SH source=eastmoney range=2026-06-01..2026-06-10 rows=8
+2026-07-10 13:54:45,832 INFO app.services.data_sync sync price source complete symbol=511260.SH source=yahoo-cn range=2026-06-01..2026-06-10 rows=8
+2026-07-10 13:54:46,086 INFO app.services.data_sync sync asset complete symbol=511260.SH prices=8 dividends=0 adj=0 seconds=1.030 warnings=4 missing=[]
+2026-07-10 13:54:46,087 INFO app.services.data_sync sync_all complete seconds=1.034 inserted={'prices': 8, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0} missing=[] warnings=3
+2026-07-10 13:54:46,087 INFO __main__ backtest sync complete id=6b7cd238 seconds=1.035 result={'inserted': {'prices': 8, 'dividends': 0, 'adj_factors': 0, 'repo_rates': 0, 'fx_rates': 0}, 'warnings': ['TUSHARE_TOKEN is not configured', 'psycopg is not installed; DataSrc Postgres cache unavailable', 'skip Tushare adj for 511260.SH because primary Tushare price source is unavailable'], 'missing_data': []}
+2026-07-10 13:54:46,101 INFO __main__ backtest post-sync data check id=6b7cd238 seconds=0.000 missing=[]
+2026-07-10 13:54:46,104 INFO __main__ backtest cache invalidated id=6b7cd238 seconds=0.000
+2026-07-10 13:54:46,105 INFO app.services.backtest_engine run_backtest start range=2026-06-01..2026-06-10 assets=['VOO', '03195.HK', '513500.SH', '512890.SH', '510300.SH', '518880.SH', '511260.SH'] treasury=511260.SH repo_rate=204001
+2026-07-10 13:54:46,113 INFO app.services.backtest_engine run_backtest data loaded days=8 price_rows=80 fx_rows=0 repo_rows=8 one_day_repo_rows=8 dividend_events=0 seconds=0.000
+2026-07-10 13:54:46,114 INFO app.services.backtest_engine run_backtest main loop complete rows=8 trades=1 rebalance=1 seconds=0.000
+2026-07-10 13:54:46,115 INFO app.services.backtest_engine run_backtest comparison complete rows=8 seconds=0.000
+2026-07-10 13:54:46,115 INFO app.services.backtest_engine run_backtest metrics complete seconds=0.000
+2026-07-10 13:54:46,115 INFO app.services.backtest_engine run_backtest persisted run_id=1545fdbc-6f99-46e5-8595-d662315c6087 rows=8 trades=1 rebalance=1 seconds=0.000 total_seconds=0.010
+2026-07-10 13:54:46,116 INFO __main__ backtest engine complete id=6b7cd238 seconds=0.011 cache={'hit': False, 'mode': '重新计算'}
+2026-07-10 13:54:46,133 INFO __main__ backtest status complete id=6b7cd238 seconds=0.018 rows=17
+2026-07-10 13:54:46,134 INFO __main__ backtest request complete id=6b7cd238 total_seconds=1.087
+2026-07-10 13:54:46,148 INFO __main__ http request method=POST path=/api/backtest/run status=200 bytes=3223 seconds=1.115 client=127.0.0.1 ua=Python-urllib/3.12
+2026-07-10 13:54:46,172 INFO __main__ http request method=GET path=/api/backtest/1545fdbc-6f99-46e5-8595-d662315c6087/trades status=200 bytes=300 seconds=0.024 client=127.0.0.1 ua=Python-urllib/3.12
+2026-07-10 13:56:31,775 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4861 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-07-10 13:57:01,709 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4861 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0
+2026-07-10 13:57:02,037 INFO __main__ http request method=GET path=/api/default-config status=200 bytes=4861 seconds=0.000 client=127.0.0.1 ua=curl/8.19.0

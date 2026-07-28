@@ -4,7 +4,7 @@ from pathlib import Path
 import math
 import tempfile
 
-from app.config import asset_price_start_date, normalize_config
+from app.config import asset_price_start_date, backtest_assets, normalize_config, repo_rate_symbol
 from app.db import db_session, init_db, insert_many, upsert_assets
 from app.services.calendar import business_days
 from app.services.data_sync import mark_sync_coverage
@@ -100,7 +100,8 @@ def fixture_dividends(symbol: str, start: str, end: str, currency: str) -> list[
 
 
 def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
-    upsert_assets(conn, [{**asset, "source": "fixture"} for asset in config["assets"]])
+    assets = backtest_assets(config)
+    upsert_assets(conn, [{**asset, "source": "fixture"} for asset in assets])
     upsert_assets(
         conn,
         [
@@ -114,8 +115,21 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
             }
         ],
     )
-    seeds = {"VOO": 280.0, "03195.HK": 8.0, "513500.SH": 1.0, "512890.SH": 1.0, "510300.SH": 3.0, "518880.SH": 2.5, "000300.SH": 3500.0}
-    for asset in config["assets"]:
+    seeds = {
+        "VOO": 280.0,
+        "03195.HK": 8.0,
+        "513500.SH": 1.0,
+        "512890.SH": 1.0,
+        "510300.SH": 3.0,
+        "159631.SZ": 1.5,
+        "518880.SH": 2.5,
+        "518850.SH": 4.0,
+        "511010.SH": 100.0,
+        "511260.SH": 100.0,
+        "511090.SH": 100.0,
+        "000300.SH": 3500.0,
+    }
+    for asset in assets:
         fetch_start = max(start, asset_price_start_date(asset, start))
         insert_many(conn, "prices", fixture_price_series(asset["symbol"], fetch_start, end, asset["currency"], seeds[asset["symbol"]]))
         dividend_start = max(start, asset.get("inception_date") or start)
@@ -131,6 +145,6 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
                 ],
             )
     insert_many(conn, "prices", fixture_price_series("000300.SH", start, end, "CNY", seeds["000300.SH"]))
-    insert_many(conn, "repo_rates", fixture_repo_rates(start, end, config.get("repo_symbol", "204001")))
+    insert_many(conn, "repo_rates", fixture_repo_rates(start, end, repo_rate_symbol(config)))
     insert_many(conn, "fx_rates", fixture_fx_rates(start, end))
     insert_many(conn, "fx_rates", fixture_hkd_fx_rates(start, end))

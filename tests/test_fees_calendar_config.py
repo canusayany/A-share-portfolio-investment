@@ -6,7 +6,15 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from app.config import default_config, load_dotenv_if_present, normalize_config, validate_config
+from app.config import (
+    backtest_assets,
+    default_config,
+    load_dotenv_if_present,
+    normalize_config,
+    repo_rate_symbol,
+    selected_bond_etf_asset,
+    validate_config,
+)
 from app.services.calendar import business_days, first_business_day_by_month, rebalance_days, repo_actual_days
 from app.services.fees import (
     CnEtfFeeConfig,
@@ -93,8 +101,12 @@ class CalendarAndConfigTests(unittest.TestCase):
         days = business_days("2020-01-01", "2020-07-10")
         self.assertNotIn(date(2020, 1, 4), days)
         self.assertIn(date(2020, 1, 1), first_business_day_by_month(days))
+        self.assertIn(date(2020, 1, 6), rebalance_days(days, "weekly"))
+        self.assertIn(date(2020, 2, 3), rebalance_days(days, "monthly"))
+        self.assertIn(date(2020, 4, 1), rebalance_days(days, "quarterly"))
         self.assertIn(date(2020, 7, 1), rebalance_days(days, "semiannual"))
         self.assertIn(date(2020, 1, 1), rebalance_days(days, "yearly"))
+        self.assertEqual(rebalance_days(days, "daily"), set(days))
         self.assertEqual(repo_actual_days(date(2020, 1, 3)), 3)
 
     def test_config_merge_and_validation(self) -> None:
@@ -108,6 +120,14 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(cn_sp500["inception_date"], "2013-12-05")
         self.assertEqual(cn_sp500["management_fee"], 0.006)
         self.assertEqual(cn_sp500["custodian_fee"], 0.002)
+        a100 = next(asset for asset in cfg["assets"] if asset["symbol"] == "159631.SZ")
+        self.assertFalse(a100["enabled"])
+        self.assertEqual(a100["exclusive_group"], "cn_broad_etf")
+        self.assertEqual(a100["inception_date"], "2022-08-18")
+        self.assertEqual(a100["price_fallback"]["kind"], "index")
+        self.assertEqual(a100["price_fallback"]["symbol"], "000903.SH")
+        self.assertEqual(a100["price_fallback"]["start_date"], "2005-12-30")
+        self.assertEqual(a100["price_fallback"]["scale_mode"], "splice")
         self.assertEqual(cfg["fees"]["tax"]["us_dividend_withholding_rate"], 0.30)
         self.assertEqual(cfg["fees"]["hk_connect_etf"]["stock_settlement_fee_rate"], 0.000042)
         self.assertEqual(validate_config(cfg), [])
@@ -122,6 +142,31 @@ class CalendarAndConfigTests(unittest.TestCase):
         duplicate_sp500 = normalize_config({})
         next(asset for asset in duplicate_sp500["assets"] if asset["symbol"] == "03195.HK")["enabled"] = True
         self.assertTrue(any("exclusive asset group sp500" in item for item in validate_config(duplicate_sp500)))
+        duplicate_broad = normalize_config({})
+        next(asset for asset in duplicate_broad["assets"] if asset["symbol"] == "159631.SZ")["enabled"] = True
+        self.assertTrue(any("exclusive asset group cn_broad_etf" in item for item in validate_config(duplicate_broad)))
+
+    def test_bond_etf_selection_uses_one_day_repo_as_rate_fallback(self) -> None:
+        for symbol, inception, trade_start in (
+            ("511010.SH", "2013-03-05", "2013-03-25"),
+            ("511260.SH", "2017-08-04", "2017-08-24"),
+            ("511090.SH", "2023-05-19", "2023-06-13"),
+        ):
+            cfg = normalize_config({"repo_symbol": symbol})
+            bond_asset = selected_bond_etf_asset(cfg)
+            self.assertIsNotNone(bond_asset)
+            self.assertEqual(bond_asset["inception_date"], inception)
+            self.assertEqual(bond_asset["trade_start_date"], trade_start)
+            self.assertEqual(repo_rate_symbol(cfg), "204001")
+            self.assertIn(symbol, {asset["symbol"] for asset in backtest_assets(cfg)})
+            self.assertEqual(validate_config(cfg), [])
+
+    def test_backtest_assets_include_low_fee_gold_replacement(self) -> None:
+        cfg = normalize_config({})
+        assets = {asset["symbol"]: asset for asset in backtest_assets(cfg)}
+        self.assertIn("518850.SH", assets)
+        self.assertEqual(assets["518850.SH"]["replacement_for"], "518880.SH")
+        self.assertEqual(assets["518850.SH"]["allocation_start_date"], "2021-01-01")
 
     def test_default_end_date_uses_current_day(self) -> None:
         self.assertEqual(default_config()["end_date"], date.today().isoformat())

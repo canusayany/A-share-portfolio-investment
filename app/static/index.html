@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>跨市场组合回测</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260710-ui-rebuild-2" />
+    <title>永久投资策略</title>
+    <link rel="stylesheet" href="static/styles.css?v=20260715-rebalance-cdn-1" />
     <script src="static/echarts.min.js?v=5.6.0"></script>
   </head>
   <body>
     <header class="mobile-app-bar">
       <div>
-        <strong>组合回测</strong>
+        <strong>永久投资策略</strong>
         <span id="mobileDataStatus">正在检查数据</span>
       </div>
       <button id="mobileParameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">
@@ -24,7 +24,7 @@
       <aside id="parameterPanel" class="controls" aria-label="回测参数">
         <div class="control-panel-header">
           <div>
-            <h1>组合回测</h1>
+            <h1>永久投资策略</h1>
             <p>设定组合与规则，查看长期收益和风险</p>
           </div>
           <button id="closeParameterPanel" class="icon-button close-parameters" type="button" aria-label="关闭参数面板">
@@ -66,6 +66,10 @@
               <label>
                 再平衡频率
                 <select id="rebalanceFrequency">
+                  <option value="daily">每日</option>
+                  <option value="weekly">每周</option>
+                  <option value="monthly">每月</option>
+                  <option value="quarterly">每季度</option>
                   <option value="yearly">每年</option>
                   <option value="semiannual">每半年</option>
                 </select>
@@ -86,7 +90,7 @@
               <span>2</span>
               <div>
                 <h2>国债与消费池</h2>
-                <p>设置现金缓冲与逆回购期限</p>
+                <p>选择逆回购或国债 ETF，并设置现金缓冲</p>
               </div>
             </div>
             <label class="visually-hidden">
@@ -111,8 +115,9 @@
               </label>
             </div>
             <label>
-              逆回购期限
+              国债持有品种
               <select id="repoSymbol"></select>
+              <small id="treasuryFallbackHint" class="field-help"></small>
             </label>
             <div class="repo-weight">
               <span>当前国债目标</span>
@@ -256,6 +261,6 @@
         </section>
       </main>
     </div>
-    <script src="static/app.js?v=20260710-ui-rebuild-2"></script>
+    <script src="static/app.js?v=20260727-a100-1"></script>
   </body>
 </html>
