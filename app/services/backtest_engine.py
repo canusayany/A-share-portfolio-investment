@@ -18,7 +18,7 @@ from app.config import (
     normalize_config,
     repo_rate_symbol,
     required_fx_pairs_for_assets,
-    selected_bond_etf_asset,
+    selected_money_fund_asset,
     selected_repo_option,
     validate_config,
 )
@@ -46,7 +46,12 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 9
+BACKTEST_ENGINE_VERSION = 19
+RANKING_VERSION = 2
+RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
+RANKING_MIN_DRAWDOWN = 0.08
+RANKING_EXCESS_RETURN_CAP = 0.15
+RANKING_CALMAR_CAP = 1.5
 
 
 @dataclass
@@ -134,13 +139,69 @@ def load_price_map(conn, symbols: list[str], start: str, end: str, field: str = 
     for symbol in symbols:
         rows = conn.execute(
             f"""
-            SELECT trade_date, COALESCE({field}, close) AS price FROM prices
-            WHERE symbol=? AND trade_date BETWEEN ? AND ?
-            ORDER BY trade_date
+            SELECT prices.trade_date, COALESCE(prices.{field}, prices.close) AS price,
+                   adj_factors.adj_factor
+            FROM prices
+            LEFT JOIN adj_factors
+              ON adj_factors.symbol=prices.symbol AND adj_factors.trade_date=prices.trade_date
+            WHERE prices.symbol=? AND prices.trade_date BETWEEN ? AND ?
+            ORDER BY prices.trade_date
             """,
             (symbol, start, end),
         ).fetchall()
-        result[symbol] = {row["trade_date"]: float(row["price"]) for row in rows}
+        result[symbol] = adjusted_price_series(rows)
+    return result
+
+
+def adjusted_price_series(rows: list[Any]) -> dict[str, float]:
+    """Convert raw ETF prices to a continuous share-price series only at verified splits.
+
+    Tushare's ``fund_adj`` factor changes for both cash distributions and ETF share
+    consolidations. Cash distributions are already represented in ``fund_dividends``
+    and must not be adjusted here. A factor change is therefore applied only when
+    it makes the raw close continuous across the event; this is the signature of a
+    share split/consolidation, such as 512100's 2022-09 consolidation. Fund
+    adjustment factors can be published one or two market days after the price
+    change, so an otherwise-unexplained large jump may use a near-future factor
+    when that factor restores price continuity. CN ETF raw prices are explicitly
+    kept out of Yahoo's adjusted-price feed before this function is called.
+    """
+    result: dict[str, float] = {}
+    previous_price: float | None = None
+    previous_factor: float | None = None
+    cumulative_split_scale = 1.0
+    for index, row in enumerate(rows):
+        price = float(row["price"])
+        factor = row["adj_factor"]
+        factor = float(factor) if factor not in (None, 0) else None
+        normalized_price = price * cumulative_split_scale
+        if previous_price is not None and previous_factor:
+            raw_jump = abs(normalized_price / previous_price - 1.0)
+            split_ratio: float | None = None
+            if factor:
+                factor_ratio = factor / previous_factor
+                adjusted_price = normalized_price * factor_ratio
+                adjusted_jump = abs(adjusted_price / previous_price - 1.0)
+                if raw_jump >= 0.25 and adjusted_jump <= 0.08:
+                    split_ratio = factor_ratio
+            if split_ratio is None and raw_jump >= 0.25:
+                for future_row in rows[index + 1 : index + 4]:
+                    future_factor = future_row["adj_factor"]
+                    future_factor = float(future_factor) if future_factor not in (None, 0) else None
+                    if not future_factor:
+                        continue
+                    factor_ratio = future_factor / previous_factor
+                    adjusted_price = normalized_price * factor_ratio
+                    if abs(factor_ratio - 1.0) >= 0.05 and abs(adjusted_price / previous_price - 1.0) <= 0.08:
+                        split_ratio = factor_ratio
+                        break
+            if split_ratio is not None:
+                cumulative_split_scale *= split_ratio
+                normalized_price *= split_ratio
+        result[str(row["trade_date"])] = normalized_price
+        previous_price = normalized_price
+        if factor:
+            previous_factor = factor
     return result
 
 
@@ -281,6 +342,12 @@ def position_value_cny(position: Position, price: float, fx_rates: dict[str, flo
 
 
 def position_lot_size(position: Position, fees: dict[str, Any]) -> int:
+    # ChinaBond series are return indices used as a valuation benchmark, rather
+    # than exchange-traded ETFs.  Model them as fractional index units so a
+    # small portfolio can receive the stated index exposure without inventing
+    # an exchange lot-size constraint.
+    if position.asset_type == "cn_bond_index":
+        return 1
     if position.currency == "HKD" or position.asset_type == "hk_connect_etf":
         return max(int(float(fees["hk_connect_etf"].get("lot_size", 100.0))), 1)
     if position.currency == "CNY":
@@ -367,14 +434,14 @@ def effective_weights(
             weights[asset["symbol"]] = weight
             total_risk += weight
         weights["REPO"] = max(1.0 - total_risk, 0.0)
-    bond_asset = selected_bond_etf_asset(config)
-    if bond_asset:
+    money_fund = selected_money_fund_asset(config)
+    if money_fund:
         repo_weight = weights.pop("REPO", 0.0)
-        trade_start = parse_date(bond_asset.get("trade_start_date") or bond_asset.get("inception_date"))
-        bond_symbol = bond_asset["symbol"]
-        if day >= trade_start and latest_prices.get(bond_symbol) is not None:
+        fund_symbol = money_fund["symbol"]
+        trade_start = parse_date(money_fund.get("trade_start_date") or money_fund.get("inception_date"))
+        if day >= trade_start and latest_prices.get(fund_symbol) is not None:
             if repo_weight > 0:
-                weights[bond_symbol] = weights.get(bond_symbol, 0.0) + repo_weight
+                weights[fund_symbol] = weights.get(fund_symbol, 0.0) + repo_weight
         else:
             weights["REPO"] = repo_weight
     return weights
@@ -390,11 +457,29 @@ def exact_target_weights(targets: dict[str, float]) -> dict[str, float]:
 
 def should_rebalance(current_weights: dict[str, float], targets: dict[str, float], band: float) -> bool:
     keys = set(current_weights) | set(targets)
-    return any(abs(current_weights.get(key, 0.0) - targets.get(key, 0.0)) > band for key in keys)
+    for key in keys:
+        target = max(float(targets.get(key, 0.0)), 0.0)
+        current = max(float(current_weights.get(key, 0.0)), 0.0)
+        # A 25% band around a 10% target is 7.5%..12.5%.  A zero target has
+        # no relative tolerance: a removed asset must be fully unwound.
+        tolerance = target * max(float(band), 0.0) if target > 1e-10 else 1e-10
+        if abs(current - target) > tolerance + 1e-10:
+            return True
+    return False
 
 
 def has_investable_asset_target(targets: dict[str, float]) -> bool:
     return any(key != "REPO" and value > 1e-10 for key, value in targets.items())
+
+
+def dip_buy_assets(config: dict[str, Any], day: date, latest_prices: dict[str, float | None]) -> list[dict[str, Any]]:
+    """Return the tradable broad-index and gold ETF route for this date."""
+    return [
+        asset
+        for asset in active_assets(config, day, latest_prices)
+        if asset.get("exclusive_group") == "cn_broad_etf"
+        or str(asset.get("key") or "").startswith("cn_gold_etf")
+    ]
 
 
 def has_deferred_inception_target(config: dict[str, Any], day: date) -> bool:
@@ -420,8 +505,9 @@ def minimal_rebalance_weights(current_weights: dict[str, float], targets: dict[s
     desired: dict[str, float] = {}
     for key in keys:
         target = max(float(targets.get(key, 0.0)), 0.0)
-        lower[key] = max(target - band, 0.0)
-        upper[key] = min(target + band, 1.0)
+        tolerance = target * max(float(band), 0.0) if target > 1e-10 else 0.0
+        lower[key] = max(target - tolerance, 0.0)
+        upper[key] = min(target + tolerance, 1.0)
         desired[key] = min(max(float(current_weights.get(key, 0.0)), lower[key]), upper[key])
 
     residual = 1.0 - sum(desired.values())
@@ -479,6 +565,51 @@ def compute_metrics(
     return daily_returns, cumulative, drawdowns
 
 
+def yearly_return_counts(dates: list[str], daily_returns: list[float]) -> tuple[int, int]:
+    """Return positive and total complete calendar years from daily portfolio returns."""
+    yearly_nav: dict[str, float] = {}
+    year_dates: dict[str, list[str]] = {}
+    for trade_date, daily_return in zip(dates, daily_returns):
+        year = trade_date[:4]
+        yearly_nav[year] = yearly_nav.get(year, 1.0) * (1.0 + float(daily_return or 0.0))
+        year_dates.setdefault(year, []).append(trade_date)
+    complete = [
+        nav
+        for year, nav in yearly_nav.items()
+        if year_dates[year][0][5:7] == "01" and year_dates[year][-1][5:7] == "12"
+    ]
+    return sum(1 for nav in complete if nav > 1.0 + 1e-12), len(complete)
+
+
+def yearly_positive_return_count(dates: list[str], daily_returns: list[float]) -> int:
+    return yearly_return_counts(dates, daily_returns)[0]
+
+
+def ranking_metrics(
+    annualized_return: float,
+    repo_annualized_return: float,
+    max_drawdown: float,
+    positive_year_count: int,
+    complete_year_count: int,
+) -> dict[str, Any]:
+    """Return the capped 0-100 leaderboard score and its transparent components."""
+    excess_annualized_return = annualized_return - repo_annualized_return
+    adjusted_calmar = excess_annualized_return / max(abs(max_drawdown), RANKING_MIN_DRAWDOWN)
+    positive_year_ratio = positive_year_count / complete_year_count if complete_year_count else 0.0
+    excess_return_score = min(max(excess_annualized_return / RANKING_EXCESS_RETURN_CAP, 0.0), 1.0)
+    calmar_score = min(max(adjusted_calmar / RANKING_CALMAR_CAP, 0.0), 1.0)
+    score = 55.0 * excess_return_score + 30.0 * calmar_score + 15.0 * positive_year_ratio
+    return {
+        "ranking_version": RANKING_VERSION,
+        "repo_annualized_return": repo_annualized_return,
+        "excess_annualized_return": excess_annualized_return,
+        "adjusted_calmar": adjusted_calmar,
+        "positive_year_ratio": positive_year_ratio,
+        "ranking_eligible": excess_annualized_return >= RANKING_MIN_EXCESS_ANNUALIZED_RETURN,
+        "ranking_score": score,
+    }
+
+
 def benchmark_returns(benchmark_values: list[float | None]) -> list[float]:
     clean = [value for value in benchmark_values if value is not None]
     if not clean:
@@ -531,6 +662,9 @@ def _sell_position(
         net_hkd = max(gross_native - trade_fee_hkd, 0.0)
         cash_cny, fx_fee = hkd_to_cny(net_hkd, fx, hk_cfg)
         fee_cny = trade_fee_hkd * fx + fx_fee
+    elif pos.asset_type == "cn_bond_index":
+        fee_cny = 0.0
+        cash_cny = gross_native
     else:
         fee_cny = cn_etf_fee(gross_native, dict_to_dataclass(CnEtfFeeConfig, fees["cn_etf"]))
         cash_cny = max(gross_native - fee_cny, 0.0)
@@ -604,6 +738,14 @@ def _buy_position(
             trade_fee_hkd = hk_connect_etf_trade_fee(gross_native, hk_cfg) if qty else 0.0
             spent_cny, fx_fee = cny_cost_for_hkd(gross_native + trade_fee_hkd, fx, hk_cfg)
         fee_cny = trade_fee_hkd * fx + fx_fee
+    elif pos.asset_type == "cn_bond_index":
+        # The ChinaBond total-return level already incorporates the bond
+        # portfolio's coupon return.  It is not a listed ETF, so neither a
+        # 100-share board lot nor an ETF trading commission applies.
+        qty = budget_cny / price if price else 0.0
+        gross_native = qty * price
+        fee_cny = 0.0
+        spent_cny = gross_native
     else:
         lot_size = 100
         raw_qty = math.floor((budget_cny / price) / lot_size) * lot_size if price else 0
@@ -676,8 +818,12 @@ def _cover_cash_shortfall(
         return
     ranked = sorted(
         state.positions.values(),
-        key=lambda p: position_value_cny(p, latest_prices.get(p.symbol) or 0.0, fx_rates),
-        reverse=True,
+        # A money-fund selection is the cash pool.  It must be sold before any
+        # risk asset regardless of its smaller market value.
+        key=lambda p: (
+            0 if p.asset_type == "money_fund" else 1,
+            -position_value_cny(p, latest_prices.get(p.symbol) or 0.0, fx_rates),
+        ),
     )
     for pos in ranked:
         price = latest_prices.get(pos.symbol)
@@ -688,7 +834,7 @@ def _cover_cash_shortfall(
         if needed <= 0:
             break
         qty = min(pos.quantity, pos.quantity * min(1.0, needed / max(value, 1e-9) * 1.05))
-        if pos.currency in {"CNY", "HKD"}:
+        if pos.currency in {"CNY", "HKD"} and pos.asset_type != "cn_bond_index":
             lot_size = position_lot_size(pos, fees)
             qty = math.ceil(qty / lot_size) * lot_size
         _sell_position(state, pos, day, qty, price, fx_rates, fees, trades, "liquidity_shortfall")
@@ -726,7 +872,7 @@ def _rebalance_state_to_band(
         if diff < -1.0:
             sell_value = -diff
             qty = sell_value / (price * currency_to_cny_rate(pos.currency, fx_rates))
-            if pos.currency in {"CNY", "HKD"}:
+            if pos.currency in {"CNY", "HKD"} and pos.asset_type != "cn_bond_index":
                 lot_size = position_lot_size(pos, fees)
                 qty = math.floor(qty / lot_size) * lot_size
             prev_cash = state.cash_cny
@@ -829,13 +975,14 @@ def _invest_repo_cash(
     monthly_spend_days: set[date],
     monthly_spend_cny: float,
     rebalance_days_set: set[date] | None = None,
+    extra_reserve_cny: float = 0.0,
 ) -> None:
-    reserve_cny = _repo_spend_reserve(day, selected_tenor_days, monthly_spend_days, monthly_spend_cny)
+    reserve_cny = _repo_spend_reserve(day, selected_tenor_days, monthly_spend_days, monthly_spend_cny) + max(extra_reserve_cny, 0.0)
     maturity = add_business_days(day, selected_tenor_days)
     crosses_rebalance = any(day < rebalance_day <= maturity for rebalance_day in (rebalance_days_set or set()))
     rate_for_selected_tenor = None if crosses_rebalance else selected_repo_rate
     _invest_idle_cash_in_repo(state, day, rate_for_selected_tenor, fees, selected_tenor_days, reserve_cny)
-    overnight_reserve_cny = _next_spend_reserve(day, monthly_spend_days, monthly_spend_cny)
+    overnight_reserve_cny = _next_spend_reserve(day, monthly_spend_days, monthly_spend_cny) + max(extra_reserve_cny, 0.0)
     _invest_idle_cash_in_repo(state, day, one_day_repo_rate, fees, 1, overnight_reserve_cny)
 
 
@@ -844,6 +991,46 @@ def _mature_repo_lots(state: PortfolioState, day: date) -> None:
     state.repo_lots = [lot for lot in state.repo_lots if lot.maturity_date > day]
     for lot in matured:
         state.cash_cny += lot.principal + lot.interest - lot.fee
+
+
+def _execute_dip_buys(
+    state: PortfolioState,
+    orders: list[dict[str, Any]],
+    day: date,
+    open_prices: dict[str, float | None],
+    fx_rates: dict[str, float],
+    fees: dict[str, Any],
+    trades: list[dict[str, Any]],
+    allow_fractional_us_shares: bool,
+) -> list[dict[str, Any]]:
+    """Execute queued orders with cash available at this open only.
+
+    Repo lots are not sold here. The caller matures lots before execution, so
+    1-day reverse repo proceeds that mature today are usable while longer lots
+    remain unavailable.
+    """
+    executed: list[dict[str, Any]] = []
+    for order in orders:
+        symbol = str(order["symbol"])
+        position = state.positions.get(symbol)
+        price = open_prices.get(symbol)
+        if not position or price is None or price <= 0 or state.cash_cny <= 0:
+            continue
+        spent = _buy_position(
+            state,
+            position,
+            day,
+            min(float(order["budget_cny"]), state.cash_cny),
+            float(price),
+            fx_rates,
+            fees,
+            trades,
+            allow_fractional_us_shares,
+            "dip_buy",
+        )
+        if spent > 0:
+            executed.append({**order, "spent_cny": spent, "execution_date": day.isoformat()})
+    return executed
 
 
 def _apply_dividend_events(
@@ -1133,7 +1320,11 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     fx_maps = load_fx_maps(conn, needed_fx_pairs, start, end)
     repo_map = load_repo_map(conn, repo_symbol, start, end)
     one_day_repo_map = load_repo_map(conn, "204001", start, end)
-    ex_events, pay_events = load_dividend_events(conn, symbols, start, end)
+    # 511990's exchange price includes its daily holding-period income.  Old
+    # databases may contain rows from the generic dividend synchronizer; never
+    # add those to the already total-return market price.
+    dividend_symbols = [asset["symbol"] for asset in sim_assets if asset.get("asset_type") != "money_fund"]
+    ex_events, pay_events = load_dividend_events(conn, dividend_symbols, start, end)
     days = reference_trading_days(start, end, price_maps.get(benchmark_symbol, {}), repo_map)
     logger.info(
         "run_backtest data loaded days=%d price_rows=%d fx_rows=%d repo_rows=%d one_day_repo_rows=%d dividend_events=%d seconds=%.3f",
@@ -1162,6 +1353,8 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     daily_total_assets: list[float] = []
     daily_flows: list[float] = []
     benchmark_values: list[float | None] = []
+    repo_benchmark_nav = 1.0
+    repo_benchmark_values: list[float] = []
 
     monthly_spend_days = first_business_day_by_month(days)
     reb_days = rebalance_days(days, config["rebalance_frequency"])
@@ -1179,10 +1372,13 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     performance_symbols = [asset["symbol"] for asset in sim_assets] + ["REPO"]
     period_external_flows: dict[str, float] = {"REPO": 0.0}
     initial_rebalance_done = False
-    bond_etf = selected_bond_etf_asset(config)
+    money_fund = selected_money_fund_asset(config)
     previous_treasury_target = "REPO"
     previous_fee_day: date | None = None
     pending_rebalance: dict[str, Any] | None = None
+    pending_dip_buys: list[dict[str, Any]] = []
+    dip_local_peaks: dict[str, float] = {}
+    dip_buy_execution_count = 0
     year_nav = 1.0
     year_peak_nav = 1.0
     year_max_drawdown = 0.0
@@ -1213,14 +1409,16 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         if any(value is None for value in latest_fx_rates.values()):
             continue
         fx_rates = {pair: float(value) for pair, value in latest_fx_rates.items() if value is not None}
+        if latest_repo_rate is not None:
+            repo_benchmark_nav *= 1.0 + (latest_repo_rate / 100.0) * repo_actual_days(day, 1) / 365.0
 
         _mature_repo_lots(state, day)
         _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
+        open_prices = {
+            symbol: latest_open_prices.get(symbol) if latest_open_prices.get(symbol) is not None else latest_prices.get(symbol)
+            for symbol in latest_prices
+        }
         if pending_rebalance and pending_rebalance.get("execution_date") == day_str:
-            open_prices = {
-                symbol: latest_open_prices.get(symbol) if latest_open_prices.get(symbol) is not None else latest_prices.get(symbol)
-                for symbol in latest_prices
-            }
             before_open_total, before_open_values = _portfolio_value(state, open_prices, fx_rates, day)
             open_weights = {key: (value / before_open_total if before_open_total else 0.0) for key, value in before_open_values.items()}
             rebalance_needed = bool(pending_rebalance["rebalance_needed"])
@@ -1272,6 +1470,21 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             previous_rebalance_values = after_values
             initial_rebalance_done = True
             pending_rebalance = None
+        due_dip_buys = [order for order in pending_dip_buys if order["execution_date"] == day_str]
+        pending_dip_buys = [order for order in pending_dip_buys if order["execution_date"] != day_str]
+        if due_dip_buys:
+            dip_buy_execution_count += len(
+                _execute_dip_buys(
+                    state,
+                    due_dip_buys,
+                    day,
+                    open_prices,
+                    fx_rates,
+                    config["fees"],
+                    trades,
+                    bool(config.get("allow_fractional_us_shares", True)),
+                )
+            )
         fee_days = max((day - previous_fee_day).days, 1) if previous_fee_day else 1
         _apply_hk_connect_portfolio_fee(state, latest_prices, fx_rates, config["fees"], fee_days)
         previous_fee_day = day
@@ -1289,10 +1502,8 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
 
         before_total, before_values = _portfolio_value(state, latest_prices, fx_rates, day)
         targets = effective_weights(config, day, latest_prices, before_total)
-        treasury_target = bond_etf["symbol"] if bond_etf and targets.get(bond_etf["symbol"], 0.0) > 0 else "REPO"
-        treasury_became_available = bool(
-            bond_etf and previous_treasury_target == "REPO" and treasury_target == bond_etf["symbol"]
-        )
+        treasury_target = money_fund["symbol"] if money_fund and targets.get(money_fund["symbol"], 0.0) > 0 else "REPO"
+        treasury_became_available = bool(money_fund and previous_treasury_target == "REPO" and treasury_target == money_fund["symbol"])
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
         is_rebalance_day = not initial_rebalance_done or treasury_became_available
         should_record_rebalance = is_rebalance_day and has_investable_asset_target(targets)
@@ -1371,6 +1582,39 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             initial_rebalance_done = True
         previous_treasury_target = treasury_target
 
+        next_day = days[idx + 1] if idx + 1 < len(days) else None
+        dip_buy_reserve_cny = 0.0
+        if config.get("dip_buy_enabled") and next_day is not None:
+            drawdown_trigger = float(config.get("dip_buy_drawdown", 0.05))
+            cash_ratio = float(config.get("dip_buy_cash_ratio", 0.05))
+            for asset in dip_buy_assets(config, day, latest_prices):
+                symbol = asset["symbol"]
+                close = latest_prices.get(symbol)
+                if close is None or close <= 0:
+                    continue
+                local_peak = max(dip_local_peaks.get(symbol, float(close)), float(close))
+                dip_local_peaks[symbol] = local_peak
+                if state.cash_cny <= 0 or close > local_peak * (1.0 - drawdown_trigger):
+                    continue
+                budget_cny = state.cash_cny * cash_ratio
+                if budget_cny <= 0:
+                    continue
+                pending_dip_buys.append(
+                    {
+                        "symbol": symbol,
+                        "decision_date": day_str,
+                        "execution_date": next_day.isoformat(),
+                        "local_peak_price": local_peak,
+                        "trigger_close_price": float(close),
+                        "drawdown": float(close) / local_peak - 1.0,
+                        "budget_cny": budget_cny,
+                    }
+                )
+                # One continuous decline creates one order. Another order needs
+                # a new local peak and then another 5% retracement.
+                dip_local_peaks[symbol] = float(close)
+                dip_buy_reserve_cny += budget_cny
+
         _invest_repo_cash(
             state,
             day,
@@ -1381,12 +1625,14 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             monthly_spend_days,
             float(config["monthly_spend_cny"]),
             reb_days,
+            dip_buy_reserve_cny,
         )
 
         total, values = _portfolio_value(state, latest_prices, fx_rates, day)
         daily_total_assets.append(total)
         daily_flows.append(flow)
         benchmark_values.append(latest_prices.get(benchmark_symbol))
+        repo_benchmark_values.append(repo_benchmark_nav)
 
         if current_year != day.year:
             current_year = day.year
@@ -1413,7 +1659,6 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             year_drawdown = year_nav / year_peak_nav - 1.0 if year_peak_nav else 0.0
             year_max_drawdown = min(year_max_drawdown, year_drawdown)
 
-        next_day = days[idx + 1] if idx + 1 < len(days) else None
         should_schedule_next_open = (
             next_day is not None
             and next_day in reb_days
@@ -1469,13 +1714,18 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
             "cash_cny": state.cash_cny,
             "dividend_receivable_cny": state.dividend_receivable_cny,
             "treasury_instrument": config.get("repo_symbol", "204001"),
-            "treasury_fallback_active": bool(bond_etf and targets.get("REPO", 0.0) > 0),
+            "treasury_fallback_active": bool(money_fund and targets.get("REPO", 0.0) > 0),
             "values": values,
             "weights": {key: value / total if total else 0.0 for key, value in values.items()},
             "targets": targets,
             "unrealized_pnl_cny": unrealized,
             "benchmark_value": latest_prices.get(benchmark_symbol),
             "repo_lots": len(state.repo_lots),
+            "dip_buy": {
+                "enabled": bool(config.get("dip_buy_enabled")),
+                "pending_count": len(pending_dip_buys),
+                "execution_count": dip_buy_execution_count,
+            },
         }
         daily_payloads.append(payload)
         daily_rows.append(
@@ -1533,6 +1783,20 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     total_return = cumulative_returns[-1]
     years = max((parse_date(daily_rows[-1]["trade_date"]) - parse_date(daily_rows[0]["trade_date"])).days / 365.25, 1 / 365.25)
     annualized = (1.0 + total_return) ** (1.0 / years) - 1.0
+    repo_total_return = repo_benchmark_values[-1] / repo_benchmark_values[0] - 1.0
+    repo_annualized_return = (1.0 + repo_total_return) ** (1.0 / years) - 1.0
+    positive_year_count, complete_year_count = yearly_return_counts(
+        [row["trade_date"] for row in daily_rows],
+        daily_returns,
+    )
+    max_drawdown = min(drawdowns)
+    ranking = ranking_metrics(
+        annualized,
+        repo_annualized_return,
+        max_drawdown,
+        positive_year_count,
+        complete_year_count,
+    )
     returns_np = np.array(daily_returns or [0.0], dtype=float)
     volatility = float(np.std(returns_np) * math.sqrt(252))
 
@@ -1550,13 +1814,17 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         "final_asset_cny": daily_total_assets[-1],
         "total_return": total_return,
         "annualized_return": annualized,
-        "max_drawdown": min(drawdowns),
+        "max_drawdown": max_drawdown,
+        "positive_year_count": positive_year_count,
+        "complete_year_count": complete_year_count,
+        **ranking,
         "volatility": volatility,
         "total_fees_cny": state.total_fees_cny,
         "total_spend_cny": state.total_spend_cny,
         "withheld_tax_cny": state.total_withheld_tax_cny,
         "total_dividend_cny": state.total_dividend_cny,
         "trade_count": len(trades),
+        "dip_buy_count": dip_buy_execution_count,
         "rebalance_count": len(rebalance_rows),
         "final_unrealized_pnl_cny": sum(final_payload.get("unrealized_pnl_cny", {}).values()),
         "comparison_final_asset_cny": final_payload.get("comparison", {}).get("total_asset_cny"),

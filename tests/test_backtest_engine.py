@@ -13,12 +13,15 @@ from app.services.backtest_engine import (
     _apply_dividend_events,
     _asset_period_performance,
     _buy_position,
+    _cover_cash_shortfall,
+    _sell_position,
     _invest_idle_cash_in_repo,
     _invest_repo_cash,
     _mature_repo_lots,
     _portfolio_value,
     _repo_spend_reserve,
     benchmark_returns,
+    adjusted_price_series,
     comparison_assets,
     compute_metrics,
     effective_weights,
@@ -26,14 +29,33 @@ from app.services.backtest_engine import (
     repo_tenor_days,
     repo_fixed_target_weight,
     reference_trading_days,
+    ranking_metrics,
     run_backtest,
     has_investable_asset_target,
     should_rebalance,
+    yearly_positive_return_count,
 )
 from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
 class BacktestEngineTests(unittest.TestCase):
+    def test_verified_etf_share_consolidation_is_continuous_but_cash_dividend_is_not_adjusted(self) -> None:
+        rows = [
+            {"trade_date": "2022-09-01", "price": 0.982, "adj_factor": 1.0},
+            {"trade_date": "2022-09-02", "price": 2.686, "adj_factor": 1.0},
+            {"trade_date": "2022-09-05", "price": 2.713, "adj_factor": 0.3622},
+            {"trade_date": "2022-09-06", "price": 2.720, "adj_factor": 0.3622},
+            {"trade_date": "2023-06-01", "price": 2.600, "adj_factor": 0.3622},
+            {"trade_date": "2023-06-02", "price": 2.540, "adj_factor": 0.3580},
+        ]
+
+        prices = adjusted_price_series(rows)
+
+        self.assertAlmostEqual(prices["2022-09-05"], 0.98265, places=4)
+        self.assertAlmostEqual(prices["2022-09-02"], 2.686 * 0.3622, places=6)
+        self.assertAlmostEqual(prices["2022-09-06"], 0.98518, places=4)
+        self.assertAlmostEqual(prices["2023-06-02"], 2.540 * 0.3622, places=6)
+
     def test_run_backtest_generates_summary_series_trades_and_rebalances(self) -> None:
         db_path, cfg = build_synced_db()
         with db_session(db_path) as conn:
@@ -99,6 +121,38 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertAlmostEqual(weights["VOO"], 0.24)
         self.assertAlmostEqual(weights["512890.SH"], 0.096)
         self.assertAlmostEqual(sum(weights.values()), 1.0)
+
+    def test_dip_buy_uses_local_peak_and_next_day_available_repo_cash(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        cfg["dip_buy_enabled"] = True
+        cfg["monthly_spend_cny"] = 0.0
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE prices SET open=9.9, high=9.9, low=9.9, close=9.9 WHERE symbol='510500.SH'")
+            for trade_date, price in (("2020-01-01", 10.0), ("2020-01-02", 10.5), ("2020-01-03", 9.9)):
+                conn.execute(
+                    "UPDATE prices SET open=?, high=?, low=?, close=? WHERE symbol='510500.SH' AND trade_date=?",
+                    (price, price, price, price, trade_date),
+                )
+            result = run_backtest(conn, cfg)
+            dip_trades = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date, reason, gross_amount FROM trades WHERE run_id=? AND reason='dip_buy' ORDER BY trade_date",
+                    (result["run_id"],),
+                )
+            )
+            prior_day = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-02'",
+                (result["run_id"],),
+            ).fetchone()
+
+        self.assertEqual(result["summary"]["dip_buy_count"], 1)
+        self.assertEqual(len(dip_trades), 1)
+        self.assertEqual(dip_trades[0]["trade_date"], "2020-01-06")
+        self.assertGreater(dip_trades[0]["gross_amount"], 0)
+        self.assertGreater(json.loads(prior_day["payload_json"])["repo_lots"], 0)
 
     def test_fixed_bucket_mode_runs_backtest_with_fixed_repo_rebalance_target(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
@@ -435,6 +489,20 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertGreater(cumulative[-1], 0)
         self.assertLessEqual(min(drawdowns), 0)
 
+    def test_ranking_counts_only_complete_positive_calendar_years(self) -> None:
+        dates = ["2020-01-02", "2020-12-31", "2021-01-04", "2021-12-31", "2022-01-04"]
+        self.assertEqual(yearly_positive_return_count(dates, [0.1, 0.1, -0.2, -0.1, 0.9]), 1)
+        ranking = ranking_metrics(0.12, 0.03, -0.18, 3, 4)
+        self.assertAlmostEqual(ranking["excess_annualized_return"], 0.09)
+        self.assertAlmostEqual(ranking["adjusted_calmar"], 0.5)
+        self.assertAlmostEqual(ranking["positive_year_ratio"], 0.75)
+        self.assertTrue(ranking["ranking_eligible"])
+
+    def test_ranking_rejects_repo_like_return_and_caps_tiny_drawdown(self) -> None:
+        ranking = ranking_metrics(0.031, 0.03, -0.001, 0, 0)
+        self.assertFalse(ranking["ranking_eligible"])
+        self.assertAlmostEqual(ranking["adjusted_calmar"], 0.0125)
+
     def test_metrics_include_first_day_trading_cost(self) -> None:
         daily, cumulative, drawdowns = compute_metrics([990.0], [0.0], [1.0], initial_value=1000.0)
         self.assertAlmostEqual(daily[0], -0.01)
@@ -443,8 +511,18 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_minimal_rebalance_moves_only_to_band_edge(self) -> None:
         desired = minimal_rebalance_weights({"A": 0.60, "REPO": 0.40}, {"A": 0.50, "REPO": 0.50}, 0.02)
-        self.assertAlmostEqual(desired["A"], 0.52)
-        self.assertAlmostEqual(desired["REPO"], 0.48)
+        self.assertAlmostEqual(desired["A"], 0.51)
+        self.assertAlmostEqual(desired["REPO"], 0.49)
+
+    def test_relative_rebalance_band_scales_with_target_weight(self) -> None:
+        targets = {"BOND": 0.10, "REPO": 0.90}
+        self.assertFalse(should_rebalance({"BOND": 0.075, "REPO": 0.925}, targets, 0.25))
+        self.assertFalse(should_rebalance({"BOND": 0.125, "REPO": 0.875}, targets, 0.25))
+        self.assertTrue(should_rebalance({"BOND": 0.0749, "REPO": 0.9251}, targets, 0.25))
+        self.assertTrue(should_rebalance({"BOND": 0.1251, "REPO": 0.8749}, targets, 0.25))
+        desired = minimal_rebalance_weights({"BOND": 0.20, "REPO": 0.80}, targets, 0.25)
+        self.assertAlmostEqual(desired["BOND"], 0.125)
+        self.assertAlmostEqual(desired["REPO"], 0.875)
 
     def test_asset_performance_excludes_monthly_spend_flow(self) -> None:
         performance = _asset_period_performance(
@@ -572,7 +650,7 @@ class BacktestEngineTests(unittest.TestCase):
     def test_benchmark_forward_fill_and_rebalance_band(self) -> None:
         self.assertAlmostEqual(benchmark_returns([None, 100, None, 110])[-1], 0.1)
         self.assertFalse(should_rebalance({"A": 0.51, "REPO": 0.49}, {"A": 0.50, "REPO": 0.50}, 0.02))
-        self.assertTrue(should_rebalance({"A": 0.55, "REPO": 0.45}, {"A": 0.50, "REPO": 0.50}, 0.02))
+        self.assertTrue(should_rebalance({"A": 0.52, "REPO": 0.48}, {"A": 0.50, "REPO": 0.50}, 0.02))
 
     def test_reference_trading_days_exclude_weekday_market_holidays(self) -> None:
         days = reference_trading_days(
@@ -627,6 +705,28 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertAlmostEqual(after["159631.SZ"], 0.50)
         self.assertNotIn("000903.SH", after)
 
+    def test_new_broad_etfs_use_their_index_proxy_before_inception(self) -> None:
+        for symbol, proxy_symbol, before_day, switch_day in (
+            ("510500.SH", "000905.SH", date(2013, 1, 4), date(2013, 3, 15)),
+            ("512100.SH", "000852.SH", date(2016, 10, 31), date(2016, 11, 4)),
+        ):
+            cfg = normalize_config({"start_date": before_day.isoformat()})
+            for asset in cfg["assets"]:
+                selected = asset["symbol"] == symbol
+                asset["enabled"] = selected
+                asset["target_weight"] = 0.50 if selected else 0.0
+
+            prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
+            prices.update({symbol: None, proxy_symbol: 1000.0})
+            before = effective_weights(cfg, before_day, prices)
+            prices[symbol] = 1.2
+            after = effective_weights(cfg, switch_day, prices)
+
+            self.assertAlmostEqual(before[proxy_symbol], 0.50)
+            self.assertNotIn(symbol, before)
+            self.assertAlmostEqual(after[symbol], 0.50)
+            self.assertNotIn(proxy_symbol, after)
+
     def test_gold_switches_from_518880_to_518850_from_2021(self) -> None:
         cfg = normalize_config({})
         prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
@@ -676,30 +776,59 @@ class BacktestEngineTests(unittest.TestCase):
         )
         self.assertGreater(result["summary"]["total_dividend_cny"], 0.0)
 
-    def test_bond_etf_target_falls_back_to_repo_until_trade_start_and_price(self) -> None:
-        for symbol, before, trade_start in (
-            ("511010.SH", date(2013, 3, 22), date(2013, 3, 25)),
-            ("511260.SH", date(2017, 8, 23), date(2017, 8, 24)),
-            ("511090.SH", date(2023, 6, 12), date(2023, 6, 13)),
-        ):
-            cfg = normalize_config({"repo_symbol": symbol})
-            prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
-            prices[symbol] = 100.0
-            fallback = effective_weights(cfg, before, prices)
-            available = effective_weights(cfg, trade_start, prices)
-            missing_price = effective_weights(cfg, trade_start, {**prices, symbol: None})
-            self.assertGreater(fallback.get("REPO", 0.0), 0)
-            self.assertNotIn(symbol, fallback)
-            self.assertGreater(available.get(symbol, 0.0), 0)
-            self.assertNotIn("REPO", available)
-            self.assertGreater(missing_price.get("REPO", 0.0), 0)
+    def test_money_fund_target_falls_back_to_repo_until_trade_start_and_price(self) -> None:
+        cfg = normalize_config({"repo_symbol": "511990.SH"})
+        prices = {asset["symbol"]: 1.0 for asset in cfg["assets"]}
+        prices["511990.SH"] = 100.0
+        fallback = effective_weights(cfg, date(2013, 1, 25), prices)
+        available = effective_weights(cfg, date(2013, 1, 28), prices)
+        missing_price = effective_weights(cfg, date(2013, 1, 28), {**prices, "511990.SH": None})
+        self.assertGreater(fallback.get("REPO", 0.0), 0)
+        self.assertNotIn("511990.SH", fallback)
+        self.assertGreater(available.get("511990.SH", 0.0), 0)
+        self.assertNotIn("REPO", available)
+        self.assertGreater(missing_price.get("REPO", 0.0), 0)
 
-    def test_bond_etf_backtest_rolls_one_day_repo_until_first_tradable_day(self) -> None:
+    def test_treasury_index_weights_are_combinable(self) -> None:
+        cfg = normalize_config({})
+        cfg["assets"] = [
+            {**asset, "enabled": asset.get("asset_type") == "cn_bond_index", "target_weight": 0.1 if asset.get("asset_type") == "cn_bond_index" else 0.0}
+            for asset in cfg["assets"]
+        ]
+        prices = {asset["symbol"]: 100.0 for asset in cfg["assets"]}
+        weights = effective_weights(cfg, date(2020, 1, 2), prices)
+        self.assertAlmostEqual(weights["CBA03101"], 0.1)
+        self.assertAlmostEqual(weights["CBA06501"], 0.1)
+        self.assertAlmostEqual(weights["CBA21801"], 0.1)
+        self.assertAlmostEqual(weights["REPO"], 0.7)
+
+    def test_treasury_index_uses_fractional_fee_free_return_units(self) -> None:
+        cfg = normalize_config({})
+        state = PortfolioState(cash_cny=2000.0)
+        position = Position("CBA21801", "CN", "CNY", "cn_bond_index")
+        trades: list[dict] = []
+
+        spent = _buy_position(
+            state, position, date(2020, 1, 2), 1234.56, 100.0, {}, cfg["fees"], trades, False, "rebalance"
+        )
+
+        self.assertAlmostEqual(spent, 1234.56)
+        self.assertAlmostEqual(position.quantity, 12.3456)
+        self.assertEqual(trades[-1]["fee"], 0.0)
+        self.assertEqual(state.total_fees_cny, 0.0)
+        proceeds = _sell_position(
+            state, position, date(2020, 1, 3), 12.3456, 101.0, {}, cfg["fees"], trades, "rebalance"
+        )
+        self.assertAlmostEqual(proceeds, 1246.9056)
+        self.assertEqual(trades[-1]["fee"], 0.0)
+        self.assertAlmostEqual(position.quantity, 0.0)
+
+    def test_money_fund_backtest_rolls_one_day_repo_until_first_tradable_day(self) -> None:
         cfg = normalize_config(
             {
-                "start_date": "2013-03-20",
-                "end_date": "2013-04-05",
-                "repo_symbol": "511010.SH",
+                "start_date": "2013-01-21",
+                "end_date": "2013-02-15",
+                "repo_symbol": "511990.SH",
                 "monthly_spend_cny": 0,
             }
         )
@@ -715,12 +844,43 @@ class BacktestEngineTests(unittest.TestCase):
             trades = rows_to_dicts(
                 conn.execute("SELECT trade_date,symbol,side FROM trades WHERE run_id=? ORDER BY trade_date", (result["run_id"],))
             )
-        before_listing = [json.loads(row["payload_json"]) for row in daily if row["trade_date"] < "2013-03-25"]
+        before_listing = [json.loads(row["payload_json"]) for row in daily if row["trade_date"] < "2013-01-28"]
         self.assertTrue(before_listing)
         self.assertTrue(all(payload["treasury_fallback_active"] for payload in before_listing))
-        bond_buys = [trade for trade in trades if trade["symbol"] == "511010.SH" and trade["side"] == "BUY"]
-        self.assertTrue(bond_buys)
-        self.assertGreaterEqual(bond_buys[0]["trade_date"], "2013-03-25")
+        money_fund_buys = [trade for trade in trades if trade["symbol"] == "511990.SH" and trade["side"] == "BUY"]
+        self.assertTrue(money_fund_buys)
+        self.assertGreaterEqual(money_fund_buys[0]["trade_date"], "2013-01-28")
+
+    def test_cash_shortfall_sells_money_fund_before_risk_assets(self) -> None:
+        cfg = normalize_config({})
+        state = PortfolioState(
+            cash_cny=0.0,
+            positions={
+                "510300.SH": Position("510300.SH", "CN", "CNY", "cn_etf", quantity=10_000, cost_basis_cny=10_000),
+                "511990.SH": Position("511990.SH", "CN", "CNY", "money_fund", quantity=100, cost_basis_cny=10_000),
+            },
+        )
+        trades: list[dict] = []
+        _cover_cash_shortfall(state, 5_000.0, date(2020, 1, 2), {"510300.SH": 1.0, "511990.SH": 100.0}, {}, cfg["fees"], trades)
+
+        self.assertTrue(trades)
+        self.assertEqual(trades[0]["symbol"], "511990.SH")
+        self.assertEqual(trades[0]["side"], "SELL")
+        self.assertEqual(state.positions["510300.SH"].quantity, 10_000)
+
+    def test_money_fund_total_return_price_ignores_legacy_cash_dividend_rows(self) -> None:
+        cfg = normalize_config({"start_date": "2020-01-01", "end_date": "2020-01-10", "monthly_spend_cny": 0, "repo_symbol": "511990.SH"})
+        cfg["assets"] = [{**asset, "enabled": False, "target_weight": 0.0} for asset in cfg["assets"]]
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
+            conn.execute(
+                "INSERT INTO fund_dividends(symbol,ann_date,record_date,ex_date,pay_date,div_cash,currency,source) VALUES(?,?,?,?,?,?,?,?)",
+                ("511990.SH", "2020-01-02", "2020-01-02", "2020-01-02", "2020-01-02", 1.0, "CNY", "legacy:test"),
+            )
+            result = run_backtest(conn, cfg)
+        self.assertEqual(result["summary"]["total_dividend_cny"], 0.0)
 
 
 if __name__ == "__main__":

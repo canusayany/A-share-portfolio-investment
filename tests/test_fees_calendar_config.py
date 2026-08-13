@@ -12,7 +12,7 @@ from app.config import (
     load_dotenv_if_present,
     normalize_config,
     repo_rate_symbol,
-    selected_bond_etf_asset,
+    selected_money_fund_asset,
     validate_config,
 )
 from app.services.calendar import business_days, first_business_day_by_month, rebalance_days, repo_actual_days
@@ -128,6 +128,19 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(a100["price_fallback"]["symbol"], "000903.SH")
         self.assertEqual(a100["price_fallback"]["start_date"], "2005-12-30")
         self.assertEqual(a100["price_fallback"]["scale_mode"], "splice")
+        self.assertFalse(a100["price_fallback"]["required"])
+        for symbol, fallback_symbol, inception, trade_start in (
+            ("510500.SH", "000905.SH", "2013-02-06", "2013-03-15"),
+            ("512100.SH", "000852.SH", "2016-09-29", "2016-11-04"),
+        ):
+            asset = next(item for item in cfg["assets"] if item["symbol"] == symbol)
+            self.assertFalse(asset["enabled"])
+            self.assertEqual(asset["exclusive_group"], "cn_broad_etf")
+            self.assertEqual(asset["inception_date"], inception)
+            self.assertEqual(asset["trade_start_date"], trade_start)
+            self.assertEqual(asset["price_fallback"]["kind"], "index")
+            self.assertEqual(asset["price_fallback"]["symbol"], fallback_symbol)
+            self.assertEqual(asset["price_fallback"]["start_date"], "2004-12-31")
         self.assertEqual(cfg["fees"]["tax"]["us_dividend_withholding_rate"], 0.30)
         self.assertEqual(cfg["fees"]["hk_connect_etf"]["stock_settlement_fee_rate"], 0.000042)
         self.assertEqual(validate_config(cfg), [])
@@ -146,20 +159,56 @@ class CalendarAndConfigTests(unittest.TestCase):
         next(asset for asset in duplicate_broad["assets"] if asset["symbol"] == "159631.SZ")["enabled"] = True
         self.assertTrue(any("exclusive asset group cn_broad_etf" in item for item in validate_config(duplicate_broad)))
 
-    def test_bond_etf_selection_uses_one_day_repo_as_rate_fallback(self) -> None:
-        for symbol, inception, trade_start in (
-            ("511010.SH", "2013-03-05", "2013-03-25"),
-            ("511260.SH", "2017-08-04", "2017-08-24"),
-            ("511090.SH", "2023-05-19", "2023-06-13"),
-        ):
-            cfg = normalize_config({"repo_symbol": symbol})
-            bond_asset = selected_bond_etf_asset(cfg)
-            self.assertIsNotNone(bond_asset)
-            self.assertEqual(bond_asset["inception_date"], inception)
-            self.assertEqual(bond_asset["trade_start_date"], trade_start)
-            self.assertEqual(repo_rate_symbol(cfg), "204001")
-            self.assertIn(symbol, {asset["symbol"] for asset in backtest_assets(cfg)})
-            self.assertEqual(validate_config(cfg), [])
+    def test_blank_date_inputs_keep_default_dates(self) -> None:
+        defaults = default_config()
+        cfg = normalize_config({"start_date": "", "end_date": ""})
+
+        self.assertEqual(cfg["start_date"], defaults["start_date"])
+        self.assertEqual(cfg["end_date"], defaults["end_date"])
+
+    def test_asset_selection_does_not_allow_stale_client_metadata_to_override_server_rules(self) -> None:
+        stale_gold = next(asset for asset in default_config()["assets"] if asset["symbol"] == "518880.SH")
+        stale_gold["enabled"] = False
+        stale_gold["target_weight"] = 0.25
+        stale_gold["price_fallback"].pop("required")
+        stale_gold.pop("replacement_assets")
+
+        cfg = normalize_config({"assets": [stale_gold]})
+        gold = next(asset for asset in cfg["assets"] if asset["symbol"] == "518880.SH")
+
+        self.assertFalse(gold["enabled"])
+        self.assertEqual(gold["target_weight"], 0.25)
+        self.assertFalse(gold["price_fallback"]["required"])
+        self.assertTrue(gold["replacement_assets"])
+        self.assertEqual(validate_config(cfg), [])
+
+    def test_money_fund_selection_uses_one_day_repo_as_rate_fallback(self) -> None:
+        cfg = normalize_config({"repo_symbol": "511990.SH"})
+        money_fund = selected_money_fund_asset(cfg)
+        self.assertIsNotNone(money_fund)
+        self.assertEqual(money_fund["inception_date"], "2012-12-27")
+        self.assertEqual(money_fund["trade_start_date"], "2013-01-28")
+        self.assertEqual(money_fund["asset_type"], "money_fund")
+        self.assertEqual(repo_rate_symbol(cfg), "204001")
+        self.assertIn("511990.SH", {asset["symbol"] for asset in backtest_assets(cfg)})
+        self.assertEqual(validate_config(cfg), [])
+
+    def test_validation_rejects_negative_financial_inputs(self) -> None:
+        self.assertTrue(any("monthly_spend_cny" in item for item in validate_config(normalize_config({"monthly_spend_cny": -1}))))
+        negative_weight = normalize_config({})
+        negative_weight["assets"][0]["target_weight"] = -0.01
+        self.assertTrue(any("target_weight" in item for item in validate_config(negative_weight)))
+        self.assertTrue(any("rebalance_band" in item for item in validate_config(normalize_config({"rebalance_band": 1.1}))))
+
+    def test_treasury_indices_can_be_combined(self) -> None:
+        cfg = normalize_config({})
+        treasuries = [asset for asset in cfg["assets"] if asset.get("asset_type") == "cn_bond_index"]
+        self.assertEqual({asset["symbol"] for asset in treasuries}, {"CBA03101", "CBA06501", "CBA21801"})
+        self.assertEqual(next(asset for asset in treasuries if asset["symbol"] == "CBA03101")["inception_date"], "2008-01-02")
+        for asset in treasuries:
+            asset["enabled"] = True
+            asset["target_weight"] = 0.1
+        self.assertEqual(validate_config(cfg), [])
 
     def test_backtest_assets_include_low_fee_gold_replacement(self) -> None:
         cfg = normalize_config({})

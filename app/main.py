@@ -16,10 +16,17 @@ import time
 from urllib.parse import parse_qs, urlparse
 import uuid
 
-from app.config import backtest_assets, repo_rate_symbol, STATIC_DIR, default_config, get_settings, normalize_config
+from app.config import backtest_assets, repo_rate_symbol, STATIC_DIR, default_config, get_settings, normalize_config, validate_config
 from app.db import data_status, db_session, init_db, json_loads, rows_to_dicts
-from app.services.backtest_engine import BacktestCancelled, BacktestError, get_cached_backtest_run, run_backtest
-from app.services.data_sync import required_data_missing, sync_all
+from app.services.backtest_engine import (
+    BacktestCancelled,
+    BacktestError,
+    RANKING_VERSION,
+    ranking_metrics,
+    get_cached_backtest_run,
+    run_backtest,
+)
+from app.services.data_sync import SyncCancelled, required_data_missing, sync_all
 
 logger = logging.getLogger(__name__)
 MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -117,6 +124,102 @@ def rebalance_display_payload(payload: dict) -> dict:
     }
 
 
+def yearly_return_counts_from_daily(conn, run_id: str) -> tuple[int, int]:
+    yearly_nav: dict[str, float] = {}
+    year_dates: dict[str, list[str]] = {}
+    rows = conn.execute(
+        "SELECT trade_date,daily_return FROM portfolio_daily WHERE run_id=? ORDER BY trade_date",
+        (run_id,),
+    ).fetchall()
+    for row in rows:
+        year = row["trade_date"][:4]
+        yearly_nav[year] = yearly_nav.get(year, 1.0) * (1.0 + float(row["daily_return"] or 0.0))
+        year_dates.setdefault(year, []).append(row["trade_date"])
+    complete = [
+        nav
+        for year, nav in yearly_nav.items()
+        if year_dates[year][0][5:7] == "01" and year_dates[year][-1][5:7] == "12"
+    ]
+    return sum(1 for nav in complete if nav > 1.0 + 1e-12), len(complete)
+
+
+def repo_annualized_return_from_daily(conn, run_id: str) -> float:
+    row = conn.execute(
+        "SELECT MIN(trade_date) AS start_date, MAX(trade_date) AS end_date FROM portfolio_daily WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    if not row or not row["start_date"] or not row["end_date"]:
+        return 0.0
+    config_row = conn.execute("SELECT config_json FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+    config = json_loads(config_row["config_json"], {}) if config_row else {}
+    repo_symbol = repo_rate_symbol(config)
+    rates = conn.execute(
+        "SELECT trade_date,close_rate FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
+        (repo_symbol, row["start_date"], row["end_date"]),
+    ).fetchall()
+    if len(rates) < 2:
+        return 0.0
+    benchmark_nav = 1.0
+    for rate in rates:
+        benchmark_nav *= 1.0 + float(rate["close_rate"] or 0.0) / 100.0 / 365.0
+    years = max((datetime.fromisoformat(row["end_date"]) - datetime.fromisoformat(row["start_date"])).days / 365.25, 1 / 365.25)
+    return benchmark_nav ** (1.0 / years) - 1.0
+
+
+def refresh_ranking_summary(conn, run_id: str, summary: dict) -> dict:
+    positive_year_count, complete_year_count = yearly_return_counts_from_daily(conn, run_id)
+    ranking = ranking_metrics(
+        float(summary.get("annualized_return") or 0.0),
+        repo_annualized_return_from_daily(conn, run_id),
+        float(summary.get("max_drawdown") or 0.0),
+        positive_year_count,
+        complete_year_count,
+    )
+    return {
+        **summary,
+        "positive_year_count": positive_year_count,
+        "complete_year_count": complete_year_count,
+        **ranking,
+    }
+
+
+def backtest_archive_entries(conn, limit: int, leaderboard: bool = False) -> list[dict]:
+    rows = rows_to_dicts(
+        conn.execute("SELECT run_id,created_at,config_json,summary_json FROM backtest_runs ORDER BY created_at DESC")
+    )
+    entries = []
+    for row in rows:
+        summary = json_loads(row.pop("summary_json"), {})
+        if int(summary.get("ranking_version") or 0) != RANKING_VERSION:
+            summary = refresh_ranking_summary(conn, row["run_id"], summary)
+        entries.append(
+            {
+                **row,
+                "config": json_loads(row.pop("config_json"), {}),
+                "summary": summary,
+                "positive_year_count": int(summary.get("positive_year_count") or 0),
+                "complete_year_count": int(summary.get("complete_year_count") or 0),
+                "ranking_score": float(summary.get("ranking_score") or 0.0),
+            }
+        )
+    if leaderboard:
+        entries = [item for item in entries if item["summary"].get("ranking_eligible")]
+        entries.sort(
+            key=lambda item: (
+                item["ranking_score"],
+                item["summary"].get("excess_annualized_return", 0.0),
+                item["summary"].get("adjusted_calmar", 0.0),
+                item["summary"].get("positive_year_ratio", 0.0),
+                item["created_at"],
+                item["run_id"],
+            ),
+            reverse=True,
+        )
+        for rank, entry in enumerate(entries[:limit], start=1):
+            entry["rank"] = rank
+    return entries[:limit]
+
+
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -141,6 +244,9 @@ def raise_if_cancelled(should_cancel=None) -> None:
 def execute_backtest_request(settings, write_lock: Lock, config: dict, should_cancel=None) -> dict:
     request_id = str(uuid.uuid4())[:8]
     started_at = time.perf_counter()
+    errors = validate_config(config)
+    if errors:
+        raise BacktestError("; ".join(errors))
     data_assets = backtest_assets(config)
     rate_symbol = repo_rate_symbol(config)
     raise_if_cancelled(should_cancel)
@@ -184,6 +290,7 @@ def execute_backtest_request(settings, write_lock: Lock, config: dict, should_ca
                     data_assets,
                     rate_symbol,
                     missing_items=missing_before,
+                    should_cancel=should_cancel,
                 )
                 logger.info("backtest sync complete id=%s seconds=%.3f result=%s", request_id, time.perf_counter() - sync_started_at, sync_result)
             raise_if_cancelled(should_cancel)
@@ -200,10 +307,7 @@ def execute_backtest_request(settings, write_lock: Lock, config: dict, should_ca
             raise_if_cancelled(should_cancel)
             if cache_invalidated:
                 invalidate_started_at = time.perf_counter()
-                conn.execute("DELETE FROM portfolio_daily")
-                conn.execute("DELETE FROM trades")
-                conn.execute("DELETE FROM rebalance_events")
-                conn.execute("DELETE FROM backtest_runs")
+                conn.execute("UPDATE backtest_runs SET config_hash=NULL")
                 logger.info("backtest cache invalidated id=%s seconds=%.3f", request_id, time.perf_counter() - invalidate_started_at)
             run_started_at = time.perf_counter()
             result = run_backtest(conn, config, should_cancel=should_cancel)
@@ -323,7 +427,7 @@ def run_backtest_job(server, job_id: str, config: dict) -> None:
             config,
             should_cancel=lambda: job_cancel_requested(server, job_id),
         )
-    except BacktestCancelled as exc:
+    except (BacktestCancelled, SyncCancelled) as exc:
         logger.info("backtest job cancelled id=%s", job_id)
         set_job(server, job_id, status="cancelled", message=str(exc), error=str(exc), completed_at=iso_now())
     except BacktestError as exc:
@@ -498,6 +602,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/data/status":
                 with db_session(self.settings.db_path) as conn:
                     self.send_json(HTTPStatus.OK, {"status": data_status(conn)})
+            elif path == "/api/backtest/history":
+                with db_session(self.settings.db_path) as conn:
+                    self.send_json(HTTPStatus.OK, {"records": backtest_archive_entries(conn, limit=20)})
+            elif path == "/api/backtest/leaderboard":
+                with db_session(self.settings.db_path) as conn:
+                    self.send_json(HTTPStatus.OK, {"records": backtest_archive_entries(conn, limit=100, leaderboard=True)})
             elif path.startswith("/api/backtest/jobs/"):
                 self.handle_backtest_job(path)
             elif path.startswith("/api/backtest/"):
@@ -579,6 +689,30 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:
             logger.exception("http post failed path=%s", path)
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        path = self.normalize_path(parsed.path)
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 3 or parts[:2] != ["api", "backtest"]:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "unknown API endpoint")
+            return
+        run_id = parts[2]
+        try:
+            with self.write_lock:
+                with db_session(self.settings.db_path) as conn:
+                    existing = conn.execute("SELECT 1 FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+                    if not existing:
+                        self.send_error_json(HTTPStatus.NOT_FOUND, "run not found")
+                        return
+                    conn.execute("DELETE FROM portfolio_daily WHERE run_id=?", (run_id,))
+                    conn.execute("DELETE FROM trades WHERE run_id=?", (run_id,))
+                    conn.execute("DELETE FROM rebalance_events WHERE run_id=?", (run_id,))
+                    conn.execute("DELETE FROM backtest_runs WHERE run_id=?", (run_id,))
+            self.send_json(HTTPStatus.OK, {"deleted": run_id})
+        except Exception as exc:
+            logger.exception("http delete failed path=%s", path)
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
     def handle_backtest_get(self, path: str, query: dict[str, list[str]]) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+import html
 from io import StringIO
 import json
 import logging
@@ -37,11 +38,33 @@ CN_PRICE_SOURCE_PRIORITY = {
 PRICE_CROSS_SOURCE_MAX_DEVIATION = 0.15
 PRICE_ISOLATED_JUMP_THRESHOLD = 0.70
 PRICE_NEIGHBOR_MAX_DEVIATION = 0.25
+INDEX_PROXY_PRICE_SOURCES = {
+    "tushare:index_daily",
+    "datasrc:index",
+    "sohu:index_kline",
+    "eastmoney:index_kline",
+}
+DIVIDEND_SOURCE_PRIORITY = {
+    "tushare:fund_div": 0,
+    "eastmoney:fund_dividend": 1,
+    "yahoo:chart:dividend": 1,
+    "digrin:html:dividend": 2,
+    "sina:etf_cumulative_dividend": 9,
+}
 logger = logging.getLogger(__name__)
 
 
 class SyncWarning(RuntimeError):
     pass
+
+
+class SyncCancelled(RuntimeError):
+    pass
+
+
+def raise_if_cancelled(should_cancel=None) -> None:
+    if should_cancel and should_cancel():
+        raise SyncCancelled("数据同步任务已取消")
 
 
 def curl_executable() -> str:
@@ -157,6 +180,57 @@ def missing_date_ranges(
     return ranges
 
 
+def missing_adjustment_factor_ranges(
+    conn,
+    symbol: str,
+    start: str,
+    end: str,
+    *,
+    exclude_proxy_prices: bool = False,
+) -> list[tuple[str, str]]:
+    """Return price dates which need a fund adjustment factor.
+
+    ETF trading calendars can differ from the generic weekday calendar. Requiring
+    a factor on a day without a real ETF close creates a false missing-data error,
+    so adjustment coverage follows the stored real price dates exactly. An index
+    proxy used before an ETF begins trading is already a continuous synthetic
+    price level and must not require an ETF fund-adjustment factor.
+    """
+    price_rows = conn.execute(
+        """
+        SELECT trade_date FROM prices
+        WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source NOT LIKE 'generated:%'
+          AND (?=0 OR source NOT LIKE '%:splice_%')
+        ORDER BY trade_date
+        """,
+        (symbol, start, end, int(exclude_proxy_prices)),
+    ).fetchall()
+    factor_dates = {
+        row["trade_date"]
+        for row in conn.execute(
+            """
+            SELECT trade_date FROM adj_factors
+            WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source NOT LIKE 'generated:%'
+            """,
+            (symbol, start, end),
+        ).fetchall()
+    }
+    missing_dates = [row["trade_date"] for row in price_rows if row["trade_date"] not in factor_dates]
+    if not missing_dates:
+        return []
+    ranges: list[tuple[str, str]] = []
+    range_start = missing_dates[0]
+    previous = parse_date(range_start)
+    for trade_date in missing_dates[1:]:
+        current = parse_date(trade_date)
+        if (current - previous).days > 4:
+            ranges.append((range_start, previous.isoformat()))
+            range_start = trade_date
+        previous = current
+    ranges.append((range_start, previous.isoformat()))
+    return ranges
+
+
 def missing_tail_date_ranges(
     conn,
     table: str,
@@ -265,6 +339,7 @@ def _sync_plan(missing_items: list[str] | None, assets: list[dict[str, Any]], re
         return {
             "asset_prices": set(asset_symbols),
             "asset_dividends": set(asset_symbols),
+            "asset_adjustments": {asset["symbol"] for asset in assets if asset.get("enabled", True) and asset.get("market") == "CN"},
             "index_prices": True,
             "repo_symbols": set(sorted({"204001", repo_symbol})),
             "fx_pairs": fx_pairs,
@@ -274,6 +349,7 @@ def _sync_plan(missing_items: list[str] | None, assets: list[dict[str, Any]], re
     plan = {
         "asset_prices": set(),
         "asset_dividends": set(),
+        "asset_adjustments": set(),
         "index_prices": False,
         "repo_symbols": set(),
         "fx_pairs": set(),
@@ -289,6 +365,8 @@ def _sync_plan(missing_items: list[str] | None, assets: list[dict[str, Any]], re
             plan["asset_prices"].add(symbol)
         elif kind == "dividends" and symbol in asset_symbols:
             plan["asset_dividends"].add(symbol)
+        elif kind == "adj_factors" and symbol in asset_symbols:
+            plan["asset_adjustments"].add(symbol)
         elif kind == "repo_rates":
             plan["repo_symbols"].add(symbol)
         elif kind == "fx_rates":
@@ -329,8 +407,33 @@ def effective_price_end_for_market(market: str, end: str):
     return min(requested_end, latest_completed)
 
 
+def replacement_allocation_start(asset: dict[str, Any]) -> date | None:
+    starts = []
+    for replacement in asset.get("replacement_assets", []):
+        if not isinstance(replacement, dict):
+            continue
+        start = (
+            replacement.get("allocation_start_date")
+            or replacement.get("trade_start_date")
+            or replacement.get("inception_date")
+        )
+        if start:
+            starts.append(parse_date(str(start)))
+    return min(starts) if starts else None
+
+
+def effective_asset_end(asset: dict[str, Any], end: str) -> date:
+    """Stop requiring the original symbol once a configured replacement takes over."""
+    requested_end = parse_date(end)
+    replacement_start = replacement_allocation_start(asset)
+    if replacement_start is None:
+        return requested_end
+    return min(requested_end, replacement_start - timedelta(days=1))
+
+
 def effective_price_end_for_asset(asset: dict[str, Any], end: str):
-    return effective_price_end_for_market(asset.get("market", "CN"), end)
+    market_end = effective_price_end_for_market(asset.get("market", "CN"), end)
+    return min(market_end, effective_asset_end(asset, end))
 
 
 def required_data_missing(
@@ -345,15 +448,23 @@ def required_data_missing(
     missing: set[str] = set()
     price_symbols = [asset["symbol"] for asset in assets if asset.get("enabled", True)] + ["000300.SH"]
 
+    selected_asset_symbols = {asset["symbol"] for asset in assets if asset.get("enabled", True)}
     for asset in assets:
         if not asset.get("enabled", True):
             continue
-        price_fetch_start = max(parse_date(start), parse_date(asset_price_start_date(asset, start)))
+        fallback = asset.get("price_fallback")
+        fallback_requires_history = isinstance(fallback, dict) and fallback.get("required", True) is not False
+        price_fetch_start = max(
+            parse_date(start),
+            parse_date(asset_price_start_date(asset, start))
+            if fallback_requires_history
+            else parse_date(asset_trade_start_date(asset, start)),
+        )
         dividend_fetch_start = max(parse_date(start), parse_date(asset_trade_start_date(asset, start)))
         price_end = effective_price_end_for_asset(asset, end)
-        fallback = asset.get("price_fallback")
         fallback_covers_pre_inception = (
             isinstance(fallback, dict)
+            and fallback_requires_history
             and price_fetch_start < parse_date(asset_trade_start_date(asset, start))
         )
         if price_fetch_start <= price_end and _coverage_gap(
@@ -368,10 +479,35 @@ def required_data_missing(
             end_tolerance_days=0,
         ):
             missing.add(f"prices:{asset['symbol']}")
-        if price_fetch_start <= price_end and price_anomaly_ranges(conn, asset["symbol"], price_fetch_start.isoformat(), price_end.isoformat()):
+        legacy_yahoo_ranges = (
+            legacy_cn_yahoo_price_ranges(conn, asset["symbol"], price_fetch_start.isoformat(), price_end.isoformat())
+            if asset.get("market") == "CN"
+            else []
+        )
+        unscaled_proxy_ranges = (
+            legacy_unscaled_index_proxy_price_ranges(conn, asset["symbol"], price_fetch_start.isoformat(), price_end.isoformat())
+            if asset.get("market") == "CN"
+            else []
+        )
+        if price_fetch_start <= price_end and (
+            price_anomaly_ranges(conn, asset["symbol"], price_fetch_start.isoformat(), price_end.isoformat())
+            or legacy_yahoo_ranges
+            or unscaled_proxy_ranges
+        ):
             missing.add(f"prices:{asset['symbol']}")
-        if dividend_fetch_start <= requested_end and missing_coverage_ranges(conn, "dividends", asset["symbol"], dividend_fetch_start.isoformat(), end):
+        dividend_end = effective_asset_end(asset, end)
+        if asset.get("asset_type") != "money_fund" and dividend_fetch_start <= dividend_end and missing_coverage_ranges(
+            conn, "dividends", asset["symbol"], dividend_fetch_start.isoformat(), dividend_end.isoformat()
+        ):
             missing.add(f"dividends:{asset['symbol']}")
+        if asset["symbol"] in selected_asset_symbols and asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"} and missing_adjustment_factor_ranges(
+            conn,
+            asset["symbol"],
+            dividend_fetch_start.isoformat(),
+            price_end.isoformat(),
+            exclude_proxy_prices=isinstance(asset.get("price_fallback"), dict),
+        ):
+            missing.add(f"adj_factors:{asset['symbol']}")
 
     cn_data_end = effective_price_end_for_market("CN", end)
     cn_data_end_text = cn_data_end.isoformat()
@@ -537,6 +673,82 @@ def merge_date_ranges(ranges: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(start.isoformat(), end.isoformat()) for start, end in merged]
 
 
+def asset_price_sync_ranges(
+    conn,
+    asset: dict[str, Any],
+    start: str,
+    end: str,
+    price_range_func,
+) -> list[tuple[str, str]]:
+    """Return efficient price ranges while preserving pre-inception fallback coverage."""
+    requested_start = parse_date(start)
+    requested_end = parse_date(end)
+    fallback = asset.get("price_fallback")
+    fallback_requires_history = isinstance(fallback, dict) and fallback.get("required", True) is not False
+    price_start = max(
+        requested_start,
+        parse_date(asset_price_start_date(asset, start))
+        if fallback_requires_history
+        else parse_date(asset_trade_start_date(asset, start)),
+    )
+    if price_start > requested_end:
+        return []
+    if not isinstance(fallback, dict):
+        return price_range_func(conn, "prices", "symbol", asset["symbol"], "trade_date", price_start.isoformat(), requested_end.isoformat())
+
+    primary_start = max(price_start, parse_date(asset_trade_start_date(asset, start)))
+    ranges: list[tuple[str, str]] = []
+    fallback_end = min(requested_end, primary_start - timedelta(days=1))
+    if price_start <= fallback_end:
+        fallback_gaps = missing_date_ranges(
+            conn,
+            "prices",
+            "symbol",
+            asset["symbol"],
+            "trade_date",
+            price_start.isoformat(),
+            fallback_end.isoformat(),
+        )
+        if fallback_gaps:
+            # A splice scale must be shared by the complete proxy segment. If
+            # an early row is repaired in isolation, its local window may not
+            # contain the later real ETF close required as an anchor. Rebuild
+            # the full pre-inception segment once instead.
+            ranges.append((price_start.isoformat(), fallback_end.isoformat()))
+    if primary_start <= requested_end:
+        ranges.extend(
+            price_range_func(
+                conn,
+                "prices",
+                "symbol",
+                asset["symbol"],
+                "trade_date",
+                primary_start.isoformat(),
+                requested_end.isoformat(),
+            )
+        )
+    return merge_date_ranges(ranges)
+
+
+def chinabond_price_sync_ranges(
+    conn,
+    _table: str,
+    _code_col: str,
+    code: str,
+    _date_col: str,
+    start: str,
+    end: str,
+) -> list[tuple[str, str]]:
+    """Return one initial fetch and then only a tail fetch for ChinaBond data.
+
+    The official series has its own bond-market calendar, so treating every
+    weekday as a missing price causes repeated refetches over public holidays.
+    The endpoint returns the complete series; the most recent official value is
+    therefore the only meaningful incremental coverage check.
+    """
+    return missing_tail_date_ranges(conn, "prices", "symbol", code, "trade_date", start, end)
+
+
 def _row_close(row: dict[str, Any]) -> float | None:
     close = finite_float(row.get("close"))
     return close if close and close > 0 else None
@@ -610,6 +822,70 @@ def price_anomaly_ranges(conn, symbol: str, start: str, end: str) -> list[tuple[
         if requested_start <= parse_date(trade_date) <= requested_end
     ]
     return [(trade_date, trade_date) for trade_date in anomaly_dates]
+
+
+def legacy_cn_yahoo_price_ranges(conn, symbol: str, start: str, end: str) -> list[tuple[str, str]]:
+    """Find legacy CN ETF rows sourced from Yahoo's adjusted-price feed.
+
+    Yahoo's China ETF chart endpoint can return a back-adjusted series even
+    though the application requests raw prices. It must never be blended with
+    Tushare/Sohu/Eastmoney raw closes: 512100 otherwise jumps from roughly 0.53
+    to 1.43 in January 2019 without any corresponding corporate action.
+    """
+    rows = conn.execute(
+        """
+        SELECT trade_date FROM prices
+        WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'yahoo:%'
+        ORDER BY trade_date
+        """,
+        (symbol, start, end),
+    ).fetchall()
+    if not rows:
+        return []
+    ranges: list[tuple[str, str]] = []
+    range_start = rows[0]["trade_date"]
+    previous = parse_date(range_start)
+    for row in rows[1:]:
+        current = parse_date(row["trade_date"])
+        if (current - previous).days > 4:
+            ranges.append((range_start, previous.isoformat()))
+            range_start = row["trade_date"]
+        previous = current
+    ranges.append((range_start, previous.isoformat()))
+    return ranges
+
+
+def legacy_unscaled_index_proxy_price_ranges(conn, symbol: str, start: str, end: str) -> list[tuple[str, str]]:
+    """Find index-proxy rows that were incorrectly inserted without scaling.
+
+    The configured CSI proxies use index points. A large value from an index
+    source, either with ``:splice_scale_1`` or with no splice suffix at all,
+    therefore means the proxy was saved without a genuine ETF-price anchor.
+    Re-fetching the affected dates lets the normal splice logic use a genuine
+    ETF close instead.
+    """
+    rows = conn.execute(
+        """
+        SELECT trade_date FROM prices
+        WHERE symbol=? AND trade_date BETWEEN ? AND ? AND ABS(close) >= 100
+          AND (source LIKE '%:splice_scale_1' OR source IN (?, ?, ?, ?))
+        ORDER BY trade_date
+        """,
+        (symbol, start, end, *sorted(INDEX_PROXY_PRICE_SOURCES)),
+    ).fetchall()
+    if not rows:
+        return []
+    ranges: list[tuple[str, str]] = []
+    range_start = rows[0]["trade_date"]
+    previous = parse_date(range_start)
+    for row in rows[1:]:
+        current = parse_date(row["trade_date"])
+        if (current - previous).days > 4:
+            ranges.append((range_start, previous.isoformat()))
+            range_start = row["trade_date"]
+        previous = current
+    ranges.append((range_start, previous.isoformat()))
+    return ranges
 
 
 def select_price_rows_from_sources(
@@ -1179,7 +1455,12 @@ def price_scale_from_overlap(target_rows: list[dict[str, Any]], fallback_rows: l
     target_by_date = {
         row["trade_date"]: float(row["close"])
         for row in target_rows
-        if row.get("close") is not None and not str(row.get("source", "")).startswith("generated:")
+        if (
+            row.get("close") is not None
+            and not str(row.get("source", "")).startswith("generated:")
+            and ":splice_scale_" not in str(row.get("source", ""))
+            and str(row.get("source", "")) not in INDEX_PROXY_PRICE_SOURCES
+        )
     }
     fallback_by_date = {
         row["trade_date"]: float(row["close"])
@@ -1243,8 +1524,9 @@ def fetch_price_fallback_rows(
         fallback_rows = scale_price_rows(fallback_rows, scale, f"fixed_scale_{scale:g}")
     elif fallback.get("scale_mode") == "splice":
         scale = price_scale_from_overlap(target_rows, fallback_rows)
-        if scale is not None:
-            fallback_rows = scale_price_rows(fallback_rows, scale, f"splice_scale_{scale:.8g}")
+        if scale is None:
+            raise SyncWarning(f"index proxy for {symbol} has no genuine ETF price anchor")
+        fallback_rows = scale_price_rows(fallback_rows, scale, f"splice_scale_{scale:.8g}")
     start_date = parse_date(range_start)
     end_date = parse_date(range_end)
     return [
@@ -1308,7 +1590,7 @@ def fetch_tencent_hk_prices(symbol: str, start: str, end: str, currency: str) ->
 
 def sohu_code_and_referer(symbol: str) -> tuple[str, str]:
     code = symbol.split(".")[0]
-    if symbol.upper() in {"000300.SH", "000903.SH"}:
+    if symbol.upper() in {"000300.SH", "000852.SH", "000903.SH", "000905.SH"}:
         return f"zs_{code}", f"https://q.stock.sohu.com/zs/{code}/lshq.shtml"
     return f"cn_{code}", f"https://q.stock.sohu.com/cn/{code}/lshq.shtml"
 
@@ -1352,12 +1634,18 @@ def fetch_sohu_prices(symbol: str, start: str, end: str, currency: str, source_n
 
 
 def fetch_index_prices(token: str, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
-    rows = tushare_call(
-        token,
-        "index_daily",
-        {"ts_code": symbol, "start_date": tushare_date(start), "end_date": tushare_date(end)},
-        "ts_code,trade_date,open,high,low,close,vol,amount",
-    )
+    rows_by_date: dict[str, dict[str, Any]] = {}
+    # index_daily can silently cap a long response. Keep each request below
+    # that cap so a historical proxy does not acquire artificial gaps.
+    for chunk_start, chunk_end in chunk_date_ranges(start, end, 90):
+        for row in tushare_call(
+            token,
+            "index_daily",
+            {"ts_code": symbol, "start_date": tushare_date(chunk_start), "end_date": tushare_date(chunk_end)},
+            "ts_code,trade_date,open,high,low,close,vol,amount",
+        ):
+            rows_by_date[str(row["trade_date"])] = row
+    rows = list(rows_by_date.values())
     if not rows:
         raise SyncWarning(f"Tushare returned no index_daily rows for {symbol}")
     return [
@@ -1386,7 +1674,7 @@ def fetch_index_proxy_prices(
     end: str,
     currency: str,
 ) -> list[dict[str, Any]]:
-    """Fetch an index proxy with the same public-source fallback chain as benchmarks."""
+    """Fetch an index proxy from all available sources, preferring Tushare per date."""
     attempts: list[str] = []
     fetchers = []
     if token:
@@ -1398,6 +1686,7 @@ def fetch_index_proxy_prices(
             ("eastmoney:index_kline", lambda: fetch_eastmoney_prices(proxy_symbol, start, end, currency, "eastmoney:index_kline")),
         ]
     )
+    selected_rows: list[dict[str, Any]] = []
     for source_name, fetcher in fetchers:
         try:
             rows = fetcher()
@@ -1405,9 +1694,55 @@ def fetch_index_proxy_prices(
             attempts.append(f"{source_name}: {exc}")
             continue
         if rows:
-            return restore_symbol(rows, target_symbol)
+            # Fetchers are ordered by priority, so earlier rows stay selected
+            # while later sources fill only the dates they do not provide.
+            # Historical public endpoints often return only part of a long
+            # requested range.
+            selected_rows = merge_rows_by_trade_date(selected_rows, rows)
+    if selected_rows:
+        return restore_symbol(selected_rows, target_symbol)
     detail = "; ".join(attempts) or "no index price source configured"
     raise SyncWarning(f"index proxy fetch failed for {proxy_symbol}: {detail}")
+
+
+def fetch_chinabond_index_prices(asset: dict[str, Any], start: str, end: str) -> list[dict[str, Any]]:
+    """Fetch an official ChinaBond total-return index series for a configured asset."""
+    index_id = str(asset.get("index_id") or "").strip()
+    if not index_id:
+        raise SyncWarning(f"ChinaBond index id is not configured for {asset['symbol']}")
+    url = (
+        "https://yield.chinabond.com.cn/cbweb-mn/indices/singleIndexQueryResult?"
+        f"indexid={index_id}&qxlxt=00&ltcslx=&zslxt=CFZS,XQJSL&zslxt1=&lx=1&locale=zh_CN"
+    )
+    cmd = [
+        curl_executable(), "-sS", "-L", "-X", "POST", "-A", "Mozilla/5.0",
+        "--connect-timeout", "5", "--max-time", "30", url,
+    ]
+    try:
+        completed = subprocess.run(cmd, capture_output=True, check=False, timeout=35)
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise SyncWarning(f"exit {completed.returncode}: {detail}")
+        payload = json.loads(completed.stdout.decode("utf-8", errors="replace"))
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, SyncWarning) as exc:
+        raise SyncWarning(f"ChinaBond index fetch failed for {asset['symbol']}: {exc}") from exc
+    values = payload.get("CFZS_00")
+    if not isinstance(values, dict):
+        raise SyncWarning(f"ChinaBond total-return series is invalid for {asset['symbol']}")
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    rows: list[dict[str, Any]] = []
+    for timestamp_ms, value in values.items():
+        try:
+            trade_date = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=ZoneInfo("Asia/Shanghai")).date()
+            close = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if close > 0 and start_date <= trade_date <= end_date:
+            rows.append(price_row(asset["symbol"], trade_date.isoformat(), close, "CNY", "chinabond:index_total_return"))
+    if not rows:
+        raise SyncWarning(f"ChinaBond returned no index rows for {asset['symbol']}")
+    return rows
 
 
 def fetch_fund_dividends(token: str, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
@@ -1420,6 +1755,7 @@ def fetch_fund_dividends(token: str, symbol: str, start: str, end: str) -> list[
     start_date = parse_date(start)
     end_date = parse_date(end)
     dividends: list[dict[str, Any]] = []
+    unresolved_pay_dates = 0
     for row in rows:
         ex_date = from_tushare_date(row.get("ex_date"))
         if not ex_date:
@@ -1427,19 +1763,69 @@ def fetch_fund_dividends(token: str, symbol: str, start: str, end: str) -> list[
         ex = parse_date(ex_date)
         if not (start_date <= ex <= end_date):
             continue
+        pay_date = from_tushare_date(row.get("pay_date"))
+        if not pay_date:
+            unresolved_pay_dates += 1
+            continue
         dividends.append(
             {
                 "symbol": row["ts_code"],
                 "ann_date": from_tushare_date(row.get("ann_date")),
                 "record_date": from_tushare_date(row.get("record_date")),
                 "ex_date": ex_date,
-                "pay_date": from_tushare_date(row.get("pay_date")) or ex_date,
+                "pay_date": pay_date,
                 "div_cash": float(row.get("div_cash") or 0),
                 "currency": "CNY",
                 "source": "tushare:fund_div",
             }
         )
+    if unresolved_pay_dates:
+        raise SyncWarning(f"Tushare dividend data has no pay date for {symbol}")
     return dividends
+
+
+def _eastmoney_cell_text(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(value))).strip()
+
+
+def parse_eastmoney_fund_dividends(symbol: str, text: str, start: str, end: str) -> list[dict[str, Any]]:
+    """Parse Eastmoney's distribution table without treating the ex-date as the pay date."""
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    decoded = html.unescape(text).replace(r"\/", "/").replace(r'\"', '"')
+    rows: list[dict[str, Any]] = []
+    incomplete_rows = 0
+    for table_row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", decoded, flags=re.IGNORECASE | re.DOTALL):
+        cells = [_eastmoney_cell_text(cell) for cell in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", table_row, flags=re.IGNORECASE | re.DOTALL)]
+        if not cells:
+            continue
+        row_text = " ".join(cells)
+        amount_match = re.search(r"每\s*(?:10|十)\s*份.{0,40}?([0-9]+(?:\.[0-9]+)?)\s*元", row_text)
+        if not amount_match:
+            continue
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", row_text)
+        if len(dates) < 3:
+            incomplete_rows += 1
+            continue
+        record_date, ex_date, pay_date = dates[-3:]
+        ex = parse_date(ex_date)
+        if not (start_date <= ex <= end_date):
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "ann_date": None,
+                "record_date": record_date,
+                "ex_date": ex_date,
+                "pay_date": pay_date,
+                "div_cash": float(amount_match.group(1)) / 10.0,
+                "currency": "CNY",
+                "source": "eastmoney:fund_dividend",
+            }
+        )
+    if incomplete_rows:
+        raise SyncWarning(f"Eastmoney dividend data has no pay date for {symbol}")
+    return rows
 
 
 def fetch_eastmoney_fund_dividends(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
@@ -1451,26 +1837,7 @@ def fetch_eastmoney_fund_dividends(symbol: str, start: str, end: str) -> list[di
         raise SyncWarning(f"Eastmoney dividend fetch failed for {symbol}: {exc}") from exc
     if text.strip() == "var apidata=":
         return []
-    start_date = parse_date(start)
-    end_date = parse_date(end)
-    rows: list[dict[str, Any]] = []
-    for match in re.finditer(r"(\d{4}-\d{2}-\d{2}).{0,120}?(?:每(?:10|份).*?)([0-9.]+)", text):
-        ex_date = match.group(1)
-        ex = parse_date(ex_date)
-        if not (start_date <= ex <= end_date):
-            continue
-        rows.append(
-            {
-                "symbol": symbol,
-                "ann_date": ex_date,
-                "record_date": ex_date,
-                "ex_date": ex_date,
-                "pay_date": ex_date,
-                "div_cash": float(match.group(2)) / 10.0,
-                "currency": "CNY",
-                "source": "eastmoney:fund_dividend",
-            }
-        )
+    rows = parse_eastmoney_fund_dividends(symbol, text, start, end)
     if rows:
         return rows
     if "content" in text or "<table" in text:
@@ -1507,7 +1874,7 @@ def parse_sina_etf_cumulative_dividends(
                 "ann_date": ex_date,
                 "record_date": ex_date,
                 "ex_date": ex_date,
-                "pay_date": ex_date,
+                "pay_date": None,
                 "div_cash": dividend,
                 "currency": "CNY",
                 "source": "sina:etf_cumulative_dividend",
@@ -1532,7 +1899,62 @@ def fetch_sina_etf_dividends(symbol: str, start: str, end: str) -> list[dict[str
     required_columns = {"日期", "累计分红"}
     if not required_columns.issubset(frame.columns):
         raise SyncWarning(f"Sina returned unrecognized ETF dividend payload for {symbol}")
-    return parse_sina_etf_cumulative_dividends(symbol, frame.to_dict("records"), start, end)
+    rows = parse_sina_etf_cumulative_dividends(symbol, frame.to_dict("records"), start, end)
+    if rows:
+        raise SyncWarning(f"Sina cumulative dividend data has no pay date for {symbol}")
+    return []
+
+
+def dividend_source_priority(source: str) -> int:
+    for prefix, priority in DIVIDEND_SOURCE_PRIORITY.items():
+        if source.startswith(prefix):
+            return priority
+    return 5
+
+
+def dividend_identity(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(row["symbol"]), str(row["ex_date"]), str(row["currency"]))
+
+
+def prefer_dividend_row(current: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Pick one distribution per asset/ex-date/currency to prevent cash being counted twice."""
+    if current is None:
+        return candidate
+    if dividend_source_priority(candidate["source"]) <= dividend_source_priority(current["source"]):
+        return candidate
+    return current
+
+
+def upsert_dividend_rows(conn, rows: list[dict[str, Any]]) -> int:
+    """Replace lower-quality or stale variants of the same cash distribution."""
+    preferred: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = dividend_identity(row)
+        preferred[key] = prefer_dividend_row(preferred.get(key), row)
+
+    inserted = 0
+    for (symbol, ex_date, currency), candidate in preferred.items():
+        existing_rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT symbol, ann_date, record_date, ex_date, pay_date, div_cash, currency, source "
+                "FROM fund_dividends WHERE symbol=? AND ex_date=? AND currency=?",
+                (symbol, ex_date, currency),
+            )
+        ]
+        winner: dict[str, Any] | None = None
+        for existing in existing_rows:
+            winner = prefer_dividend_row(winner, existing)
+        winner = prefer_dividend_row(winner, candidate)
+        if winner is not candidate:
+            continue
+        conn.execute(
+            "DELETE FROM fund_dividends WHERE symbol=? AND ex_date=? AND currency=?",
+            (symbol, ex_date, currency),
+        )
+        insert_many(conn, "fund_dividends", [candidate])
+        inserted += 1
+    return inserted
 
 
 def fetch_adj_factors(token: str, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
@@ -2080,19 +2502,22 @@ def sync_all(
     repo_symbol: str = "204001",
     allow_network: bool = True,
     missing_items: list[str] | None = None,
+    should_cancel=None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
+    raise_if_cancelled(should_cancel)
     assets = assets or DEFAULT_ASSETS
     warnings: list[str] = []
     missing_data: list[str] = []
     plan = _sync_plan(missing_items, assets, repo_symbol)
     logger.info(
-        "sync_all start range=%s..%s missing_items=%s plan_prices=%s plan_dividends=%s plan_index=%s plan_repo=%s plan_fx=%s",
+        "sync_all start range=%s..%s missing_items=%s plan_prices=%s plan_dividends=%s plan_adjustments=%s plan_index=%s plan_repo=%s plan_fx=%s",
         start,
         end,
         missing_items or ["all"],
         sorted(plan["asset_prices"]),
         sorted(plan["asset_dividends"]),
+        sorted(plan["asset_adjustments"]),
         plan["index_prices"],
         sorted(plan["repo_symbols"]),
         sorted(plan["fx_pairs"]),
@@ -2139,28 +2564,61 @@ def sync_all(
     cn_data_end_text = cn_data_end.isoformat()
     asset_price_ranges: dict[str, list[tuple[str, str]]] = {}
     asset_dividend_ranges: dict[str, list[tuple[str, str]]] = {}
+    asset_adjustment_ranges: dict[str, list[tuple[str, str]]] = {}
     for asset in assets:
         symbol = asset["symbol"]
         price_fetch_start_date = max(parse_date(start), parse_date(asset_price_start_date(asset, start)))
         dividend_fetch_start_date = max(parse_date(start), parse_date(asset_trade_start_date(asset, start)))
         price_end = effective_price_end_for_asset(asset, end)
+        dividend_end = effective_asset_end(asset, end)
         price_fetch_start = price_fetch_start_date.isoformat()
         dividend_fetch_start = dividend_fetch_start_date.isoformat()
-        fallback_range_func = missing_date_ranges if asset.get("price_fallback") else price_range_func
+        range_function = chinabond_price_sync_ranges if asset.get("asset_type") == "cn_bond_index" else price_range_func
         asset_price_ranges[symbol] = (
-            fallback_range_func(conn, "prices", "symbol", symbol, "trade_date", price_fetch_start, price_end.isoformat())
+            asset_price_sync_ranges(conn, asset, price_fetch_start, price_end.isoformat(), range_function)
             if symbol in plan["asset_prices"] and price_fetch_start_date <= price_end
             else []
         )
         if symbol in plan["asset_prices"] and price_fetch_start_date <= price_end:
             asset_price_ranges[symbol] = merge_date_ranges(
-                asset_price_ranges[symbol] + price_anomaly_ranges(conn, symbol, price_fetch_start, price_end.isoformat())
+                asset_price_ranges[symbol]
+                + price_anomaly_ranges(conn, symbol, price_fetch_start, price_end.isoformat())
+                + (
+                    legacy_cn_yahoo_price_ranges(conn, symbol, price_fetch_start, price_end.isoformat())
+                    if asset.get("market") == "CN"
+                    else []
+                )
+                + (
+                    legacy_unscaled_index_proxy_price_ranges(conn, symbol, price_fetch_start, price_end.isoformat())
+                    if asset.get("market") == "CN"
+                    else []
+                )
             )
         asset_dividend_ranges[symbol] = (
-            missing_coverage_ranges(conn, "dividends", symbol, dividend_fetch_start, end)
-            if symbol in plan["asset_dividends"] and dividend_fetch_start_date <= parse_date(end)
+            missing_coverage_ranges(conn, "dividends", symbol, dividend_fetch_start, dividend_end.isoformat())
+            if symbol in plan["asset_dividends"] and asset.get("asset_type") != "money_fund" and dividend_fetch_start_date <= dividend_end
             else []
         )
+        asset_adjustment_ranges[symbol] = (
+            missing_adjustment_factor_ranges(
+                conn,
+                symbol,
+                dividend_fetch_start,
+                price_end.isoformat(),
+                exclude_proxy_prices=isinstance(asset.get("price_fallback"), dict),
+            )
+            if symbol in plan["asset_adjustments"] and asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"} and asset.get("enabled", True) and dividend_fetch_start_date <= price_end
+            else []
+        )
+        if symbol in plan["asset_prices"] and asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"} and asset.get("enabled", True):
+            asset_adjustment_ranges[symbol] = merge_date_ranges(
+                asset_adjustment_ranges[symbol]
+                + [
+                    (max(parse_date(range_start), dividend_fetch_start_date).isoformat(), range_end)
+                    for range_start, range_end in asset_price_ranges[symbol]
+                    if max(parse_date(range_start), dividend_fetch_start_date) <= parse_date(range_end)
+                ]
+            )
 
     price_anchor_start = (parse_date(start) - timedelta(days=370)).isoformat()
     price_anchor_end = (parse_date(end) + timedelta(days=370)).isoformat()
@@ -2178,6 +2636,7 @@ def sync_all(
         existing_price_rows[asset["symbol"]] = [dict(row) for row in rows]
 
     def fetch_asset_bundle(asset: dict[str, Any]) -> dict[str, Any]:
+        raise_if_cancelled(should_cancel)
         asset_started_at = time.perf_counter()
         asset_warnings: list[str] = []
         asset_missing: list[str] = []
@@ -2187,9 +2646,19 @@ def sync_all(
         prices: list[dict[str, Any]] = []
         tushare_asset_available = True
         for range_start, range_end in price_ranges:
+            raise_if_cancelled(should_cancel)
             range_prices: list[dict[str, Any]] = []
             if not allow_network:
                 asset_warnings.append("network disabled for deterministic sync")
+            elif asset.get("asset_type") == "cn_bond_index":
+                # ChinaBond publishes on the bond-market calendar, which is not
+                # the weekday calendar.  A valid returned series is authoritative
+                # and must not be flagged as missing on mainland public holidays.
+                expected_price_dates = set()
+                try:
+                    range_prices = fetch_chinabond_index_prices(asset, range_start, range_end)
+                except SyncWarning as exc:
+                    asset_warnings.append(str(exc))
             elif asset.get("market") == "CN":
                 expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
                 cn_price_sources = [
@@ -2197,10 +2666,10 @@ def sync_all(
                     ("datasrc", lambda: fetch_datasrc_market_prices(symbol, range_start, range_end, "CNY")),
                     ("sohu", lambda: fetch_sohu_prices(symbol, range_start, range_end, "CNY", "sohu:hisHq")),
                     ("eastmoney", lambda: fetch_eastmoney_prices(symbol, range_start, range_end, "CNY", "eastmoney:fund_kline")),
-                    ("yahoo-cn", lambda: fetch_cn_yahoo_prices(symbol, range_start, range_end, "CNY")),
                 ]
                 source_rows: list[dict[str, Any]] = []
                 for source_name, fetch_prices in cn_price_sources:
+                    raise_if_cancelled(should_cancel)
                     try:
                         rows = [row for row in fetch_prices() if row["trade_date"] in expected_price_dates]
                     except SyncWarning as exc:
@@ -2208,6 +2677,7 @@ def sync_all(
                             tushare_asset_available = False
                         asset_warnings.append(str(exc))
                         continue
+                    raise_if_cancelled(should_cancel)
                     if rows:
                         source_rows.extend(rows)
                         logger.info("sync price source complete symbol=%s source=%s range=%s..%s rows=%d", symbol, source_name, range_start, range_end, len(rows))
@@ -2230,6 +2700,7 @@ def sync_all(
                     ("yahoo-spark", lambda: fetch_hk_yahoo_spark_prices(symbol, range_start, range_end, asset.get("currency", "HKD"))),
                 ]
                 for source_name, fetch_prices in hk_price_sources:
+                    raise_if_cancelled(should_cancel)
                     remaining_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
                     if not remaining_dates:
                         break
@@ -2238,6 +2709,7 @@ def sync_all(
                     except SyncWarning as exc:
                         asset_warnings.append(str(exc))
                         continue
+                    raise_if_cancelled(should_cancel)
                     source_rows = [row for row in source_rows if row["trade_date"] in remaining_dates]
                     if source_rows:
                         range_prices = merge_rows_by_trade_date(range_prices, source_rows)
@@ -2251,6 +2723,7 @@ def sync_all(
                     ("yahoo-spark", lambda: fetch_yahoo_spark_prices(symbol, range_start, range_end, asset.get("currency", "USD"))),
                 ]
                 for source_name, fetch_prices in us_price_sources:
+                    raise_if_cancelled(should_cancel)
                     remaining_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
                     if not remaining_dates:
                         break
@@ -2259,6 +2732,7 @@ def sync_all(
                     except SyncWarning as exc:
                         asset_warnings.append(str(exc))
                         continue
+                    raise_if_cancelled(should_cancel)
                     source_rows = [row for row in source_rows if row["trade_date"] in remaining_dates]
                     if source_rows:
                         range_prices = merge_rows_by_trade_date(range_prices, source_rows)
@@ -2266,6 +2740,7 @@ def sync_all(
             expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
             missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
             if missing_price_dates and allow_network and asset.get("price_fallback"):
+                raise_if_cancelled(should_cancel)
                 try:
                     fallback_rows = fetch_price_fallback_rows(
                         asset,
@@ -2286,6 +2761,7 @@ def sync_all(
                         )
                 except SyncWarning as exc:
                     asset_warnings.append(str(exc))
+                raise_if_cancelled(should_cancel)
             missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
             if missing_price_dates:
                 asset_missing.append(f"prices:{symbol}")
@@ -2294,52 +2770,61 @@ def sync_all(
         adj: list[dict[str, Any]] = []
         dividend_coverage: list[tuple[str, str, str, str]] = []
         for range_start, range_end in dividend_ranges:
+            raise_if_cancelled(should_cancel)
             range_dividends: list[dict[str, Any]] = []
-            dividend_source = "public:dividend_unavailable_empty"
+            dividend_source = ""
+            dividend_fetch_succeeded = False
             try:
                 if not allow_network:
                     raise SyncWarning("network disabled for deterministic sync")
-                if asset.get("market") == "CN":
-                    try:
-                        range_dividends = fetch_fund_dividends(token, symbol, range_start, range_end)
-                        dividend_source = "tushare:fund_div"
-                    except SyncWarning as tushare_exc:
-                        asset_warnings.append(str(tushare_exc))
+                if asset.get("asset_type") == "cn_bond_index":
+                    dividend_source = "chinabond:index_total_return"
+                    dividend_fetch_succeeded = True
+                elif asset.get("asset_type") == "money_fund":
+                    # 511990's daily holding-period income is embedded in its
+                    # exchange price.  Do not require an ordinary cash-dividend
+                    # feed, which would otherwise make every sync look incomplete.
+                    dividend_source = "market_price:money_fund_total_return"
+                    dividend_fetch_succeeded = True
+                elif asset.get("market") == "CN":
+                    cn_dividend_sources = [
+                        ("tushare:fund_div", lambda: fetch_fund_dividends(token, symbol, range_start, range_end)),
+                        ("eastmoney:fund_dividend", lambda: fetch_eastmoney_fund_dividends(symbol, range_start, range_end)),
+                        ("sina:etf_cumulative_dividend", lambda: fetch_sina_etf_dividends(symbol, range_start, range_end)),
+                    ]
+                    for source, fetch_dividends in cn_dividend_sources:
                         try:
-                            range_dividends = fetch_eastmoney_fund_dividends(symbol, range_start, range_end)
-                            dividend_source = "eastmoney:fund_dividend"
-                        except SyncWarning as eastmoney_exc:
-                            asset_warnings.append(str(eastmoney_exc))
-                            range_dividends = []
-                    if not range_dividends:
-                        try:
-                            range_dividends = fetch_sina_etf_dividends(symbol, range_start, range_end)
-                            dividend_source = "sina:etf_cumulative_dividend"
-                        except SyncWarning as sina_exc:
-                            asset_warnings.append(str(sina_exc))
+                            range_dividends = fetch_dividends()
+                            dividend_source = source
+                            dividend_fetch_succeeded = True
+                            break
+                        except SyncWarning as exc:
+                            asset_warnings.append(str(exc))
+                    if not dividend_fetch_succeeded:
+                        raise SyncWarning(f"all public dividend sources failed for {symbol}")
                 elif asset.get("market") == "HK":
                     range_dividends = fetch_hk_yahoo_dividends(symbol, range_start, range_end, asset.get("currency", "HKD"))
                     dividend_source = "yahoo:chart:dividend"
+                    dividend_fetch_succeeded = True
                 else:
                     try:
                         range_dividends = fetch_yahoo_dividends(symbol, range_start, range_end, asset.get("currency", "USD"))
                         dividend_source = "yahoo:chart:dividend"
+                        dividend_fetch_succeeded = True
                     except SyncWarning as yahoo_exc:
                         asset_warnings.append(str(yahoo_exc))
                         range_dividends = fetch_digrin_dividends(symbol, range_start, range_end, asset.get("currency", "USD"))
                         dividend_source = "digrin:html:dividend"
+                        dividend_fetch_succeeded = True
                 dividends.extend(range_dividends)
                 dividend_coverage.append((symbol, range_start, range_end, dividend_source))
             except SyncWarning as exc:
                 asset_warnings.append(str(exc))
-                if allow_network:
-                    asset_warnings.append(f"mark empty dividend coverage for {symbol} because all public dividend sources failed")
-                    dividend_coverage.append((symbol, range_start, range_end, dividend_source))
-                else:
-                    asset_missing.append(f"dividends:{symbol}")
-        if asset.get("market") == "CN" and price_ranges:
+                asset_missing.append(f"dividends:{symbol}")
+        if asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"} and asset_adjustment_ranges[symbol]:
             if allow_network and tushare_asset_available:
-                for range_start, range_end in price_ranges:
+                for range_start, range_end in asset_adjustment_ranges[symbol]:
+                    raise_if_cancelled(should_cancel)
                     try:
                         adj = merge_rows_by_trade_date(adj, fetch_adj_factors(token, symbol, range_start, range_end))
                     except SyncWarning as exc:
@@ -2359,8 +2844,10 @@ def sync_all(
 
     max_workers = min(max(len(assets), 1), 8)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        raise_if_cancelled(should_cancel)
         futures = [executor.submit(fetch_asset_bundle, asset) for asset in assets]
         for future in as_completed(futures):
+            raise_if_cancelled(should_cancel)
             bundle = future.result()
             logger.info(
                 "sync asset complete symbol=%s prices=%d dividends=%d adj=%d seconds=%.3f warnings=%d missing=%s",
@@ -2374,8 +2861,23 @@ def sync_all(
             )
             warnings.extend(bundle["warnings"])
             missing_data.extend(bundle["missing"])
+            if bundle["symbol"] in plan["asset_prices"]:
+                for range_start, range_end in legacy_cn_yahoo_price_ranges(conn, bundle["symbol"], start, end):
+                    conn.execute(
+                        "DELETE FROM prices WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'yahoo:%'",
+                        (bundle["symbol"], range_start, range_end),
+                    )
+                for range_start, range_end in legacy_unscaled_index_proxy_price_ranges(conn, bundle["symbol"], start, end):
+                    conn.execute(
+                        """
+                        DELETE FROM prices
+                        WHERE symbol=? AND trade_date BETWEEN ? AND ? AND ABS(close) >= 100
+                          AND (source LIKE '%:splice_scale_1' OR source IN (?, ?, ?, ?))
+                        """,
+                        (bundle["symbol"], range_start, range_end, *sorted(INDEX_PROXY_PRICE_SOURCES)),
+                    )
             inserted["prices"] += insert_many(conn, "prices", bundle["prices"])
-            inserted["dividends"] += insert_many(conn, "fund_dividends", bundle["dividends"])
+            inserted["dividends"] += upsert_dividend_rows(conn, bundle["dividends"])
             for coverage_symbol, coverage_start, coverage_end, coverage_source in bundle["dividend_coverage"]:
                 mark_sync_coverage(conn, "dividends", coverage_symbol, coverage_start, coverage_end, coverage_source)
             inserted["adj_factors"] += insert_many(conn, "adj_factors", bundle["adj"])
@@ -2388,6 +2890,7 @@ def sync_all(
         else []
     )
     for range_start, range_end in index_ranges:
+        raise_if_cancelled(should_cancel)
         range_prices: list[dict[str, Any]] = []
         try:
             if not allow_network:
@@ -2396,16 +2899,19 @@ def sync_all(
         except SyncWarning as exc:
             warnings.append(str(exc))
             if allow_network:
+                raise_if_cancelled(should_cancel)
                 try:
                     range_prices = fetch_datasrc_market_prices("000300.SH", range_start, range_end, "CNY")
                 except SyncWarning as datasrc_exc:
                     warnings.append(str(datasrc_exc))
             if allow_network:
+                raise_if_cancelled(should_cancel)
                 try:
                     range_prices = merge_rows_by_trade_date(range_prices, fetch_sohu_prices("000300.SH", range_start, range_end, "CNY", "sohu:hisHq"))
                 except SyncWarning as public_exc:
                     warnings.append(str(public_exc))
             if allow_network and not range_prices:
+                raise_if_cancelled(should_cancel)
                 try:
                     range_prices = fetch_eastmoney_prices("000300.SH", range_start, range_end, "CNY", "eastmoney:index_kline")
                 except SyncWarning as public_exc:
@@ -2418,22 +2924,26 @@ def sync_all(
         logger.info("sync index complete ranges=%d rows=%d seconds=%.3f", len(index_ranges), len(index_prices), time.perf_counter() - index_started_at)
 
     def fetch_repo_bundle(symbol: str, range_start: str, range_end: str) -> list[dict[str, Any]]:
+        raise_if_cancelled(should_cancel)
         rows: list[dict[str, Any]] = []
         try:
             rows = fetch_datasrc_repo_rates(symbol, range_start, range_end)
         except SyncWarning as exc:
             warnings.append(str(exc))
         if not rows:
+            raise_if_cancelled(should_cancel)
             try:
                 rows = fetch_sohu_repo_rates(symbol, range_start, range_end)
             except SyncWarning as exc:
                 warnings.append(str(exc))
         if not rows:
+            raise_if_cancelled(should_cancel)
             try:
                 rows = fetch_akshare_repo_rates(symbol, range_start, range_end)
             except SyncWarning as exc:
                 warnings.append(str(exc))
         if not rows:
+            raise_if_cancelled(should_cancel)
             try:
                 rows = fetch_eastmoney_repo_rates(symbol, range_start, range_end)
             except SyncWarning as eastmoney_exc:
@@ -2460,6 +2970,7 @@ def sync_all(
     else:
         for current_repo_symbol, ranges in repo_range_map.items():
             for range_start, range_end in ranges:
+                raise_if_cancelled(should_cancel)
                 repo_rows = merge_rows_by_trade_date(repo_rows, fetch_repo_bundle(current_repo_symbol, range_start, range_end))
     inserted["repo_rates"] += insert_many(conn, "repo_rates", repo_rows)
     if repo_range_map:
@@ -2497,9 +3008,11 @@ def sync_all(
         for pair, ranges in fx_range_map.items():
             pair_rows: list[dict[str, Any]] = []
             for range_start, range_end in ranges:
+                raise_if_cancelled(should_cancel)
                 range_fx_rows: list[dict[str, Any]] = []
                 expected_fx_dates = {day.isoformat() for day in business_days(range_start, range_end)}
                 for source_name, fetch_fx_rates in fx_sources:
+                    raise_if_cancelled(should_cancel)
                     remaining_dates = expected_fx_dates - {row["trade_date"] for row in range_fx_rows}
                     if not remaining_dates:
                         break
@@ -2511,6 +3024,7 @@ def sync_all(
                     except SyncWarning as exc:
                         warnings.append(str(exc))
                         continue
+                    raise_if_cancelled(should_cancel)
                     source_rows = [row for row in source_rows if row["pair"] == pair and row["trade_date"] in remaining_dates]
                     if source_rows:
                         range_fx_rows = merge_rows_by_trade_date(range_fx_rows, source_rows)

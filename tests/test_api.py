@@ -15,13 +15,13 @@ from app.main import create_server
 from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
-def http_json(url: str, payload: dict | None = None) -> dict:
+def http_json(url: str, payload: dict | None = None, method: str | None = None) -> dict:
     opener = request.build_opener(request.ProxyHandler({}))
-    if payload is None:
+    if payload is None and method is None:
         with opener.open(url, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    body = json.dumps(payload).encode("utf-8")
-    req = request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = request.Request(url, data=body, method=method or "POST", headers={"Content-Type": "application/json"})
     with opener.open(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -89,6 +89,27 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(cached["run_id"], run_id)
         self.assertTrue(cached["cache"]["hit"])
 
+    def test_backtest_history_leaderboard_and_delete(self) -> None:
+        result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        run_id = result["run_id"]
+        history = http_json(f"{self.base_url}/api/backtest/history")
+        leaderboard = http_json(f"{self.base_url}/api/backtest/leaderboard")
+        entry = next(item for item in history["records"] if item["run_id"] == run_id)
+        self.assertLessEqual(len(history["records"]), 20)
+        self.assertLessEqual(len(leaderboard["records"]), 100)
+        self.assertIn("positive_year_count", entry["summary"])
+        self.assertIn("ranking_score", entry["summary"])
+        self.assertIn("excess_annualized_return", entry["summary"])
+        self.assertIn("adjusted_calmar", entry["summary"])
+        self.assertIn("positive_year_ratio", entry["summary"])
+        self.assertEqual(entry["ranking_score"], entry["summary"]["ranking_score"])
+        if leaderboard["records"]:
+            self.assertEqual(leaderboard["records"][0]["rank"], 1)
+        deleted = http_json(f"{self.base_url}/api/backtest/{run_id}", method="DELETE")
+        self.assertEqual(deleted["deleted"], run_id)
+        history_after_delete = http_json(f"{self.base_url}/api/backtest/history")
+        self.assertNotIn(run_id, [item["run_id"] for item in history_after_delete["records"]])
+
     def test_z_large_json_and_static_assets_can_use_gzip(self) -> None:
         result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
         headers, body = http_get_raw(
@@ -143,6 +164,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("repoTargetMode", html)
         self.assertIn("assetWeightTitle", html)
         self.assertIn("controlSummary", html)
+        self.assertIn('id="historyPanel"', html)
+        self.assertIn('id="mobileHistoryToggle"', html)
+        self.assertIn('id="historyRecentMeta"', html)
+        self.assertIn('id="leaderboardList"', html)
         self.assertIn("allocationSummary", html)
         self.assertIn("data-repo-mode", html)
         self.assertIn("static/echarts.min.js", html)
@@ -167,6 +192,11 @@ class ApiTests(unittest.TestCase):
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")
         self.assertIn("/backtest/permanent-investment", app_js)
+        self.assertIn("MAX_RUN_HISTORY = 20", app_js)
+        self.assertIn("MAX_LEADERBOARD_RUNS = 100", app_js)
+        self.assertIn("replayHistoryRun", app_js)
+        self.assertIn("runHistory = recentRecords", app_js)
+        self.assertIn("archiveEntries", app_js)
 
         nested_config = http_json(f"{self.base_url}/backtest/permanent-investment/api/default-config")
         self.assertIn("assets", nested_config)

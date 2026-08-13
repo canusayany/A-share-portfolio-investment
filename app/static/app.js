@@ -1,5 +1,8 @@
 let config = null;
 let currentRunId = null;
+let runHistory = [];
+let leaderboardHistory = [];
+let comparisonRunId = null;
 const charts = {};
 let activeChartId = "assetChart";
 const pendingChartOptions = {};
@@ -12,12 +15,22 @@ const SP500_GROUP = "sp500";
 const SP500_CONTROL_KEY = "sp500_group";
 const BROAD_ETF_GROUP = "cn_broad_etf";
 const BROAD_ETF_CONTROL_KEY = "cn_broad_etf_group";
+const MAX_RUN_HISTORY = 20;
+const MAX_LEADERBOARD_RUNS = 100;
 
 const $ = (id) => document.getElementById(id);
 const fmtMoney = (v) => Number(v || 0).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
 const fmtPct = (v) => `${(Number(v || 0) * 100).toFixed(2)}%`;
 const fmtRate = (v, d = 4) => `${(Number(v || 0) * 100).toFixed(d)}%`;
 const fmtNum = (v, d = 2) => Number(v || 0).toFixed(d);
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
+}
+
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 900px)").matches;
+}
 
 const STATIC_NAMES = {
   VOO: "标普500指数基金",
@@ -26,6 +39,8 @@ const STATIC_NAMES = {
   "512890.SH": "红利低波基金",
   "510300.SH": "沪深300基金",
   "159631.SZ": "招商中证A100ETF",
+  "510500.SH": "南方中证500ETF",
+  "512100.SH": "南方中证1000ETF",
   "160706": "嘉实沪深300ETF联接(LOF)A",
   "518880.SH": "黄金基金",
   "518850.SH": "华夏黄金ETF（518850）",
@@ -40,9 +55,10 @@ const STATIC_NAMES = {
   "204028": "28天国债逆回购",
   "204091": "91天国债逆回购",
   "204182": "182天国债逆回购",
-  "511010.SH": "5年期国债ETF（511010）",
-  "511260.SH": "10年期国债ETF（511260）",
-  "511090.SH": "30年期国债ETF（511090）",
+  CBA03101: "中债-5年期国债指数",
+  CBA06501: "中债-7-10年期国债指数",
+  CBA21801: "中债-30年期国债指数",
+  "511990.SH": "华宝添益货币ETF（511990）",
   "USD/CNY": "美元兑人民币汇率",
   REPO: "国债逆回购",
 };
@@ -54,13 +70,16 @@ const SHORT_NAMES = {
   "512890.SH": "红利",
   "510300.SH": "沪深300",
   "159631.SZ": "中证A100",
+  "510500.SH": "中证500",
+  "512100.SH": "中证1000",
   "160706": "嘉实300",
   "518880.SH": "黄金",
   "518850.SH": "黄金低费率",
   "Au99.99": "AU99.99",
-  "511010.SH": "5年国债",
-  "511260.SH": "10年国债",
-  "511090.SH": "30年国债",
+  CBA03101: "5年国债",
+  CBA06501: "7-10年国债",
+  CBA21801: "30年国债",
+  "511990.SH": "货币基金",
   REPO: "逆回购",
 };
 
@@ -73,7 +92,7 @@ const DATA_KIND_NAMES = {
 };
 
 const SIDE_NAMES = { BUY: "买入", SELL: "卖出" };
-const REASON_NAMES = { rebalance: "再平衡", liquidity_shortfall: "补足现金" };
+const REASON_NAMES = { rebalance: "再平衡", liquidity_shortfall: "补足现金", dip_buy: "逢跌补仓" };
 const CURRENCY_NAMES = { CNY: "人民币", USD: "美元", HKD: "港币" };
 const CHART_COLORS = {
   accent: "#087a55",
@@ -99,6 +118,7 @@ const SOURCE_NAMES = {
   "eastmoney:index_kline": "东方财富指数行情",
   "tushare:fund_div": "专业基金分红",
   "tushare:fund_adj": "专业复权因子",
+  "chinabond:index_total_return": "中债财富指数",
   "eastmoney:hk_kline": "东方财富港股行情",
   "stooq:hk": "Stooq 港股行情",
   "public:dividend_unavailable_empty": "公开分红源不可用，按无分红覆盖",
@@ -133,6 +153,16 @@ const BROAD_ETF_ROUTE_DETAILS = {
   cn_a100_etf: [
     ["市场", "A股场内"],
     ["指数", "中证A100"],
+    ["费用", "场内ETF佣金/管理托管"],
+  ],
+  cn_csi500_etf: [
+    ["市场", "A股场内"],
+    ["指数", "中证500"],
+    ["费用", "场内ETF佣金/管理托管"],
+  ],
+  cn_csi1000_etf: [
+    ["市场", "A股场内"],
+    ["指数", "中证1000"],
     ["费用", "场内ETF佣金/管理托管"],
   ],
 };
@@ -380,8 +410,8 @@ function readConfig() {
   const broadEtfEnabled = $("enabled_cn_broad_etf_group")?.checked ?? false;
   const broadEtfWeight = Number($("weight_cn_broad_etf_group")?.value ?? 0);
   next.initial_capital_cny = Number($("initialCapital").value);
-  next.start_date = $("startDate").value;
-  next.end_date = $("endDate").value;
+  next.start_date = $("startDate").value || config.start_date;
+  next.end_date = $("endDate").value || config.end_date;
   next.rebalance_frequency = $("rebalanceFrequency").value;
   next.rebalance_band = Number($("rebalanceBand").value);
   next.monthly_spend_cny = Number($("monthlySpend").value);
@@ -389,6 +419,7 @@ function readConfig() {
   next.repo_fixed_target_cny = Number($("repoFixedTarget").value);
   next.repo_fixed_target_ratio = Number($("repoFixedRatio").value);
   next.repo_symbol = $("repoSymbol").value;
+  next.dip_buy_enabled = $("dipBuyEnabled").checked;
   next.assets = next.assets.map((asset) => {
     if (isSp500Asset(asset)) {
       const selected = asset.key === sp500SelectedKey;
@@ -436,9 +467,9 @@ function updateTreasuryHint() {
   const hint = $("treasuryFallbackHint");
   if (!hint) return;
   const option = selectedTreasuryOption();
-  hint.textContent = option?.instrument_type === "cn_bond_etf"
-    ? `可交易日起按调仓规则持有；此前或缺少真实价格时自动使用 1 天国债逆回购补足。`
-    : `闲置资金按所选期限滚动投资；临近消费日或调仓日时自动缩短期限。`;
+  hint.textContent = option?.instrument_type === "money_fund"
+    ? "现金池按调仓规则持有货币基金；上市前或缺少真实价格时自动使用 1 天国债逆回购补足。"
+    : "闲置资金按所选期限滚动投资；临近消费日或调仓日时自动缩短期限。";
 }
 
 function currentRepoMode() {
@@ -535,10 +566,11 @@ function renderControlSummary(plan) {
   const items = [
     ["区间", `${start} 至 ${end}`],
     ["初始资金", `￥${fmtMoney(initialCapital)}`],
-    ["再平衡", frequency],
+    ["再平衡", `${frequency} / 相对容忍带 ${fmtPct($("rebalanceBand")?.value || config.rebalance_band)}`],
     ["模式", repoModeLabel(plan.mode)],
-    ["国债品种", selectedTreasuryOption()?.name || assetName(config.repo_symbol)],
-    ["国债", repoValue],
+    ["现金方式", selectedTreasuryOption()?.name || assetName(config.repo_symbol)],
+    ["现金池", repoValue],
+    ["逢跌补仓", $("dipBuyEnabled")?.checked ? "开启（局部回撤 5%，现金 5%）" : "关闭"],
     ["月消费", `￥${fmtMoney(monthlySpend)}`],
   ];
   host.innerHTML = items.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("");
@@ -551,7 +583,7 @@ function renderAllocationSummary(plan) {
   const rows = [
     ["输入合计", fmtPct(plan.enabledWeight)],
     ["实际资产", fmtPct(actualAssetWeight)],
-    ["国债目标", plan.mode === "fixed_bucket" ? `￥${fmtMoney(plan.repoTargetValue)} / ${fmtPct(plan.repoWeight)}` : fmtPct(plan.repoWeight)],
+    ["现金池目标", plan.mode === "fixed_bucket" ? `￥${fmtMoney(plan.repoTargetValue)} / ${fmtPct(plan.repoWeight)}` : fmtPct(plan.repoWeight)],
   ];
   host.innerHTML = rows.map(([label, value]) => `
     <div class="allocation-item ${plan.warning ? "warning" : ""}">
@@ -669,6 +701,7 @@ function renderControls() {
   $("repoFixedTarget").value = config.repo_fixed_target_cny ?? 360000;
   $("repoFixedRatio").value = config.repo_fixed_target_ratio ?? 0;
   $("repoFixedRatioValue").textContent = fmtPct(config.repo_fixed_target_ratio ?? 0);
+  $("dipBuyEnabled").checked = Boolean(config.dip_buy_enabled);
   $("repoSymbol").innerHTML = (config.repo_options || []).map((option) => `<option value="${option.symbol}">${option.name}</option>`).join("");
   $("repoSymbol").value = config.repo_symbol;
   $("repoSymbol").addEventListener("change", updateRepoWeight);
@@ -684,7 +717,7 @@ function renderControls() {
     $(id).addEventListener("input", renderFeeSummary);
   });
   $("ibkrPlan").addEventListener("change", renderFeeSummary);
-  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "repoTargetMode", "repoFixedTarget", "repoFixedRatio"].forEach((id) => {
+  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled"].forEach((id) => {
     $(id).addEventListener(id === "rebalanceFrequency" || id === "repoTargetMode" ? "change" : "input", updateRepoWeight);
   });
   document.querySelectorAll("[data-repo-mode]").forEach((button) => {
@@ -1300,6 +1333,200 @@ async function loadBacktestResultSections(runId, onSeries) {
   return { series, rebalance, trades };
 }
 
+function renderBacktestRecords(rebalance, trades) {
+  const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || []);
+  renderTable("rebalanceTable", rebalanceTable.columns, rebalanceTable.rows, { pageSize: 200, newestFirst: true });
+  $("recordTabRebalance").textContent = `再平衡记录（${rebalanceTable.rows.length}）`;
+  renderTable(
+    "tradesTable",
+    ["交易日期", "标的名称", "方向", "份额", "价格", "成交额", "费用", "币种", "原因"],
+    (trades.trades || []).map((row) => ({
+      交易日期: row.trade_date,
+      标的名称: assetName(row.symbol),
+      方向: SIDE_NAMES[row.side] || row.side,
+      份额: row.quantity,
+      价格: row.price,
+      成交额: row.gross_amount,
+      费用: row.fee,
+      币种: CURRENCY_NAMES[row.currency] || row.currency,
+      原因: REASON_NAMES[row.reason] || row.reason,
+    })),
+    { pageSize: 300, newestFirst: true },
+  );
+  $("recordTabTrades").textContent = `交易流水（${(trades.trades || []).length}）`;
+}
+
+function historyTitle(entry) {
+  const assets = (entry.config?.assets || []).filter((asset) => asset.enabled && Number(asset.target_weight) > 0);
+  const names = assets.map((asset) => asset.choice_label || SHORT_NAMES[asset.symbol] || asset.name).filter(Boolean);
+  return names.slice(0, 2).join(" + ") || "自定义组合";
+}
+
+function historyParams(entry) {
+  const cfg = entry.config || {};
+  return `${cfg.start_date || "-"} 至 ${cfg.end_date || "-"} · ${cfg.rebalance_frequency || "-"}调仓`;
+}
+
+function formatHistoryTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "刚刚保存" : date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function currentHistoryEntry() {
+  return archiveEntries().find((entry) => entryRunId(entry) === currentRunId);
+}
+
+function archiveEntries() {
+  const entriesByRunId = new Map();
+  [...runHistory, ...leaderboardHistory].forEach((entry) => {
+    const runId = entryRunId(entry);
+    if (runId && !entriesByRunId.has(runId)) entriesByRunId.set(runId, entry);
+  });
+  return [...entriesByRunId.values()];
+}
+
+function entryRunId(entry) {
+  return entry.runId || entry.run_id;
+}
+
+function entryTime(entry) {
+  return entry.savedAt || entry.created_at;
+}
+
+function renderHistoryComparison() {
+  const host = $("historyComparison");
+  const compared = archiveEntries().find((entry) => entryRunId(entry) === comparisonRunId);
+  const current = currentHistoryEntry();
+  if (!host || !compared || !current || entryRunId(compared) === entryRunId(current)) {
+    if (host) host.hidden = true;
+    return;
+  }
+  const summary = current.summary || {};
+  const baseline = compared.summary || {};
+  const assetDelta = Number(summary.final_asset_cny || 0) - Number(baseline.final_asset_cny || 0);
+  const returnDelta = Number(summary.total_return || 0) - Number(baseline.total_return || 0);
+  const drawdownDelta = Number(summary.max_drawdown || 0) - Number(baseline.max_drawdown || 0);
+  host.hidden = false;
+  host.innerHTML = `<strong>当前结果 vs ${escapeHtml(historyTitle(compared))}</strong><span>期末资产 ${assetDelta >= 0 ? "+" : ""}￥${fmtMoney(assetDelta)} · 收益 ${returnDelta >= 0 ? "+" : ""}${fmtPct(returnDelta)} · 回撤 ${drawdownDelta >= 0 ? "+" : ""}${fmtPct(drawdownDelta)}</span>`;
+}
+
+function renderRunHistory() {
+  const host = $("historyList");
+  if (!host) return;
+  if (!runHistory.length) {
+    host.innerHTML = '<div class="history-empty">暂无最近回测记录。</div>';
+    renderHistoryComparison();
+    return;
+  }
+  host.innerHTML = runHistory.map((entry) => {
+    const summary = entry.summary || {};
+    const runId = entryRunId(entry);
+    const isCurrent = runId === currentRunId;
+    const compareLabel = runId === comparisonRunId ? "取消对比" : "对比";
+    return `<article class="history-item${isCurrent ? " is-current" : ""}">
+      <div class="history-item-header"><strong>${escapeHtml(historyTitle(entry))}</strong><time>${escapeHtml(formatHistoryTime(entryTime(entry)))}</time></div>
+      <div class="history-item-params">${escapeHtml(historyParams(entry))}</div>
+      <div class="history-item-metrics"><span>期末资产<b>￥${fmtMoney(summary.final_asset_cny)}</b></span><span>累计收益<b>${fmtPct(summary.total_return)}</b></span><span>最大回撤<b>${fmtPct(summary.max_drawdown)}</b></span></div>
+      <div class="history-item-actions"><button type="button" data-history-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-history-replay="${escapeHtml(runId)}">回放</button><button type="button" class="danger" data-history-delete="${escapeHtml(runId)}">删除</button></div>
+    </article>`;
+  }).join("");
+  host.querySelectorAll("[data-history-compare]").forEach((button) => {
+    button.addEventListener("click", () => {
+      comparisonRunId = comparisonRunId === button.dataset.historyCompare ? null : button.dataset.historyCompare;
+      renderRunHistory();
+    });
+  });
+  host.querySelectorAll("[data-history-replay]").forEach((button) => {
+    button.addEventListener("click", () => replayHistoryRun(button.dataset.historyReplay));
+  });
+  host.querySelectorAll("[data-history-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteHistoryRun(button.dataset.historyDelete));
+  });
+  renderHistoryComparison();
+}
+
+function renderLeaderboard(records) {
+  const host = $("leaderboardList");
+  if (!host) return;
+  if (!records.length) {
+    host.innerHTML = '<div class="history-empty">完成回测后会自动进入全局榜单。</div>';
+    return;
+  }
+  host.innerHTML = records.map((entry) => {
+    const summary = entry.summary || {};
+    const runId = entryRunId(entry);
+    return `<article class="history-item leaderboard-item">
+      <div class="history-item-header"><span class="leaderboard-rank">#${Number(entry.rank || 0)}</span><time>${escapeHtml(formatHistoryTime(entryTime(entry)))}</time></div>
+      <div class="history-item-params"><strong>${escapeHtml(historyTitle(entry))}</strong><br>${escapeHtml(historyParams(entry))}</div>
+      <div class="leaderboard-metrics"><span>年化收益<b>${fmtPct(summary.annualized_return)}</b></span><span>超额年化<b>${fmtPct(summary.excess_annualized_return)}</b></span><span>调整后 Calmar<b>${Number(summary.adjusted_calmar || 0).toFixed(2)}</b></span><span>最大回撤<b>${fmtPct(summary.max_drawdown)}</b></span><span>年度正收益<b>${fmtPct(summary.positive_year_ratio)}（${Number(entry.positive_year_count || summary.positive_year_count || 0)}/${Number(entry.complete_year_count || summary.complete_year_count || 0)}）</b></span><span>回测时间<b>${escapeHtml(`${summary.start_date || entry.config?.start_date || "-"} 至 ${summary.end_date || entry.config?.end_date || "-"}`)}</b></span></div>
+      <div class="leaderboard-score">综合评分 ${Number(entry.ranking_score || summary.ranking_score || 0).toFixed(2)} / 100 · 逆回购基准 ${fmtPct(summary.repo_annualized_return)}</div>
+      <div class="history-item-actions"><button type="button" data-leaderboard-replay="${escapeHtml(runId)}">回放</button><button type="button" class="danger" data-leaderboard-delete="${escapeHtml(runId)}">删除</button></div>
+    </article>`;
+  }).join("");
+  host.querySelectorAll("[data-leaderboard-replay]").forEach((button) => {
+    button.addEventListener("click", () => replayHistoryRun(button.dataset.leaderboardReplay));
+  });
+  host.querySelectorAll("[data-leaderboard-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteHistoryRun(button.dataset.leaderboardDelete));
+  });
+}
+
+async function refreshBacktestArchive() {
+  const [history, leaderboard] = await Promise.all([
+    api("/api/backtest/history"),
+    api("/api/backtest/leaderboard"),
+  ]);
+  const recentRecords = (history.records || []).slice(0, MAX_RUN_HISTORY);
+  leaderboardHistory = (leaderboard.records || []).slice(0, MAX_LEADERBOARD_RUNS);
+  runHistory = recentRecords;
+  const historyRecentMeta = $("historyRecentMeta");
+  if (historyRecentMeta) historyRecentMeta.textContent = `数据库最近 ${recentRecords.length} / ${MAX_RUN_HISTORY} 组`;
+  renderRunHistory();
+  renderLeaderboard(leaderboardHistory);
+}
+
+async function refreshBacktestArchiveSafely() {
+  try {
+    await refreshBacktestArchive();
+  } catch (error) {
+    console.warn("无法刷新回测归档", error);
+  }
+}
+
+async function deleteHistoryRun(runId) {
+  if (!runId || !window.confirm("删除这组回测及其榜单记录？此操作不可恢复。")) return;
+  try {
+    await api(`/api/backtest/${encodeURIComponent(runId)}`, { method: "DELETE", retry: true });
+    if (currentRunId === runId) currentRunId = null;
+    if (comparisonRunId === runId) comparisonRunId = null;
+    await refreshBacktestArchiveSafely();
+    setMessage("回测记录已从数据库删除");
+  } catch (error) {
+    setMessage(`删除失败：${humanizeError(error.message)}`, true);
+  }
+}
+
+async function replayHistoryRun(runId) {
+  setMessage("正在回放已保存的回测结果...");
+  try {
+    const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`);
+    config = JSON.parse(JSON.stringify(entry.config));
+    renderControls();
+    currentRunId = entry.run_id;
+    renderSummary(entry.summary);
+    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, (series) => {
+      renderSummary(deriveSummary(entry.summary, series));
+      renderCharts(series);
+    });
+    renderBacktestRecords(rebalance, trades);
+    await refreshBacktestArchiveSafely();
+    setHistoryPanel(false);
+    setMessage("已回放保存的回测结果");
+  } catch (error) {
+    setMessage(`回放失败：${humanizeError(error.message)}`, true);
+  }
+}
+
 async function runBacktest() {
   const button = $("runBtn");
   const buttonLabel = button.querySelector("span");
@@ -1309,9 +1536,10 @@ async function runBacktest() {
   if (window.matchMedia("(max-width: 900px)").matches) setParameterPanel(false);
   setMessage("正在提交回测任务...");
   try {
+    const submittedConfig = readConfig();
     const job = await api("/api/backtest/start", {
       method: "POST",
-      body: JSON.stringify({ config: readConfig(), client_request_id: createClientRequestId() }),
+      body: JSON.stringify({ config: submittedConfig, client_request_id: createClientRequestId() }),
       retry: true,
       attempts: 3,
       retryDelayMs: 700,
@@ -1321,30 +1549,14 @@ async function runBacktest() {
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
     renderSummary(result.summary);
+    let finalSummary = result.summary;
     const { rebalance, trades } = await loadBacktestResultSections(currentRunId, (computedSeries) => {
-      renderSummary(deriveSummary(result.summary, computedSeries));
+      finalSummary = deriveSummary(result.summary, computedSeries);
+      renderSummary(finalSummary);
       renderCharts(computedSeries);
     });
-    const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || []);
-    renderTable("rebalanceTable", rebalanceTable.columns, rebalanceTable.rows, { pageSize: 200, newestFirst: true });
-    $("recordTabRebalance").textContent = `再平衡记录（${rebalanceTable.rows.length}）`;
-    renderTable(
-      "tradesTable",
-      ["交易日期", "标的名称", "方向", "份额", "价格", "成交额", "费用", "币种", "原因"],
-      (trades.trades || []).map((row) => ({
-        交易日期: row.trade_date,
-        标的名称: assetName(row.symbol),
-        方向: SIDE_NAMES[row.side] || row.side,
-        份额: row.quantity,
-        价格: row.price,
-        成交额: row.gross_amount,
-        费用: row.fee,
-        币种: CURRENCY_NAMES[row.currency] || row.currency,
-        原因: REASON_NAMES[row.reason] || row.reason,
-      })),
-      { pageSize: 300, newestFirst: true },
-    );
-    $("recordTabTrades").textContent = `交易流水（${(trades.trades || []).length}）`;
+    renderBacktestRecords(rebalance, trades);
+    await refreshBacktestArchiveSafely();
     if (result.cache?.hit) {
       setMessage("参数一致，已直接读取历史回测结果");
     } else if (result.data_sync?.triggered) {
@@ -1363,11 +1575,29 @@ async function runBacktest() {
 }
 
 function setParameterPanel(open) {
+  if (open) setHistoryPanel(false);
   document.body.classList.toggle("parameters-open", open);
   [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => {
     button.setAttribute("aria-expanded", open ? "true" : "false");
   });
   if (open) window.requestAnimationFrame(() => $("closeParameterPanel")?.focus());
+}
+
+function setHistoryPanel(open) {
+  if (open) {
+    document.body.classList.remove("parameters-open");
+    [$('parameterToggle'), $('mobileParameterToggle')].filter(Boolean).forEach((button) => button.setAttribute("aria-expanded", "false"));
+  }
+  if (isMobileLayout()) {
+    document.body.classList.toggle("history-open", open);
+  } else {
+    document.body.classList.toggle("history-collapsed", !open);
+  }
+  const expanded = isMobileLayout()
+    ? document.body.classList.contains("history-open")
+    : !document.body.classList.contains("history-collapsed");
+  [$('historyToggle'), $('mobileHistoryToggle')].filter(Boolean).forEach((button) => button.setAttribute("aria-expanded", expanded ? "true" : "false"));
+  if (expanded) window.requestAnimationFrame(() => $("closeHistoryPanel")?.focus());
 }
 
 function setupTabs(selector, dataKey, selectPanel) {
@@ -1394,8 +1624,14 @@ function setupUiInteractions() {
   });
   $("closeParameterPanel")?.addEventListener("click", () => setParameterPanel(false));
   $("parameterBackdrop")?.addEventListener("click", () => setParameterPanel(false));
+  $("historyToggle")?.addEventListener("click", () => setHistoryPanel(document.body.classList.contains("history-collapsed")));
+  $("mobileHistoryToggle")?.addEventListener("click", () => setHistoryPanel(true));
+  $("closeHistoryPanel")?.addEventListener("click", () => setHistoryPanel(false));
+  $("historyBackdrop")?.addEventListener("click", () => setHistoryPanel(false));
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && document.body.classList.contains("parameters-open")) setParameterPanel(false);
+    if (event.key !== "Escape") return;
+    if (document.body.classList.contains("parameters-open")) setParameterPanel(false);
+    if (document.body.classList.contains("history-open")) setHistoryPanel(false);
   });
   setupTabs("[data-chart-tab]", "chartTab", selectChart);
   setupTabs("[data-record-tab]", "recordTab", selectRecordPanel);
@@ -1405,11 +1641,13 @@ function setupUiInteractions() {
 
 async function init() {
   setupUiInteractions();
+  renderRunHistory();
   renderInitialSummary();
   renderTable("rebalanceTable", [], []);
   renderTable("tradesTable", [], []);
   config = await api("/api/default-config");
   renderControls();
+  await refreshBacktestArchiveSafely();
   $("runBtn").addEventListener("click", runBacktest);
   window.addEventListener("resize", queueChartResize);
   setMessage("准备就绪，可以运行回测");

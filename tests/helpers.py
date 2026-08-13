@@ -122,19 +122,23 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
         "512890.SH": 1.0,
         "510300.SH": 3.0,
         "159631.SZ": 1.5,
+        "510500.SH": 2.0,
+        "512100.SH": 1.8,
         "518880.SH": 2.5,
         "518850.SH": 4.0,
-        "511010.SH": 100.0,
-        "511260.SH": 100.0,
-        "511090.SH": 100.0,
+        "CBA03101": 100.0,
+        "CBA06501": 100.0,
+        "CBA21801": 100.0,
+        "511990.SH": 100.0,
         "000300.SH": 3500.0,
     }
     for asset in assets:
         fetch_start = max(start, asset_price_start_date(asset, start))
         insert_many(conn, "prices", fixture_price_series(asset["symbol"], fetch_start, end, asset["currency"], seeds[asset["symbol"]]))
-        dividend_start = max(start, asset.get("inception_date") or start)
-        insert_many(conn, "fund_dividends", fixture_dividends(asset["symbol"], dividend_start, end, asset["currency"]))
-        mark_sync_coverage(conn, "dividends", asset["symbol"], dividend_start, end, "fixture:dividend")
+        if asset.get("asset_type") != "money_fund":
+            dividend_start = max(start, asset.get("inception_date") or start)
+            insert_many(conn, "fund_dividends", fixture_dividends(asset["symbol"], dividend_start, end, asset["currency"]))
+            mark_sync_coverage(conn, "dividends", asset["symbol"], dividend_start, end, "fixture:dividend")
         if asset["market"] == "CN":
             insert_many(
                 conn,

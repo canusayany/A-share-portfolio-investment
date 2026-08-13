@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -116,10 +117,95 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "price_fallback": {
             "kind": "index",
             "symbol": "000903.SH",
-            "name": "中证100/中证A100指数",
+            "name": "中证100指数（2024-10-28更名中证A100）",
             "start_date": "2005-12-30",
             "scale_mode": "splice",
+            "required": False,
         },
+    },
+    {
+        "key": "cn_csi500_etf",
+        "symbol": "510500.SH",
+        "name": "南方中证500ETF",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "exclusive_group": "cn_broad_etf",
+        "choice_label": "中证500 510500",
+        "inception_date": "2013-02-06",
+        "trade_start_date": "2013-03-15",
+        "management_fee": 0.0015,
+        "custodian_fee": 0.0005,
+        "price_fallback": {
+            "kind": "index",
+            "symbol": "000905.SH",
+            "name": "中证500指数",
+            "start_date": "2004-12-31",
+            "scale_mode": "splice",
+        },
+    },
+    {
+        "key": "cn_csi1000_etf",
+        "symbol": "512100.SH",
+        "name": "南方中证1000ETF",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "exclusive_group": "cn_broad_etf",
+        "choice_label": "中证1000 512100",
+        "inception_date": "2016-09-29",
+        "trade_start_date": "2016-11-04",
+        "management_fee": 0.0015,
+        "custodian_fee": 0.0005,
+        "price_fallback": {
+            "kind": "index",
+            "symbol": "000852.SH",
+            "name": "中证1000指数",
+            "start_date": "2004-12-31",
+            "scale_mode": "splice",
+        },
+    },
+    {
+        "key": "cn_treasury_5y_index",
+        "symbol": "CBA03101",
+        "name": "中债-5年期国债指数",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_bond_index",
+        # ChinaBond's public total-return series starts on this date.  Do not
+        # pretend that pre-history is investable and silently route it to cash.
+        "inception_date": "2008-01-02",
+        "index_id": "8a8b2ca03a3feea1013a44b98fc533f5",
+    },
+    {
+        "key": "cn_treasury_7_10y_index",
+        "symbol": "CBA06501",
+        "name": "中债-7-10年期国债指数",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_bond_index",
+        "inception_date": "2007-01-04",
+        "index_id": "8a8b2c8f5a492a01015a4ac986480043",
+    },
+    {
+        "key": "cn_treasury_30y_index",
+        "symbol": "CBA21801",
+        "name": "中债-30年期国债指数",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_bond_index",
+        "inception_date": "2011-01-04",
+        "index_id": "8a8b2cef77b239980177b485d20a6379",
     },
     {
         "key": "cn_gold_etf",
@@ -140,6 +226,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
             "start_date": "2002-10-30",
             "scale_mode": "fixed",
             "price_scale": 0.01,
+            "required": False,
         },
         "replacement_assets": [
             {
@@ -170,40 +257,18 @@ REPO_OPTIONS: list[dict[str, Any]] = [
     {"symbol": "204091", "name": "91天国债逆回购", "instrument_type": "repo", "tenor_days": 91},
     {"symbol": "204182", "name": "182天国债逆回购", "instrument_type": "repo", "tenor_days": 182},
     {
-        "key": "cn_bond_etf_511010",
-        "symbol": "511010.SH",
-        "display_symbol": "511010",
-        "name": "5年期国债ETF（511010）",
-        "instrument_type": "cn_bond_etf",
+        "key": "money_fund_511990",
+        "symbol": "511990.SH",
+        "display_symbol": "511990",
+        "name": "华宝添益货币ETF（511990）",
+        "instrument_type": "money_fund",
         "currency": "CNY",
         "market": "CN",
-        "asset_type": "cn_etf",
-        "inception_date": "2013-03-05",
-        "trade_start_date": "2013-03-25",
-    },
-    {
-        "key": "cn_bond_etf_511260",
-        "symbol": "511260.SH",
-        "display_symbol": "511260",
-        "name": "10年期国债ETF（511260）",
-        "instrument_type": "cn_bond_etf",
-        "currency": "CNY",
-        "market": "CN",
-        "asset_type": "cn_etf",
-        "inception_date": "2017-08-04",
-        "trade_start_date": "2017-08-24",
-    },
-    {
-        "key": "cn_bond_etf_511090",
-        "symbol": "511090.SH",
-        "display_symbol": "511090",
-        "name": "30年期国债ETF（511090）",
-        "instrument_type": "cn_bond_etf",
-        "currency": "CNY",
-        "market": "CN",
-        "asset_type": "cn_etf",
-        "inception_date": "2023-05-19",
-        "trade_start_date": "2023-06-13",
+        # Its exchange-traded shares first have a public market price on
+        # 2013-01-28.  Market prices include the current holding-period income.
+        "asset_type": "money_fund",
+        "inception_date": "2012-12-27",
+        "trade_start_date": "2013-01-28",
     },
 ]
 
@@ -213,13 +278,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "start_date": "2012-01-01",
     "end_date": date.today().isoformat(),
     "rebalance_frequency": "yearly",
-    "rebalance_band": 0.02,
+    # Relative tolerance around each target weight; 25% means a 10% target can
+    # drift between 7.5% and 12.5% before a rebalance is needed.
+    "rebalance_band": 0.25,
     "monthly_spend_cny": 5_000.0,
     "monthly_spend_day": "first_cn_trade_day",
     "repo_target_mode": "residual_weight",
     "repo_fixed_target_cny": 360_000.0,
     "repo_fixed_target_ratio": 0.0,
     "repo_symbol": "204001",
+    "dip_buy_enabled": False,
+    "dip_buy_drawdown": 0.05,
+    "dip_buy_cash_ratio": 0.05,
     "repo_options": REPO_OPTIONS,
     "allow_fractional_us_shares": True,
     "liquidity_policy": "sell_overweight",
@@ -340,12 +410,18 @@ def selected_repo_option(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def selected_bond_etf_asset(config: dict[str, Any]) -> dict[str, Any] | None:
+    # Kept as a compatibility shim for callers from older configurations. Treasury
+    # exposure now lives in DEFAULT_ASSETS and can be combined by target weight.
+    return None
+
+
+def selected_money_fund_asset(config: dict[str, Any]) -> dict[str, Any] | None:
     option = selected_repo_option(config)
-    if option.get("instrument_type") != "cn_bond_etf":
+    if option.get("instrument_type") != "money_fund":
         return None
     return {
         **option,
-        "key": option.get("key") or f"cn_bond_etf_{str(option['symbol']).split('.')[0]}",
+        "key": option.get("key") or f"money_fund_{str(option['symbol']).split('.')[0]}",
         "target_weight": 0.0,
         "enabled": True,
     }
@@ -364,15 +440,17 @@ def backtest_assets(config: dict[str, Any]) -> list[dict[str, Any]]:
             replacement_asset.pop("replacement_assets", None)
             if all(item.get("symbol") != replacement_asset["symbol"] for item in assets):
                 assets.append(replacement_asset)
-    bond_asset = selected_bond_etf_asset(config)
-    if bond_asset and all(asset.get("symbol") != bond_asset["symbol"] for asset in assets):
-        assets.append(bond_asset)
+    cash_asset = selected_money_fund_asset(config)
+    if cash_asset:
+        if all(asset.get("symbol") != cash_asset["symbol"] for asset in assets):
+            assets.append(cash_asset)
     return assets
 
 
 def repo_rate_symbol(config: dict[str, Any]) -> str:
-    option = selected_repo_option(config)
-    return str(option.get("symbol") or "204001") if option.get("instrument_type", "repo") == "repo" else "204001"
+    # Reverse repo remains the cash ledger and fallback rate; a money-fund choice
+    # is an investable cash asset, not a replacement for its settlement mechanics.
+    return "204001"
 
 
 def asset_price_start_date(asset: dict[str, Any], default_start: str) -> str:
@@ -397,6 +475,8 @@ def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:
     if not user_config:
         return config
     for key, value in user_config.items():
+        if key in {"start_date", "end_date"} and isinstance(value, str) and not value.strip():
+            continue
         if key == "fees" and isinstance(value, dict):
             for fee_key, fee_value in value.items():
                 if isinstance(fee_value, dict) and fee_key in config["fees"]:
@@ -404,7 +484,24 @@ def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:
                 else:
                     config["fees"][fee_key] = fee_value
         elif key == "assets" and isinstance(value, list):
-            config["assets"] = value
+            # Asset definitions control data quality and replacement rules.  A page
+            # kept open across a deployment can hold an older definition, so only
+            # accept the two user-editable selection values from its payload.
+            selections: dict[str, dict[str, Any]] = {}
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                identifier = str(item.get("key") or item.get("symbol") or "")
+                if identifier:
+                    selections[identifier] = item
+            for asset in config["assets"]:
+                selection = selections.get(str(asset.get("key"))) or selections.get(str(asset.get("symbol")))
+                if not selection:
+                    continue
+                if "enabled" in selection:
+                    asset["enabled"] = bool(selection["enabled"])
+                if "target_weight" in selection:
+                    asset["target_weight"] = selection["target_weight"]
         else:
             config[key] = value
     return config
@@ -421,11 +518,18 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("start_date and end_date must use YYYY-MM-DD")
 
     repo_target_mode = config.get("repo_target_mode", "residual_weight")
-    enabled_weight = sum(
-        float(asset.get("target_weight", 0))
-        for asset in config.get("assets", [])
-        if asset.get("enabled", True)
-    )
+    enabled_weight = 0.0
+    for asset in config.get("assets", []):
+        try:
+            weight = float(asset.get("target_weight", 0))
+        except (TypeError, ValueError):
+            errors.append(f"asset {asset.get('symbol', asset.get('key', 'unknown'))} target_weight must be numeric")
+            continue
+        if not math.isfinite(weight) or weight < 0:
+            errors.append(f"asset {asset.get('symbol', asset.get('key', 'unknown'))} target_weight must be non-negative")
+            continue
+        if asset.get("enabled", True):
+            enabled_weight += weight
     if repo_target_mode == "residual_weight" and enabled_weight > 1.0000001:
         errors.append("enabled asset target weights cannot exceed 100%")
     enabled_groups: dict[str, list[str]] = {}
@@ -436,13 +540,38 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     for group, symbols in enabled_groups.items():
         if len(symbols) > 1:
             errors.append(f"exclusive asset group {group} can enable only one asset")
-    if float(config.get("initial_capital_cny", 0)) <= 0:
-        errors.append("initial_capital_cny must be positive")
+    try:
+        initial_capital = float(config.get("initial_capital_cny", 0))
+        if not math.isfinite(initial_capital) or initial_capital <= 0:
+            errors.append("initial_capital_cny must be positive")
+    except (TypeError, ValueError):
+        errors.append("initial_capital_cny must be numeric")
     valid_rebalance_frequencies = {"daily", "weekly", "monthly", "quarterly", "semiannual", "yearly"}
     if config.get("rebalance_frequency") not in valid_rebalance_frequencies:
         errors.append("rebalance_frequency must be daily, weekly, monthly, quarterly, semiannual, or yearly")
     if repo_target_mode not in {"residual_weight", "fixed_bucket"}:
         errors.append("repo_target_mode must be residual_weight or fixed_bucket")
+    try:
+        rebalance_band = float(config.get("rebalance_band", 0))
+        if not math.isfinite(rebalance_band) or not 0 <= rebalance_band <= 1:
+            errors.append("rebalance_band must be between 0 and 1")
+    except (TypeError, ValueError):
+        errors.append("rebalance_band must be numeric")
+    try:
+        monthly_spend = float(config.get("monthly_spend_cny", 0))
+        if not math.isfinite(monthly_spend) or monthly_spend < 0:
+            errors.append("monthly_spend_cny must be non-negative")
+    except (TypeError, ValueError):
+        errors.append("monthly_spend_cny must be numeric")
+    try:
+        dip_buy_drawdown = float(config.get("dip_buy_drawdown", 0.05))
+        dip_buy_cash_ratio = float(config.get("dip_buy_cash_ratio", 0.05))
+        if not 0 < dip_buy_drawdown < 1:
+            errors.append("dip_buy_drawdown must be between 0 and 1")
+        if not 0 < dip_buy_cash_ratio <= 1:
+            errors.append("dip_buy_cash_ratio must be between 0 and 1")
+    except (TypeError, ValueError):
+        errors.append("dip buy parameters must be numeric")
     try:
         if float(config.get("repo_fixed_target_cny", 0)) < 0:
             errors.append("repo_fixed_target_cny must be non-negative")

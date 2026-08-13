@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260715-rebalance-cdn-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260813-treasury-closure-3" />
     <script src="static/echarts.min.js?v=5.6.0"></script>
   </head>
   <body>
@@ -13,13 +13,15 @@
         <strong>永久投资策略</strong>
         <span id="mobileDataStatus">正在检查数据</span>
       </div>
-      <button id="mobileParameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">
-        调整参数
-      </button>
+      <div class="mobile-app-actions">
+        <button id="mobileHistoryToggle" class="button button-secondary" type="button" aria-controls="historyPanel" aria-expanded="false">回测记录</button>
+        <button id="mobileParameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">调整参数</button>
+      </div>
     </header>
 
     <div class="app-shell">
       <button id="parameterBackdrop" class="parameter-backdrop" type="button" aria-label="关闭参数面板" tabindex="-1"></button>
+      <button id="historyBackdrop" class="history-backdrop" type="button" aria-label="关闭回测记录面板" tabindex="-1"></button>
 
       <aside id="parameterPanel" class="controls" aria-label="回测参数">
         <div class="control-panel-header">
@@ -80,8 +82,13 @@
               </label>
             </div>
             <label class="range-field">
-              <span>再平衡容忍带 <strong id="bandValue"></strong></span>
-              <input id="rebalanceBand" type="range" min="0" max="0.1" step="0.005" />
+              <span>相对再平衡容忍带 <strong id="bandValue"></strong></span>
+              <input id="rebalanceBand" type="range" min="0" max="0.5" step="0.01" />
+              <small class="field-help">按目标权重的比例计算：目标 10%、容忍带 25%，允许区间为 7.5% 至 12.5%。</small>
+            </label>
+            <label class="strategy-toggle">
+              <input id="dipBuyEnabled" type="checkbox" />
+              <span><strong>逢跌补仓</strong><small>宽基/黄金从最近局部高点回撤 5% 时，下一交易日用可用现金的 5% 买入</small></span>
             </label>
           </section>
 
@@ -89,8 +96,8 @@
             <div class="section-heading">
               <span>2</span>
               <div>
-                <h2>国债与消费池</h2>
-                <p>选择逆回购或国债 ETF，并设置现金缓冲</p>
+                <h2>现金与消费池</h2>
+                <p>选择国债逆回购或货币基金，并设置现金缓冲</p>
               </div>
             </div>
             <label class="visually-hidden">
@@ -106,21 +113,21 @@
             </div>
             <div id="repoFixedControls" class="repo-fixed-controls" hidden>
               <label>
-                国债固定金额（元）
+                现金池固定金额（元）
                 <input id="repoFixedTarget" type="number" min="0" step="10000" inputmode="decimal" />
               </label>
               <label class="range-field">
-                <span>国债固定比例 <strong id="repoFixedRatioValue"></strong></span>
+                <span>现金池固定比例 <strong id="repoFixedRatioValue"></strong></span>
                 <input id="repoFixedRatio" type="range" min="0" max="0.8" step="0.01" />
               </label>
             </div>
             <label>
-              国债持有品种
+              现金管理方式
               <select id="repoSymbol"></select>
               <small id="treasuryFallbackHint" class="field-help"></small>
             </label>
             <div class="repo-weight">
-              <span>当前国债目标</span>
+              <span>当前现金池目标</span>
               <strong id="repoWeight">0%</strong>
             </div>
           </section>
@@ -130,7 +137,7 @@
               <span>3</span>
               <div>
                 <h2 id="assetWeightTitle">资产配置</h2>
-                <p>启用资产并调整目标比例</p>
+                <p>可同时配置 5 年、7-10 年与 30 年国债指数，并调整各自比例</p>
               </div>
             </div>
             <div id="allocationSummary" class="allocation-summary"></div>
@@ -183,9 +190,10 @@
             <h2>回测结果</h2>
             <p>先看收益和回撤，再深入检查资产走势与交易记录</p>
           </div>
-          <button id="parameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">
-            调整参数
-          </button>
+          <div class="workspace-actions">
+            <button id="historyToggle" class="button button-secondary" type="button" aria-controls="historyPanel" aria-expanded="true">回测记录</button>
+            <button id="parameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">调整参数</button>
+          </div>
         </header>
 
         <section class="context-strip" aria-label="当前配置与数据状态">
@@ -260,7 +268,34 @@
           <div class="table-hint">表格可横向滚动查看完整字段</div>
         </section>
       </main>
+
+      <aside id="historyPanel" class="history-sidebar" aria-label="回测记录与榜单">
+        <div class="history-panel-header">
+          <div>
+            <h2>回测记录与榜单</h2>
+            <p>数据库保存最近 20 组；超额年化至少 2% 才进入前 100 榜单</p>
+          </div>
+          <button id="closeHistoryPanel" class="icon-button close-history" type="button" aria-label="关闭回测记录面板">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          </button>
+        </div>
+        <div id="historyComparison" class="history-comparison" hidden></div>
+        <div class="history-sections">
+          <section class="history-section" aria-labelledby="historyRecentTitle">
+            <div class="history-section-heading">
+              <span><strong id="historyRecentTitle">最近回测</strong><small id="historyRecentMeta">最近 20 组记录</small></span>
+            </div>
+            <div id="historyList" class="history-list" aria-live="polite"></div>
+          </section>
+          <section class="history-section" aria-labelledby="leaderboardTitle">
+            <div class="history-section-heading">
+              <span><strong id="leaderboardTitle">全局榜单</strong><small>前 100 组 · 超额收益、风险效率与稳定性</small></span>
+            </div>
+            <div id="leaderboardList" class="history-list leaderboard-list" aria-live="polite"></div>
+          </section>
+        </div>
+      </aside>
     </div>
-    <script src="static/app.js?v=20260727-a100-1"></script>
+  <script src="static/app.js?v=20260813-treasury-closure-3"></script>
   </body>
 </html>
