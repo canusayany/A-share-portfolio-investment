@@ -73,8 +73,35 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "market": "CN",
         "asset_type": "cn_etf",
         "inception_date": "2018-12-19",
+        "trade_start_date": "2019-01-18",
         "management_fee": 0.005,
         "custodian_fee": 0.001,
+        # Tushare can publish the latest fund adjustment factor later than the
+        # exchange close. Between corporate actions the factor is constant, so
+        # an explicitly labelled tail carry keeps fresh real prices usable;
+        # any subsequently published official value replaces it on upsert.
+        "allow_adj_factor_tail_carry_forward": True,
+        "price_fallback": {
+            "kind": "index",
+            "symbol": "H20269.CSI",
+            "name": "中证红利低波动全收益指数",
+            "start_date": "2005-12-30",
+            "scale_mode": "splice",
+            # H20269 is a gross total-return index and therefore does not
+            # include the ETF's own operating expenses. Apply 512890's launch-
+            # era management (0.50%), custody (0.10%), and index licence
+            # (0.03%) drag only to the synthetic pre-listing segment. The
+            # licence fee moved to the manager in 2025, while the real ETF
+            # price already includes the fees applicable on each actual date.
+            "annual_expense_drag_rate": 0.0063,
+        },
+        "share_splits": [
+            {
+                "effective_date": "2021-10-25",
+                "price_multiplier": 2.0,
+                "source": "sse:512890:2021-10-22",
+            }
+        ],
     },
     {
         "key": "cn_hs300_etf",
@@ -278,6 +305,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "start_date": "2012-01-01",
     "end_date": date.today().isoformat(),
     "rebalance_frequency": "yearly",
+    "annual_rebalance_month": 1,
+    "rolling_window_years": 3,
+    "rebalance_month_analysis_enabled": False,
     # Relative tolerance around each target weight; 25% means a 10% target can
     # drift between 7.5% and 12.5% before a rebalance is needed.
     "rebalance_band": 0.25,
@@ -477,13 +507,19 @@ def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:
     for key, value in user_config.items():
         if key in {"start_date", "end_date"} and isinstance(value, str) and not value.strip():
             continue
-        if key == "fees" and isinstance(value, dict):
+        if key == "fees":
+            if not isinstance(value, dict):
+                config["fees"] = value
+                continue
             for fee_key, fee_value in value.items():
                 if isinstance(fee_value, dict) and fee_key in config["fees"]:
                     config["fees"][fee_key].update(fee_value)
                 else:
                     config["fees"][fee_key] = fee_value
-        elif key == "assets" and isinstance(value, list):
+        elif key == "assets":
+            if not isinstance(value, list):
+                config["assets"] = value
+                continue
             # Asset definitions control data quality and replacement rules.  A page
             # kept open across a deployment can hold an older definition, so only
             # accept the two user-editable selection values from its payload.
@@ -502,6 +538,11 @@ def normalize_config(user_config: dict[str, Any] | None) -> dict[str, Any]:
                     asset["enabled"] = bool(selection["enabled"])
                 if "target_weight" in selection:
                     asset["target_weight"] = selection["target_weight"]
+        elif key == "repo_options":
+            # Instrument type, tenor and listing metadata are server rules.  A
+            # cached page may carry an older copy, so only repo_symbol is accepted
+            # from the client and the current catalog always wins.
+            continue
         else:
             config[key] = value
     return config
@@ -518,8 +559,15 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("start_date and end_date must use YYYY-MM-DD")
 
     repo_target_mode = config.get("repo_target_mode", "residual_weight")
+    assets = config.get("assets", [])
+    if not isinstance(assets, list):
+        errors.append("assets must be a list")
+        assets = []
     enabled_weight = 0.0
-    for asset in config.get("assets", []):
+    for asset in assets:
+        if not isinstance(asset, dict):
+            errors.append("each asset must be an object")
+            continue
         try:
             weight = float(asset.get("target_weight", 0))
         except (TypeError, ValueError):
@@ -533,7 +581,9 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     if repo_target_mode == "residual_weight" and enabled_weight > 1.0000001:
         errors.append("enabled asset target weights cannot exceed 100%")
     enabled_groups: dict[str, list[str]] = {}
-    for asset in config.get("assets", []):
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
         group = asset.get("exclusive_group")
         if group and asset.get("enabled", True):
             enabled_groups.setdefault(group, []).append(asset.get("symbol", asset.get("key", group)))
@@ -549,6 +599,32 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     valid_rebalance_frequencies = {"daily", "weekly", "monthly", "quarterly", "semiannual", "yearly"}
     if config.get("rebalance_frequency") not in valid_rebalance_frequencies:
         errors.append("rebalance_frequency must be daily, weekly, monthly, quarterly, semiannual, or yearly")
+    try:
+        annual_rebalance_month_value = config.get("annual_rebalance_month", 1)
+        annual_rebalance_month = float(annual_rebalance_month_value)
+        if (
+            isinstance(annual_rebalance_month_value, bool)
+            or not math.isfinite(annual_rebalance_month)
+            or not annual_rebalance_month.is_integer()
+            or not 1 <= annual_rebalance_month <= 12
+        ):
+            errors.append("annual_rebalance_month must be an integer between 1 and 12")
+    except (TypeError, ValueError):
+        errors.append("annual_rebalance_month must be an integer between 1 and 12")
+    try:
+        rolling_window_years_value = config.get("rolling_window_years", 3)
+        rolling_window_years = float(rolling_window_years_value)
+        if (
+            isinstance(rolling_window_years_value, bool)
+            or not math.isfinite(rolling_window_years)
+            or not rolling_window_years.is_integer()
+            or not 1 <= rolling_window_years <= 20
+        ):
+            errors.append("rolling_window_years must be an integer between 1 and 20")
+    except (TypeError, ValueError):
+        errors.append("rolling_window_years must be an integer between 1 and 20")
+    if not isinstance(config.get("rebalance_month_analysis_enabled", False), bool):
+        errors.append("rebalance_month_analysis_enabled must be boolean")
     if repo_target_mode not in {"residual_weight", "fixed_bucket"}:
         errors.append("repo_target_mode must be residual_weight or fixed_bucket")
     try:
@@ -566,21 +642,56 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     try:
         dip_buy_drawdown = float(config.get("dip_buy_drawdown", 0.05))
         dip_buy_cash_ratio = float(config.get("dip_buy_cash_ratio", 0.05))
-        if not 0 < dip_buy_drawdown < 1:
+        if not math.isfinite(dip_buy_drawdown) or not 0 < dip_buy_drawdown < 1:
             errors.append("dip_buy_drawdown must be between 0 and 1")
-        if not 0 < dip_buy_cash_ratio <= 1:
+        if not math.isfinite(dip_buy_cash_ratio) or not 0 < dip_buy_cash_ratio <= 1:
             errors.append("dip_buy_cash_ratio must be between 0 and 1")
     except (TypeError, ValueError):
         errors.append("dip buy parameters must be numeric")
     try:
-        if float(config.get("repo_fixed_target_cny", 0)) < 0:
+        repo_fixed_target_cny = float(config.get("repo_fixed_target_cny", 0))
+        if not math.isfinite(repo_fixed_target_cny) or repo_fixed_target_cny < 0:
             errors.append("repo_fixed_target_cny must be non-negative")
         repo_fixed_target_ratio = float(config.get("repo_fixed_target_ratio", 0))
-        if not 0 <= repo_fixed_target_ratio <= 1:
+        if not math.isfinite(repo_fixed_target_ratio) or not 0 <= repo_fixed_target_ratio <= 1:
             errors.append("repo_fixed_target_ratio must be between 0 and 1")
     except (TypeError, ValueError):
         errors.append("repo fixed target parameters must be numeric")
     valid_repo_symbols = {item["symbol"] for item in config.get("repo_options", REPO_OPTIONS)}
     if config.get("repo_symbol") not in valid_repo_symbols:
         errors.append("repo_symbol must be one of configured repo options")
+
+    fees = config.get("fees")
+    if not isinstance(fees, dict):
+        errors.append("fees must be an object")
+        return errors
+    boolean_fee_fields = {"include_exchange_in_commission", "use_ibkr_auto_fx"}
+    for group, values in fees.items():
+        if not isinstance(values, dict):
+            errors.append(f"fees.{group} must be an object")
+            continue
+        for field, value in values.items():
+            path = f"fees.{group}.{field}"
+            if field == "plan":
+                if value not in {"pro_fixed", "pro_tiered", "lite"}:
+                    errors.append("fees.ibkr_us_etf.plan must be pro_fixed, pro_tiered, or lite")
+                continue
+            if field in boolean_fee_fields:
+                if not isinstance(value, bool):
+                    errors.append(f"{path} must be boolean")
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                errors.append(f"{path} must be numeric")
+                continue
+            if not math.isfinite(numeric) or numeric < 0:
+                errors.append(f"{path} must be non-negative")
+                continue
+            if (field.endswith("_rate") or field.endswith("_pct") or field.endswith("_markup")) and numeric > 1:
+                errors.append(f"{path} cannot exceed 1")
+            if field.endswith("_bps") and numeric > 10_000:
+                errors.append(f"{path} cannot exceed 10000")
+            if (field == "lot_size" or field.endswith("lot_size_cny")) and numeric <= 0:
+                errors.append(f"{path} must be positive")
     return errors

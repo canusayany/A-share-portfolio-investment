@@ -6,12 +6,13 @@ from types import SimpleNamespace
 import unittest
 
 from app.config import normalize_config
-from app.db import connect, data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
+from app.db import connect, data_status, db_session, init_db, insert_many, json_dumps, json_loads, rows_to_dicts
 import app.services.data_sync as data_sync_module
 from app.services.calendar import business_days
 from app.services.data_sync import (
     SyncCancelled,
     chunk_date_ranges,
+    carry_forward_adjustment_factor_rows,
     eastmoney_secid,
     fetch_currency_api_fx_rates,
     fetch_digrin_dividends,
@@ -48,6 +49,56 @@ from tests.helpers import build_synced_db, fixture_dividends, fixture_fx_rates, 
 
 
 class DbAndSyncTests(unittest.TestCase):
+    def test_adjustment_factor_tail_carry_uses_real_price_dates_and_explicit_source(self) -> None:
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            insert_many(
+                conn,
+                "prices",
+                [
+                    {
+                        "symbol": "512890.SH",
+                        "trade_date": trade_date,
+                        "open": close,
+                        "high": close,
+                        "low": close,
+                        "close": close,
+                        "adj_close": close,
+                        "volume": 0,
+                        "amount": 0,
+                        "currency": "CNY",
+                        "source": source,
+                    }
+                    for trade_date, close, source in (
+                        ("2026-08-12", 1.10, "tushare:fund_daily"),
+                        ("2026-08-13", 1.11, "sohu:hisHq"),
+                        ("2026-08-14", 1.12, "sohu:hisHq"),
+                        ("2026-08-17", 0.80, "csindex:index_perf:splice_scale_1"),
+                    )
+                ],
+            )
+            insert_many(
+                conn,
+                "adj_factors",
+                [
+                    {
+                        "symbol": "512890.SH",
+                        "trade_date": "2026-08-12",
+                        "adj_factor": 2.0,
+                        "source": "tushare:fund_adj",
+                    }
+                ],
+            )
+
+            rows = carry_forward_adjustment_factor_rows(
+                conn, "512890.SH", "2019-01-18", "2026-08-17"
+            )
+
+        self.assertEqual([row["trade_date"] for row in rows], ["2026-08-13", "2026-08-14"])
+        self.assertTrue(all(row["adj_factor"] == 2.0 for row in rows))
+        self.assertTrue(all(row["source"] == "carry_forward:tushare:fund_adj" for row in rows))
+
     def test_chinabond_sync_uses_tail_coverage_not_weekday_holiday_gaps(self) -> None:
         cfg = normalize_config({})
         asset = next(item for item in cfg["assets"] if item["symbol"] == "CBA21801")
@@ -87,6 +138,31 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(rows[0]["adj_close"], 1234.56)
         self.assertEqual(rows[0]["source"], "chinabond:index_total_return")
 
+    def test_chinabond_total_return_fetch_bypasses_proxy_and_has_history_timeout(self) -> None:
+        cfg = normalize_config({})
+        asset = next(item for item in cfg["assets"] if item["symbol"] == "CBA06501")
+        timestamp = int(datetime(2024, 8, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        original_run = data_sync_module.subprocess.run
+
+        def fake_run(command, **kwargs):
+            self.assertIn("--noproxy", command)
+            self.assertEqual(command[command.index("--noproxy") + 1], "*")
+            self.assertGreaterEqual(int(command[command.index("--max-time") + 1]), 60)
+            self.assertGreaterEqual(kwargs["timeout"], int(command[command.index("--max-time") + 1]))
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"CFZS_00": {str(timestamp): 1234.56}}).encode("utf-8"),
+                stderr=b"",
+            )
+
+        data_sync_module.subprocess.run = fake_run
+        try:
+            rows = fetch_chinabond_index_prices(asset, "2024-08-12", "2024-08-12")
+        finally:
+            data_sync_module.subprocess.run = original_run
+
+        self.assertEqual(rows[0]["symbol"], "CBA06501")
+
     def test_chinabond_total_return_fetch_rejects_malformed_series(self) -> None:
         cfg = normalize_config({})
         asset = next(item for item in cfg["assets"] if item["symbol"] == "CBA21801")
@@ -99,6 +175,31 @@ class DbAndSyncTests(unittest.TestCase):
                 fetch_chinabond_index_prices(asset, "2024-08-12", "2024-08-12")
         finally:
             data_sync_module.subprocess.run = original_run
+
+    def test_chinabond_sync_reports_missing_when_official_fetch_fails(self) -> None:
+        cfg = normalize_config({})
+        asset = next(item for item in cfg["assets"] if item["symbol"] == "CBA21801")
+        asset["enabled"] = True
+        db_path = temp_db_path()
+        init_db(db_path)
+        original_fetch = data_sync_module.fetch_chinabond_index_prices
+        data_sync_module.fetch_chinabond_index_prices = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            data_sync_module.SyncWarning("official endpoint unavailable")
+        )
+        try:
+            with db_session(db_path) as conn:
+                result = sync_all(
+                    conn,
+                    "",
+                    "2024-08-12",
+                    "2024-08-12",
+                    [asset],
+                    missing_items=["prices:CBA21801"],
+                )
+        finally:
+            data_sync_module.fetch_chinabond_index_prices = original_fetch
+
+        self.assertIn("prices:CBA21801", result["missing_data"])
 
     def test_replacement_caps_original_asset_data_end(self) -> None:
         cfg = normalize_config({})
@@ -1390,6 +1491,52 @@ class DbAndSyncTests(unittest.TestCase):
         ])
         self.assertTrue(all(row["symbol"] == "510500.SH" for row in rows))
 
+    def test_csindex_total_return_parser_uses_official_close_series(self) -> None:
+        original_fetch_text = data_sync_module.fetch_text
+        requested_urls = []
+
+        def fake_fetch_text(url, timeout=0, referer=None):
+            requested_urls.append((url, timeout, referer))
+            if len(requested_urls) == 1:
+                raise data_sync_module.SyncWarning("temporary CSI source timeout")
+            return json.dumps({
+                "code": "200",
+                "msg": "Success",
+                "success": True,
+                "data": [
+                    {
+                        "tradeDate": "20051230",
+                        "indexCode": "H20269",
+                        "close": 1000.0,
+                        "open": None,
+                        "high": None,
+                        "low": None,
+                        "tradingVol": 308384392,
+                        "tradingValue": 15.72,
+                    },
+                    {"tradeDate": "20060104", "indexCode": "H20269", "close": 1009.34},
+                ],
+            })
+
+        try:
+            data_sync_module.fetch_text = fake_fetch_text
+            rows = data_sync_module.fetch_csindex_prices(
+                "H20269.CSI", "512890.SH", "2005-12-30", "2006-01-04", "CNY"
+            )
+        finally:
+            data_sync_module.fetch_text = original_fetch_text
+
+        self.assertIn("indexCode=H20269", requested_urls[0][0])
+        self.assertEqual(len(requested_urls), 2)
+        self.assertTrue(all(item[1] == data_sync_module.CSINDEX_TOTAL_RETURN_TIMEOUT_SECONDS for item in requested_urls))
+        self.assertEqual([(row["trade_date"], row["close"]) for row in rows], [
+            ("2005-12-30", 1000.0),
+            ("2006-01-04", 1009.34),
+        ])
+        self.assertTrue(all(row["symbol"] == "512890.SH" for row in rows))
+        self.assertTrue(all(row["source"] == "csindex:index_perf" for row in rows))
+        self.assertEqual(rows[0]["open"], 1000.0)
+
     def test_index_prices_chunks_long_tushare_ranges(self) -> None:
         original_tushare_call = data_sync_module.tushare_call
         calls = []
@@ -1481,6 +1628,17 @@ class DbAndSyncTests(unittest.TestCase):
             missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
 
         self.assertIn("adj_factors:512100.SH", missing)
+
+    def test_allowed_adjustment_factor_tail_does_not_block_but_interior_gap_does(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM adj_factors WHERE symbol='512890.SH' AND trade_date='2020-01-10'")
+            tail_only = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+            conn.execute("DELETE FROM adj_factors WHERE symbol='512890.SH' AND trade_date='2020-01-08'")
+            with_interior_gap = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+
+        self.assertNotIn("adj_factors:512890.SH", tail_only)
+        self.assertIn("adj_factors:512890.SH", with_interior_gap)
 
     def test_disabled_cn_etf_missing_adjustment_factors_does_not_block_backtest(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")

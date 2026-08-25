@@ -13,6 +13,7 @@ from app.config import (
     normalize_config,
     repo_rate_symbol,
     selected_money_fund_asset,
+    selected_repo_option,
     validate_config,
 )
 from app.services.calendar import business_days, first_business_day_by_month, rebalance_days, repo_actual_days
@@ -106,6 +107,7 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertIn(date(2020, 4, 1), rebalance_days(days, "quarterly"))
         self.assertIn(date(2020, 7, 1), rebalance_days(days, "semiannual"))
         self.assertIn(date(2020, 1, 1), rebalance_days(days, "yearly"))
+        self.assertEqual(rebalance_days(days, "yearly", 5), {date(2020, 1, 1), date(2020, 5, 1)})
         self.assertEqual(rebalance_days(days, "daily"), set(days))
         self.assertEqual(repo_actual_days(date(2020, 1, 3)), 3)
 
@@ -120,6 +122,15 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(cn_sp500["inception_date"], "2013-12-05")
         self.assertEqual(cn_sp500["management_fee"], 0.006)
         self.assertEqual(cn_sp500["custodian_fee"], 0.002)
+        dividend_low_vol = next(asset for asset in cfg["assets"] if asset["symbol"] == "512890.SH")
+        self.assertEqual(dividend_low_vol["trade_start_date"], "2019-01-18")
+        self.assertEqual(dividend_low_vol["price_fallback"]["symbol"], "H20269.CSI")
+        self.assertEqual(dividend_low_vol["price_fallback"]["start_date"], "2005-12-30")
+        self.assertEqual(dividend_low_vol["price_fallback"]["scale_mode"], "splice")
+        self.assertEqual(dividend_low_vol["price_fallback"]["annual_expense_drag_rate"], 0.0063)
+        self.assertTrue(dividend_low_vol["allow_adj_factor_tail_carry_forward"])
+        self.assertEqual(dividend_low_vol["share_splits"][0]["effective_date"], "2021-10-25")
+        self.assertEqual(dividend_low_vol["share_splits"][0]["price_multiplier"], 2.0)
         a100 = next(asset for asset in cfg["assets"] if asset["symbol"] == "159631.SZ")
         self.assertFalse(a100["enabled"])
         self.assertEqual(a100["exclusive_group"], "cn_broad_etf")
@@ -143,6 +154,21 @@ class CalendarAndConfigTests(unittest.TestCase):
             self.assertEqual(asset["price_fallback"]["start_date"], "2004-12-31")
         self.assertEqual(cfg["fees"]["tax"]["us_dividend_withholding_rate"], 0.30)
         self.assertEqual(cfg["fees"]["hk_connect_etf"]["stock_settlement_fee_rate"], 0.000042)
+        self.assertEqual(cfg["annual_rebalance_month"], 1)
+        self.assertEqual(cfg["rolling_window_years"], 3)
+        self.assertFalse(cfg["rebalance_month_analysis_enabled"])
+
+        invalid = normalize_config(
+            {
+                "annual_rebalance_month": 13,
+                "rolling_window_years": 0,
+                "rebalance_month_analysis_enabled": "yes",
+            }
+        )
+        errors = validate_config(invalid)
+        self.assertTrue(any("annual_rebalance_month" in error for error in errors))
+        self.assertTrue(any("rolling_window_years" in error for error in errors))
+        self.assertTrue(any("rebalance_month_analysis_enabled" in error for error in errors))
         self.assertEqual(validate_config(cfg), [])
         bad = default_config()
         bad["assets"] = [{**bad["assets"][0], "target_weight": 1.2}]
@@ -181,6 +207,24 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertFalse(gold["price_fallback"]["required"])
         self.assertTrue(gold["replacement_assets"])
         self.assertEqual(validate_config(cfg), [])
+
+    def test_repo_selection_does_not_allow_stale_client_metadata_to_override_server_rules(self) -> None:
+        stale_options = default_config()["repo_options"]
+        next(item for item in stale_options if item["symbol"] == "204007")["tenor_days"] = 1
+
+        cfg = normalize_config({"repo_symbol": "204007", "repo_options": stale_options})
+
+        self.assertEqual(selected_repo_option(cfg)["tenor_days"], 7)
+
+    def test_validation_rejects_malformed_and_non_finite_fee_inputs(self) -> None:
+        malformed_assets = normalize_config({"assets": "not-a-list"})
+        self.assertTrue(any("assets must be a list" in item for item in validate_config(malformed_assets)))
+
+        negative_fee = normalize_config({"fees": {"cn_etf": {"commission_rate": -0.01}}})
+        self.assertTrue(any("fees.cn_etf.commission_rate" in item for item in validate_config(negative_fee)))
+
+        non_finite_fixed_cash = normalize_config({"repo_fixed_target_cny": float("nan")})
+        self.assertTrue(any("repo_fixed_target_cny" in item for item in validate_config(non_finite_fixed_cash)))
 
     def test_money_fund_selection_uses_one_day_repo_as_rate_fallback(self) -> None:
         cfg = normalize_config({"repo_symbol": "511990.SH"})

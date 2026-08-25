@@ -21,24 +21,59 @@ from app.services.backtest_engine import (
     _portfolio_value,
     _repo_spend_reserve,
     benchmark_returns,
+    adjusted_price_and_share_scale_series,
     adjusted_price_series,
+    annual_return_drawdown_ratio,
+    annual_expense_factor,
+    attach_proxy_price_maps,
     comparison_assets,
     compute_metrics,
+    drawdown_recovery_metrics,
     effective_weights,
     minimal_rebalance_weights,
     repo_tenor_days,
     repo_fixed_target_weight,
     reference_trading_days,
     ranking_metrics,
+    market_capture_metrics,
+    rolling_window_ranges,
     run_backtest,
     has_investable_asset_target,
+    load_dividend_events,
     should_rebalance,
     yearly_positive_return_count,
+    yearly_return_counts,
+    worst_calendar_periods,
 )
 from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
 class BacktestEngineTests(unittest.TestCase):
+    def test_dividend_low_vol_proxy_deducts_expenses_without_double_charging_real_etf(self) -> None:
+        asset = next(
+            item for item in normalize_config({})["assets"] if item["symbol"] == "512890.SH"
+        )
+        price_maps = {
+            "H20269.CSI": {},
+            "512890.SH": {
+                "2005-12-30": 100.0,
+                "2018-12-28": 190.0,
+                "2019-01-17": 200.0,
+                "2019-01-18": 201.0,
+                "2020-01-02": 210.0,
+            },
+        }
+
+        attach_proxy_price_maps(price_maps, [asset])
+
+        proxy = price_maps["H20269.CSI"]
+        expense_factor = annual_expense_factor(date(2005, 12, 30), date(2019, 1, 17), 0.0063)
+        self.assertAlmostEqual(proxy["2005-12-30"], 100.0 / expense_factor)
+        self.assertAlmostEqual(proxy["2019-01-17"], 200.0)
+        self.assertLess(proxy["2019-01-17"] / proxy["2005-12-30"] - 1.0, 1.0)
+        self.assertEqual(proxy["2019-01-18"], 201.0)
+        self.assertEqual(proxy["2020-01-02"], 210.0)
+
     def test_verified_etf_share_consolidation_is_continuous_but_cash_dividend_is_not_adjusted(self) -> None:
         rows = [
             {"trade_date": "2022-09-01", "price": 0.982, "adj_factor": 1.0},
@@ -55,6 +90,63 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertAlmostEqual(prices["2022-09-02"], 2.686 * 0.3622, places=6)
         self.assertAlmostEqual(prices["2022-09-06"], 0.98518, places=4)
         self.assertAlmostEqual(prices["2023-06-02"], 2.540 * 0.3622, places=6)
+
+    def test_configured_512890_share_split_is_continuous_without_adjustment_factors(self) -> None:
+        rows = [
+            {"trade_date": "2021-10-21", "price": 1.639, "adj_factor": None},
+            {"trade_date": "2021-10-25", "price": 0.801, "adj_factor": None},
+            {"trade_date": "2021-10-26", "price": 0.810, "adj_factor": None},
+            {"trade_date": "2021-10-27", "price": 0.405, "adj_factor": None},
+        ]
+
+        prices = adjusted_price_series(rows, {"2021-10-25": 2.0})
+
+        self.assertAlmostEqual(prices["2021-10-25"], 1.602)
+        self.assertAlmostEqual(prices["2021-10-26"], 1.620)
+        self.assertAlmostEqual(prices["2021-10-27"], 0.810)
+
+    def test_cash_dividend_uses_the_same_share_scale_as_normalized_prices(self) -> None:
+        rows = [
+            {"trade_date": "2021-10-21", "price": 1.639, "adj_factor": None},
+            {"trade_date": "2021-10-25", "price": 0.801, "adj_factor": None},
+            {"trade_date": "2022-01-20", "price": 0.900, "adj_factor": None},
+        ]
+        _prices, share_scales = adjusted_price_and_share_scale_series(rows, {"2021-10-25": 2.0})
+        state = PortfolioState(cash_cny=0.0)
+        state.positions["512890.SH"] = Position("512890.SH", "CN", "CNY", "cn_etf", quantity=100)
+        event = {
+            "symbol": "512890.SH",
+            "pay_date": "2022-01-20",
+            "div_cash": 0.03,
+            "currency": "CNY",
+            "normalized_share_scale": share_scales["2022-01-20"],
+        }
+
+        _apply_dividend_events(state, "2022-01-20", {"2022-01-20": [event]}, {}, {}, normalize_config({})["fees"])
+
+        self.assertEqual(share_scales["2022-01-20"], 2.0)
+        self.assertAlmostEqual(state.total_dividend_cny, 6.0)
+        self.assertAlmostEqual(state.cash_cny, 6.0)
+
+    def test_dividend_loader_carries_forward_share_scale_to_ex_date(self) -> None:
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO fund_dividends(symbol,ann_date,record_date,ex_date,pay_date,div_cash,currency,source)
+                VALUES('512890.SH','2022-01-10','2022-01-19','2022-01-20','2022-01-25',0.03,'CNY','test:dividend')
+                """
+            )
+            ex_events, _pay_events = load_dividend_events(
+                conn,
+                ["512890.SH"],
+                "2022-01-01",
+                "2022-01-31",
+                {"512890.SH": {"2021-10-21": 1.0, "2021-10-25": 2.0}},
+            )
+
+        self.assertEqual(ex_events["2022-01-20"][0]["normalized_share_scale"], 2.0)
 
     def test_run_backtest_generates_summary_series_trades_and_rebalances(self) -> None:
         db_path, cfg = build_synced_db()
@@ -362,7 +454,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertAlmostEqual(rows_by_year["2021"]["fee_cny"], 0.0)
         self.assertEqual(result["summary"]["rebalance_count"], len(rebalances))
 
-    def test_start_before_inception_keeps_unlisted_fund_in_repo(self) -> None:
+    def test_start_before_etf_inception_uses_dividend_low_vol_total_return_proxy(self) -> None:
         db_path, cfg = build_synced_db("2013-01-01", "2013-02-28")
         with db_session(db_path) as conn:
             result = run_backtest(conn, cfg)
@@ -372,7 +464,8 @@ class BacktestEngineTests(unittest.TestCase):
             ).fetchone()
         payload = json.loads(first["payload_json"])
         self.assertNotIn("512890.SH", payload["targets"])
-        self.assertGreater(payload["targets"]["REPO"], 0.5)
+        self.assertAlmostEqual(payload["targets"]["H20269.CSI"], 0.08)
+        self.assertAlmostEqual(payload["targets"]["REPO"], 0.5)
 
     def test_start_before_repo_data_keeps_cash_until_first_real_repo_rate(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
@@ -489,14 +582,139 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertGreater(cumulative[-1], 0)
         self.assertLessEqual(min(drawdowns), 0)
 
+    def test_worst_calendar_periods_prefer_complete_years_and_halves(self) -> None:
+        dates = [
+            "2020-01-02", "2020-06-30", "2020-07-01", "2020-12-31",
+            "2021-01-04", "2021-06-30", "2021-07-01", "2021-12-31",
+        ]
+        metrics = worst_calendar_periods(dates, [0.0, 0.10, -0.20, 0.0, 0.0, 0.05, -0.10, 0.0])
+
+        self.assertEqual(metrics["worst_year"]["period"], "2020年")
+        self.assertAlmostEqual(metrics["worst_year"]["return"], -0.12)
+        self.assertTrue(metrics["worst_year"]["complete"])
+        self.assertEqual(metrics["worst_half_year"]["period"], "2020年下半年")
+        self.assertAlmostEqual(metrics["worst_half_year"]["return"], -0.20)
+
+    def test_drawdown_recovery_tracks_trough_to_prior_peak(self) -> None:
+        metrics = drawdown_recovery_metrics(
+            ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04", "2020-01-05"],
+            [0.0, 0.10, -0.20, -0.05, 0.12],
+        )
+
+        self.assertEqual(metrics["peak_date"], "2020-01-02")
+        self.assertEqual(metrics["trough_date"], "2020-01-03")
+        self.assertEqual(metrics["recovery_date"], "2020-01-05")
+        self.assertEqual(metrics["recovery_days"], 2)
+        self.assertTrue(metrics["recovered"])
+
+    def test_drawdown_recovery_includes_opening_day_cost_against_initial_nav(self) -> None:
+        metrics = drawdown_recovery_metrics(
+            ["2020-01-02", "2020-01-03"],
+            [-0.01, 0.01],
+        )
+
+        self.assertEqual(metrics["trough_date"], "2020-01-02")
+        self.assertEqual(metrics["recovery_date"], "2020-01-03")
+        self.assertEqual(metrics["recovery_days"], 1)
+
+    def test_market_capture_uses_monthly_up_and_down_benchmark_periods(self) -> None:
+        metrics = market_capture_metrics(
+            ["2020-01-31", "2020-02-28", "2020-03-31", "2020-04-30", "2020-05-29"],
+            [0.0, 0.05, -0.04, 0.05, -0.04],
+            [100.0, 110.0, 99.0, 108.9, 98.01],
+        )
+
+        expected_up = ((1.05 ** 2) ** 6 - 1.0) / ((1.10 ** 2) ** 6 - 1.0)
+        expected_down = ((0.96 ** 2) ** 6 - 1.0) / ((0.90 ** 2) ** 6 - 1.0)
+        self.assertAlmostEqual(metrics["upside_capture_ratio"], expected_up)
+        self.assertAlmostEqual(metrics["downside_capture_ratio"], expected_down)
+        self.assertEqual(metrics["up_market_months"], 2)
+        self.assertEqual(metrics["down_market_months"], 2)
+
+    def test_rolling_window_ranges_use_inclusive_years_and_annual_steps(self) -> None:
+        rows = rolling_window_ranges("2001-01-01", "2008-12-31", window_years=5)
+
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(
+            [(row["start_date"], row["end_date"]) for row in rows],
+            [
+                ("2001-01-01", "2005-12-31"),
+                ("2002-01-01", "2006-12-31"),
+                ("2003-01-01", "2007-12-31"),
+                ("2004-01-01", "2008-12-31"),
+            ],
+        )
+
+    def test_rolling_windows_are_independent_backtests_with_the_same_settings(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2022-12-31")
+        cfg["rolling_window_years"] = 1
+        cfg["annual_rebalance_month"] = 5
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            first_config = {**cfg, "start_date": "2020-01-01", "end_date": "2020-12-31"}
+            first = run_backtest(conn, first_config, persist=False, include_comparison=False, include_month_analysis=False, include_rolling_analysis=False)
+
+        rolling = result["summary"]["rolling_periods"]
+        self.assertEqual([row["period"] for row in rolling], ["2020–2020", "2021–2021", "2022–2022"])
+        self.assertAlmostEqual(rolling[0]["annualized_return"], first["summary"]["annualized_return"])
+        self.assertEqual(rolling[0]["annual_return_drawdown_ratio"], first["summary"]["annual_return_drawdown_ratio"])
+
+    def test_annual_rebalance_month_analysis_uses_engine_without_extra_history(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2021-06-30")
+        cfg["annual_rebalance_month"] = 5
+        cfg["rolling_window_years"] = 1
+        cfg["rebalance_month_analysis_enabled"] = True
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            run_count = conn.execute("SELECT COUNT(*) AS count FROM backtest_runs").fetchone()["count"]
+            rebalance_dates = [
+                row["rebalance_date"]
+                for row in conn.execute(
+                    "SELECT rebalance_date FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date",
+                    (result["run_id"],),
+                )
+            ]
+
+        scenarios = result["summary"]["rebalance_month_scenarios"]
+        self.assertEqual(run_count, 1)
+        self.assertEqual([row["month"] for row in scenarios], list(range(1, 13)))
+        self.assertEqual([row["month"] for row in scenarios if row["selected"]], [5])
+        self.assertTrue(all("annualized_return" in row and "max_drawdown" in row and "annual_return_drawdown_ratio" in row for row in scenarios))
+        self.assertTrue(result["summary"]["rolling_periods"])
+        self.assertTrue(all(date.fromisoformat(value).month == 5 for value in rebalance_dates[1:]))
+
     def test_ranking_counts_only_complete_positive_calendar_years(self) -> None:
         dates = ["2020-01-02", "2020-12-31", "2021-01-04", "2021-12-31", "2022-01-04"]
         self.assertEqual(yearly_positive_return_count(dates, [0.1, 0.1, -0.2, -0.1, 0.9]), 1)
+        self.assertEqual(yearly_return_counts(["2020-01-31", "2020-12-01"], [0.1, 0.1]), (0, 0))
         ranking = ranking_metrics(0.12, 0.03, -0.18, 3, 4)
         self.assertAlmostEqual(ranking["excess_annualized_return"], 0.09)
         self.assertAlmostEqual(ranking["adjusted_calmar"], 0.5)
+        self.assertAlmostEqual(ranking["annual_return_drawdown_ratio"], 2 / 3)
         self.assertAlmostEqual(ranking["positive_year_ratio"], 0.75)
         self.assertTrue(ranking["ranking_eligible"])
+        self.assertIsNone(annual_return_drawdown_ratio(0.12, 0.0))
+
+    def test_annual_metrics_include_opening_day_fees_and_cash_flow(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2021-01-08")
+        cfg["fees"]["repo"]["investor_commission_rate"] = 0.0
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            rebalances = rows_to_dicts(
+                conn.execute(
+                    "SELECT rebalance_date,fee_cny,payload_json FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date",
+                    (result["run_id"],),
+                )
+            )
+
+        opening_fee = rebalances[0]["fee_cny"]
+        annual_payload = next(
+            payload
+            for payload in (json.loads(row["payload_json"]) for row in rebalances)
+            if "year_fee_cny" in payload
+        )
+        self.assertAlmostEqual(annual_payload["year_fee_cny"], opening_fee)
+        self.assertEqual(annual_payload["year_asset_performance"]["REPO"]["external_flow_cny"], -60_000.0)
 
     def test_ranking_rejects_repo_like_return_and_caps_tiny_drawdown(self) -> None:
         ranking = ranking_metrics(0.031, 0.03, -0.001, 0, 0)
@@ -704,6 +922,24 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertNotIn("159631.SZ", before)
         self.assertAlmostEqual(after["159631.SZ"], 0.50)
         self.assertNotIn("000903.SH", after)
+
+    def test_dividend_low_vol_uses_total_return_index_before_etf_trading(self) -> None:
+        cfg = normalize_config({"start_date": "2006-01-04"})
+        for asset in cfg["assets"]:
+            is_dividend_low_vol = asset["symbol"] == "512890.SH"
+            asset["enabled"] = is_dividend_low_vol
+            asset["target_weight"] = 0.50 if is_dividend_low_vol else 0.0
+
+        prices = {asset["symbol"]: None for asset in cfg["assets"]}
+        prices["H20269.CSI"] = 1000.0
+        before = effective_weights(cfg, date(2018, 12, 28), prices)
+        prices["512890.SH"] = 0.98
+        after = effective_weights(cfg, date(2019, 1, 18), prices)
+
+        self.assertAlmostEqual(before["H20269.CSI"], 0.50)
+        self.assertNotIn("512890.SH", before)
+        self.assertAlmostEqual(after["512890.SH"], 0.50)
+        self.assertNotIn("H20269.CSI", after)
 
     def test_new_broad_etfs_use_their_index_proxy_before_inception(self) -> None:
         for symbol, proxy_symbol, before_day, switch_day in (

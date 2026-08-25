@@ -39,7 +39,7 @@ def first_business_day_by_month(days: list[date]) -> set[date]:
     return result
 
 
-def rebalance_days(days: list[date], frequency: str) -> set[date]:
+def rebalance_days(days: list[date], frequency: str, annual_rebalance_month: int = 1) -> set[date]:
     result: set[date] = set()
     seen: set[tuple[int, ...]] = set()
     if frequency == "daily":
@@ -59,7 +59,7 @@ def rebalance_days(days: list[date], frequency: str) -> set[date]:
                 continue
             key = (day.year, day.month)
         else:
-            if day.month != 1:
+            if day.month != annual_rebalance_month:
                 continue
             key = (day.year, day.month)
         if key in seen:

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260813-treasury-closure-3" />
+    <link rel="stylesheet" href="static/styles.css?v=20260825-dividend-explainer-2" />
     <script src="static/echarts.min.js?v=5.6.0"></script>
   </head>
   <body>
@@ -81,6 +81,33 @@
                 <input id="monthlySpend" type="number" min="0" step="500" inputmode="decimal" />
               </label>
             </div>
+            <div class="field-row">
+              <label id="annualRebalanceMonthField">
+                年度再平衡月份
+                <select id="annualRebalanceMonth">
+                  <option value="1">1月</option>
+                  <option value="2">2月</option>
+                  <option value="3">3月</option>
+                  <option value="4">4月</option>
+                  <option value="5">5月</option>
+                  <option value="6">6月</option>
+                  <option value="7">7月</option>
+                  <option value="8">8月</option>
+                  <option value="9">9月</option>
+                  <option value="10">10月</option>
+                  <option value="11">11月</option>
+                  <option value="12">12月</option>
+                </select>
+              </label>
+              <label>
+                滚动窗口（年）
+                <input id="rollingWindowYears" type="number" min="1" max="20" step="1" inputmode="numeric" />
+              </label>
+            </div>
+            <label id="rebalanceMonthAnalysisField" class="strategy-toggle">
+              <input id="rebalanceMonthAnalysisEnabled" type="checkbox" />
+              <span><strong>比较 1–12 月年度再平衡</strong><small>使用相同策略逐月重跑，给出各月份的年化收益与最大回撤；耗时会增加。</small></span>
+            </label>
             <label class="range-field">
               <span>相对再平衡容忍带 <strong id="bandValue"></strong></span>
               <input id="rebalanceBand" type="range" min="0" max="0.5" step="0.01" />
@@ -211,6 +238,17 @@
 
         <section id="summaryGrid" class="summary-grid" aria-label="核心指标" aria-live="polite"></section>
 
+        <section class="risk-insights" aria-labelledby="riskInsightsTitle">
+          <div class="risk-insights-heading">
+            <div>
+              <h2 id="riskInsightsTitle">风险与行情捕获</h2>
+              <p>快速识别最差阶段、回撤修复速度，以及相对沪深300的涨跌参与程度</p>
+            </div>
+            <span class="benchmark-pill">沪深300 = 100%</span>
+          </div>
+          <div id="riskInsightsContent" class="risk-insights-content" aria-live="polite"></div>
+        </section>
+
         <section class="analysis-panel" aria-labelledby="analysisTitle">
           <div class="panel-heading">
             <div>
@@ -248,16 +286,26 @@
           <div class="panel-heading records-heading">
             <div>
               <h2 id="recordsTitle">数据与记录</h2>
-              <p>核对数据覆盖，再追踪再平衡和每笔交易</p>
+              <p>核对数据覆盖、滚动窗口与月份对比，再追踪再平衡和每笔交易</p>
             </div>
           </div>
           <div class="tab-strip record-tabs" role="tablist" aria-label="数据与记录">
             <button id="recordTabStatus" type="button" role="tab" aria-selected="true" aria-controls="statusPanel" data-record-tab="statusPanel">数据状态</button>
+            <button id="recordTabRolling" type="button" role="tab" aria-selected="false" aria-controls="rollingPanel" data-record-tab="rollingPanel">滚动窗口</button>
+            <button id="recordTabMonths" type="button" role="tab" aria-selected="false" aria-controls="monthsPanel" data-record-tab="monthsPanel">月份对比</button>
             <button id="recordTabRebalance" type="button" role="tab" aria-selected="false" aria-controls="rebalancePanel" data-record-tab="rebalancePanel">再平衡记录</button>
             <button id="recordTabTrades" type="button" role="tab" aria-selected="false" aria-controls="tradesPanel" data-record-tab="tradesPanel">交易流水</button>
           </div>
           <div id="statusPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabStatus">
             <div class="table-scroll"><table id="statusTable"></table></div>
+          </div>
+          <div id="rollingPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRolling" hidden>
+            <div class="table-context"><span>每个窗口都会按当前配置重新建仓</span><small>默认按年盈利/回撤比排序，点击表头可切换</small></div>
+            <div class="table-scroll"><table id="rollingTable"></table></div>
+          </div>
+          <div id="monthsPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabMonths" hidden>
+            <div class="table-context"><span>绿色更优，黄色居中，红色需关注</span><small>默认按年盈利/回撤比排序，点击表头可切换</small></div>
+            <div class="table-scroll"><table id="monthsTable"></table></div>
           </div>
           <div id="rebalancePanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRebalance" hidden>
             <div class="table-scroll"><table id="rebalanceTable"></table></div>
@@ -280,14 +328,24 @@
           </button>
         </div>
         <div id="historyComparison" class="history-comparison" hidden></div>
+        <div class="history-toolbar">
+          <div class="history-view-tabs" role="tablist" aria-label="回测归档视图">
+            <button id="historyRecentTab" type="button" role="tab" aria-selected="true" aria-controls="historyRecentSection" data-history-view="recent">最近回测</button>
+            <button id="leaderboardTab" type="button" role="tab" aria-selected="false" aria-controls="leaderboardSection" data-history-view="leaderboard">全局榜单</button>
+          </div>
+          <div class="history-filters">
+            <label><span class="visually-hidden">筛选回测记录</span><input id="historySearch" type="search" placeholder="筛选标的或日期" autocomplete="off" /></label>
+            <label><span class="visually-hidden">回测记录排序</span><select id="historySort" aria-label="回测记录排序"></select></label>
+          </div>
+        </div>
         <div class="history-sections">
-          <section class="history-section" aria-labelledby="historyRecentTitle">
+          <section id="historyRecentSection" class="history-section" aria-labelledby="historyRecentTitle">
             <div class="history-section-heading">
               <span><strong id="historyRecentTitle">最近回测</strong><small id="historyRecentMeta">最近 20 组记录</small></span>
             </div>
             <div id="historyList" class="history-list" aria-live="polite"></div>
           </section>
-          <section class="history-section" aria-labelledby="leaderboardTitle">
+          <section id="leaderboardSection" class="history-section" aria-labelledby="leaderboardTitle" hidden>
             <div class="history-section-heading">
               <span><strong id="leaderboardTitle">全局榜单</strong><small>前 100 组 · 超额收益、风险效率与稳定性</small></span>
             </div>
@@ -296,6 +354,6 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260813-treasury-closure-3"></script>
+  <script src="static/app.js?v=20260825-dividend-explainer-2"></script>
   </body>
 </html>

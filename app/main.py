@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import gc
 import gzip
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
+import inspect
 import json
 import logging
 import mimetypes
@@ -17,13 +19,14 @@ from urllib.parse import parse_qs, urlparse
 import uuid
 
 from app.config import backtest_assets, repo_rate_symbol, STATIC_DIR, default_config, get_settings, normalize_config, validate_config
-from app.db import data_status, db_session, init_db, json_loads, rows_to_dicts
+from app.db import data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
 from app.services.backtest_engine import (
     BacktestCancelled,
     BacktestError,
     RANKING_VERSION,
     ranking_metrics,
     get_cached_backtest_run,
+    rolling_window_ranges,
     run_backtest,
 )
 from app.services.data_sync import SyncCancelled, required_data_missing, sync_all
@@ -124,6 +127,47 @@ def rebalance_display_payload(payload: dict) -> dict:
     }
 
 
+def archive_config_payload(config: dict) -> dict:
+    return {
+        "start_date": config.get("start_date"),
+        "end_date": config.get("end_date"),
+        "rebalance_frequency": config.get("rebalance_frequency"),
+        "annual_rebalance_month": config.get("annual_rebalance_month"),
+        "assets": [
+            {
+                key: asset.get(key)
+                for key in ("symbol", "name", "choice_label", "enabled", "target_weight")
+                if key in asset
+            }
+            for asset in config.get("assets", [])
+        ],
+    }
+
+
+def archive_summary_payload(summary: dict) -> dict:
+    return {
+        key: summary.get(key)
+        for key in (
+            "start_date",
+            "end_date",
+            "annualized_return",
+            "max_drawdown",
+            "annual_return_drawdown_ratio",
+            "positive_year_count",
+            "complete_year_count",
+            "ranking_version",
+            "repo_annualized_return",
+            "excess_annualized_return",
+            "adjusted_calmar",
+            "positive_year_ratio",
+            "ranking_eligible",
+            "ranking_score",
+            "analysis_status",
+        )
+        if key in summary
+    }
+
+
 def yearly_return_counts_from_daily(conn, run_id: str) -> tuple[int, int]:
     yearly_nav: dict[str, float] = {}
     year_dates: dict[str, list[str]] = {}
@@ -184,40 +228,79 @@ def refresh_ranking_summary(conn, run_id: str, summary: dict) -> dict:
 
 
 def backtest_archive_entries(conn, limit: int, leaderboard: bool = False) -> list[dict]:
-    rows = rows_to_dicts(
-        conn.execute("SELECT run_id,created_at,config_json,summary_json FROM backtest_runs ORDER BY created_at DESC")
-    )
+    if leaderboard:
+        rows = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT run_id,created_at,config_json,summary_json
+                FROM backtest_runs
+                WHERE COALESCE(json_extract(summary_json, '$.ranking_eligible'), 0) = 1
+                ORDER BY
+                  COALESCE(json_extract(summary_json, '$.ranking_score'), 0) DESC,
+                  COALESCE(json_extract(summary_json, '$.excess_annualized_return'), 0) DESC,
+                  COALESCE(json_extract(summary_json, '$.adjusted_calmar'), 0) DESC,
+                  COALESCE(json_extract(summary_json, '$.positive_year_ratio'), 0) DESC,
+                  created_at DESC,
+                  run_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+    else:
+        rows = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT run_id,created_at,config_json,summary_json
+                FROM backtest_runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
     entries = []
     for row in rows:
-        summary = json_loads(row.pop("summary_json"), {})
-        if int(summary.get("ranking_version") or 0) != RANKING_VERSION:
-            summary = refresh_ranking_summary(conn, row["run_id"], summary)
+        summary = json_loads(row["summary_json"], {})
+        compact_summary = archive_summary_payload(summary)
         entries.append(
             {
-                **row,
-                "config": json_loads(row.pop("config_json"), {}),
-                "summary": summary,
+                "run_id": row["run_id"],
+                "created_at": row["created_at"],
+                "config": archive_config_payload(json_loads(row["config_json"], {})),
+                "summary": compact_summary,
                 "positive_year_count": int(summary.get("positive_year_count") or 0),
                 "complete_year_count": int(summary.get("complete_year_count") or 0),
                 "ranking_score": float(summary.get("ranking_score") or 0.0),
             }
         )
     if leaderboard:
-        entries = [item for item in entries if item["summary"].get("ranking_eligible")]
-        entries.sort(
-            key=lambda item: (
-                item["ranking_score"],
-                item["summary"].get("excess_annualized_return", 0.0),
-                item["summary"].get("adjusted_calmar", 0.0),
-                item["summary"].get("positive_year_ratio", 0.0),
-                item["created_at"],
-                item["run_id"],
-            ),
-            reverse=True,
-        )
-        for rank, entry in enumerate(entries[:limit], start=1):
+        for rank, entry in enumerate(entries, start=1):
             entry["rank"] = rank
-    return entries[:limit]
+    return entries
+
+
+def extended_analysis_required(config: dict) -> bool:
+    if rolling_window_ranges(
+        config["start_date"],
+        config["end_date"],
+        int(config["rolling_window_years"]),
+    ):
+        return True
+    return bool(
+        config["rebalance_frequency"] == "yearly"
+        and config.get("rebalance_month_analysis_enabled", False)
+    )
+
+
+def set_persisted_analysis_status(conn, result: dict, status: str, error: str | None = None) -> None:
+    summary = result["summary"]
+    summary["analysis_status"] = status
+    summary["analysis_error"] = error
+    conn.execute(
+        "UPDATE backtest_runs SET summary_json=? WHERE run_id=?",
+        (json_dumps(summary), result["run_id"]),
+    )
 
 
 def iso_now() -> str:
@@ -241,7 +324,14 @@ def raise_if_cancelled(should_cancel=None) -> None:
         raise BacktestCancelled(CANCELLED_JOB_MESSAGE)
 
 
-def execute_backtest_request(settings, write_lock: Lock, config: dict, should_cancel=None) -> dict:
+def execute_backtest_request(
+    settings,
+    write_lock: Lock,
+    config: dict,
+    should_cancel=None,
+    *,
+    defer_extended_analysis: bool = False,
+) -> dict:
     request_id = str(uuid.uuid4())[:8]
     started_at = time.perf_counter()
     errors = validate_config(config)
@@ -271,6 +361,12 @@ def execute_backtest_request(settings, write_lock: Lock, config: dict, should_ca
                 cache_started_at = time.perf_counter()
                 cached = get_cached_backtest_run(conn, config)
                 if cached:
+                    cached_status = cached["summary"].get("analysis_status", "completed")
+                    cached["analysis_pending"] = bool(
+                        defer_extended_analysis
+                        and extended_analysis_required(config)
+                        and cached_status not in {"completed", "not_required"}
+                    )
                     cached["data_sync"] = {"triggered": False, "missing_before": [], "result": None}
                     logger.info("backtest cache hit id=%s seconds=%.3f total_seconds=%.3f", request_id, time.perf_counter() - cache_started_at, time.perf_counter() - started_at)
                     return cached
@@ -310,7 +406,20 @@ def execute_backtest_request(settings, write_lock: Lock, config: dict, should_ca
                 conn.execute("UPDATE backtest_runs SET config_hash=NULL")
                 logger.info("backtest cache invalidated id=%s seconds=%.3f", request_id, time.perf_counter() - invalidate_started_at)
             run_started_at = time.perf_counter()
-            result = run_backtest(conn, config, should_cancel=should_cancel)
+            needs_extended_analysis = defer_extended_analysis and extended_analysis_required(config)
+            result = run_backtest(
+                conn,
+                config,
+                should_cancel=should_cancel,
+                include_month_analysis=not needs_extended_analysis,
+                include_rolling_analysis=not needs_extended_analysis,
+            )
+            set_persisted_analysis_status(
+                conn,
+                result,
+                "pending" if needs_extended_analysis else "completed",
+            )
+            result["analysis_pending"] = needs_extended_analysis
             logger.info("backtest engine complete id=%s seconds=%.3f cache=%s", request_id, time.perf_counter() - run_started_at, result.get("cache"))
             result["data_sync"] = {
                 "triggered": bool(missing_before),
@@ -326,6 +435,10 @@ def execute_backtest_request(settings, write_lock: Lock, config: dict, should_ca
 
 
 class PortfolioServer(ThreadingHTTPServer):
+    request_queue_size = 64
+    daemon_threads = True
+    allow_reuse_address = True
+
     def server_close(self) -> None:
         stop_event = getattr(self, "job_monitor_stop", None)
         if stop_event is not None:
@@ -336,6 +449,9 @@ class PortfolioServer(ThreadingHTTPServer):
         executor = getattr(self, "job_executor", None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        analysis_executor = getattr(self, "analysis_executor", None)
+        if analysis_executor is not None:
+            analysis_executor.shutdown(wait=False, cancel_futures=True)
         super().server_close()
 
 
@@ -418,14 +534,104 @@ def monitor_jobs(server) -> None:
         cleanup_jobs(server)
 
 
+def update_deferred_analysis_status(server, run_id: str, status: str, error: str | None = None) -> None:
+    with server.write_lock:  # type: ignore[attr-defined]
+        with db_session(server.settings.db_path) as conn:  # type: ignore[attr-defined]
+            row = conn.execute(
+                "SELECT summary_json FROM backtest_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if not row:
+                return
+            summary = json_loads(row["summary_json"], {})
+            summary["analysis_status"] = status
+            summary["analysis_error"] = error
+            conn.execute(
+                "UPDATE backtest_runs SET summary_json=? WHERE run_id=?",
+                (json_dumps(summary), run_id),
+            )
+
+
+def run_deferred_backtest_analysis(server, run_id: str, config: dict) -> None:
+    started_at = time.perf_counter()
+    try:
+        update_deferred_analysis_status(server, run_id, "running")
+        with db_session(server.settings.db_path) as conn:  # type: ignore[attr-defined]
+            analysis = run_backtest(
+                conn,
+                config,
+                persist=False,
+                include_comparison=False,
+                include_month_analysis=True,
+                include_rolling_analysis=True,
+            )["summary"]
+        with server.write_lock:  # type: ignore[attr-defined]
+            with db_session(server.settings.db_path) as conn:  # type: ignore[attr-defined]
+                row = conn.execute(
+                    "SELECT summary_json FROM backtest_runs WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+                if not row:
+                    return
+                summary = json_loads(row["summary_json"], {})
+                summary["rolling_periods"] = analysis.get("rolling_periods", [])
+                summary["rebalance_month_scenarios"] = analysis.get("rebalance_month_scenarios", [])
+                summary["analysis_status"] = "completed"
+                summary["analysis_error"] = None
+                conn.execute(
+                    "UPDATE backtest_runs SET summary_json=? WHERE run_id=?",
+                    (json_dumps(summary), run_id),
+                )
+        logger.info(
+            "backtest deferred analysis complete run_id=%s seconds=%.3f rolling=%d months=%d",
+            run_id,
+            time.perf_counter() - started_at,
+            len(analysis.get("rolling_periods", [])),
+            len(analysis.get("rebalance_month_scenarios", [])),
+        )
+    except Exception as exc:
+        logger.exception("backtest deferred analysis failed run_id=%s", run_id)
+        try:
+            update_deferred_analysis_status(server, run_id, "failed", str(exc))
+        except Exception:
+            logger.exception("backtest deferred analysis status update failed run_id=%s", run_id)
+    finally:
+        with server.analysis_lock:  # type: ignore[attr-defined]
+            server.analysis_futures.pop(run_id, None)  # type: ignore[attr-defined]
+        gc.collect()
+
+
+def schedule_deferred_backtest_analysis(server, run_id: str, config: dict) -> None:
+    with server.analysis_lock:  # type: ignore[attr-defined]
+        existing = server.analysis_futures.get(run_id)  # type: ignore[attr-defined]
+        if existing and not existing.done():
+            return
+        future = server.analysis_executor.submit(  # type: ignore[attr-defined]
+            run_deferred_backtest_analysis,
+            server,
+            run_id,
+            config,
+        )
+        server.analysis_futures[run_id] = future  # type: ignore[attr-defined]
+
+
 def run_backtest_job(server, job_id: str, config: dict) -> None:
     set_job(server, job_id, status="running", message="正在检查数据并运行回测", started_at=iso_now())
     try:
+        execute_parameters = inspect.signature(execute_backtest_request).parameters
+        execute_kwargs = {
+            "should_cancel": lambda: job_cancel_requested(server, job_id),
+        }
+        if "defer_extended_analysis" in execute_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in execute_parameters.values()
+        ):
+            execute_kwargs["defer_extended_analysis"] = True
         result = execute_backtest_request(
             server.settings,  # type: ignore[attr-defined]
             server.write_lock,  # type: ignore[attr-defined]
             config,
-            should_cancel=lambda: job_cancel_requested(server, job_id),
+            **execute_kwargs,
         )
     except (BacktestCancelled, SyncCancelled) as exc:
         logger.info("backtest job cancelled id=%s", job_id)
@@ -441,6 +647,8 @@ def run_backtest_job(server, job_id: str, config: dict) -> None:
             set_job(server, job_id, status="cancelled", message=CANCELLED_JOB_MESSAGE, error=CANCELLED_JOB_MESSAGE, completed_at=iso_now())
         else:
             set_job(server, job_id, status="completed", message="回测完成", result=result, completed_at=iso_now())
+            if result.get("analysis_pending"):
+                schedule_deferred_backtest_analysis(server, result["run_id"], config)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -597,7 +805,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = self.normalize_path(parsed.path)
         try:
-            if path == "/api/default-config":
+            if path == "/api/health":
+                self.send_json(HTTPStatus.OK, {"ok": True, "service": "portfolio-backtest", "time": iso_now()})
+            elif path == "/api/default-config":
                 self.send_json(HTTPStatus.OK, default_config())
             elif path == "/api/data/status":
                 with db_session(self.settings.db_path) as conn:
@@ -629,6 +839,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload = self.read_json()
             if path == "/api/data/sync":
                 config = normalize_config(payload.get("config") or payload)
+                errors = validate_config(config)
+                if errors:
+                    raise BacktestError("; ".join(errors))
                 data_assets = backtest_assets(config)
                 with self.write_lock:
                     with db_session(self.settings.db_path) as conn:
@@ -640,6 +853,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                             data_assets,
                             repo_rate_symbol(config),
                         )
+                        cache_invalidated = any(
+                            int(count or 0) > 0 for count in result.get("inserted", {}).values()
+                        )
+                        if cache_invalidated:
+                            conn.execute("UPDATE backtest_runs SET config_hash=NULL")
+                        result["cache_invalidated"] = cache_invalidated
                         result["status"] = data_status(conn)
                 self.send_json(HTTPStatus.OK, result)
             elif path == "/api/backtest/run":
@@ -648,6 +867,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, result)
             elif path == "/api/backtest/start":
                 config = normalize_config(payload.get("config") or payload)
+                errors = validate_config(config)
+                if errors:
+                    raise BacktestError("; ".join(errors))
                 client_request_id = str(payload.get("client_request_id") or "").strip()
                 job_id = str(uuid.uuid4())
                 now_mono = time.monotonic()
@@ -836,9 +1058,12 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | Path
     server.job_cancel_events = {}  # type: ignore[attr-defined]
     server.job_futures = {}  # type: ignore[attr-defined]
     server.job_request_index = {}  # type: ignore[attr-defined]
+    server.analysis_lock = Lock()  # type: ignore[attr-defined]
+    server.analysis_futures = {}  # type: ignore[attr-defined]
     server.job_abandoned_seconds = float(os.getenv("PORTFOLIO_JOB_ABANDONED_SECONDS", DEFAULT_ABANDONED_JOB_SECONDS))  # type: ignore[attr-defined]
     server.job_retention_seconds = float(os.getenv("PORTFOLIO_JOB_RETENTION_SECONDS", DEFAULT_JOB_RETENTION_SECONDS))  # type: ignore[attr-defined]
     server.job_executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[attr-defined]
+    server.analysis_executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[attr-defined]
     server.job_monitor_stop = Event()  # type: ignore[attr-defined]
     server.job_monitor_thread = Thread(target=monitor_jobs, args=(server,), daemon=True)  # type: ignore[attr-defined]
     server.job_monitor_thread.start()  # type: ignore[attr-defined]

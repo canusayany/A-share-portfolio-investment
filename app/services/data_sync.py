@@ -23,6 +23,9 @@ from app.services.calendar import business_days, daterange, parse_date
 TUSHARE_URL = "http://api.tushare.pro"
 HTTP_TIMEOUT_SECONDS = 2
 CURL_TIMEOUT_SECONDS = 8
+CHINABOND_CONNECT_TIMEOUT_SECONDS = 10
+CHINABOND_TOTAL_RETURN_TIMEOUT_SECONDS = 90
+CSINDEX_TOTAL_RETURN_TIMEOUT_SECONDS = 60
 DATASRC_MARKET_APPSETTINGS = Path.home() / "Documents" / "code" / "DataSrc" / "market-data-platform" / "src" / "Market.Api" / "appsettings.json"
 DATASRC_SOURCE_PRIORITY = {"tushare": 0, "akshare": 1, "amazingdata": 2, "tdx": 3}
 CN_PRICE_SOURCE_PRIORITY = {
@@ -39,6 +42,7 @@ PRICE_CROSS_SOURCE_MAX_DEVIATION = 0.15
 PRICE_ISOLATED_JUMP_THRESHOLD = 0.70
 PRICE_NEIGHBOR_MAX_DEVIATION = 0.25
 INDEX_PROXY_PRICE_SOURCES = {
+    "csindex:index_perf",
     "tushare:index_daily",
     "datasrc:index",
     "sohu:index_kline",
@@ -229,6 +233,96 @@ def missing_adjustment_factor_ranges(
         previous = current
     ranges.append((range_start, previous.isoformat()))
     return ranges
+
+
+def adjustment_factor_tail_is_tolerable(
+    conn,
+    symbol: str,
+    missing_ranges: list[tuple[str, str]],
+    max_calendar_days: int = 7,
+) -> bool:
+    """Allow only a short missing tail after the latest published factor."""
+    if len(missing_ranges) != 1:
+        return False
+    latest = conn.execute(
+        """
+        SELECT trade_date FROM adj_factors
+        WHERE symbol=? AND source NOT LIKE 'generated:%'
+          AND source NOT LIKE 'carry_forward:%'
+        ORDER BY trade_date DESC LIMIT 1
+        """,
+        (symbol,),
+    ).fetchone()
+    if not latest:
+        return False
+    latest_date = parse_date(latest["trade_date"])
+    gap_start = parse_date(missing_ranges[0][0])
+    gap_end = parse_date(missing_ranges[0][1])
+    return gap_start > latest_date and 0 < (gap_end - latest_date).days <= max_calendar_days
+
+
+def carry_forward_adjustment_factor_rows(
+    conn,
+    symbol: str,
+    start: str,
+    end: str,
+) -> list[dict[str, Any]]:
+    """Carry the latest published factor across a real-price tail.
+
+    Fund adjustment factors are step functions. Providers may publish the
+    current factor a few sessions after the exchange price, so requiring a new
+    provider row on every price date can falsely block an otherwise complete
+    backtest. Only dates after the latest non-derived factor are filled; no
+    historical interior gap is inferred, and a later official upsert wins.
+    """
+    latest = conn.execute(
+        """
+        SELECT trade_date, adj_factor, source FROM adj_factors
+        WHERE symbol=? AND trade_date<=? AND source NOT LIKE 'generated:%'
+          AND source NOT LIKE 'carry_forward:%'
+        ORDER BY trade_date DESC LIMIT 1
+        """,
+        (symbol, end),
+    ).fetchone()
+    if not latest:
+        return []
+    tail_start = max(parse_date(start), parse_date(latest["trade_date"]) + timedelta(days=1))
+    if tail_start > parse_date(end):
+        return []
+    existing = {
+        row["trade_date"]
+        for row in conn.execute(
+            """
+            SELECT trade_date FROM adj_factors
+            WHERE symbol=? AND trade_date BETWEEN ? AND ?
+              AND source NOT LIKE 'generated:%'
+            """,
+            (symbol, tail_start.isoformat(), end),
+        )
+    }
+    price_dates = [
+        row["trade_date"]
+        for row in conn.execute(
+            """
+            SELECT trade_date FROM prices
+            WHERE symbol=? AND trade_date BETWEEN ? AND ?
+              AND source NOT LIKE 'generated:%' AND source NOT LIKE '%:splice_%'
+            ORDER BY trade_date
+            """,
+            (symbol, tail_start.isoformat(), end),
+        )
+    ]
+    source = str(latest["source"] or "unknown")
+    return [
+        {
+            "symbol": symbol,
+            "trade_date": trade_date,
+            "adj_factor": float(latest["adj_factor"]),
+            "source": f"carry_forward:{source}",
+        }
+        for trade_date in price_dates
+        if trade_date not in existing
+    ]
 
 
 def missing_tail_date_ranges(
@@ -500,14 +594,20 @@ def required_data_missing(
             conn, "dividends", asset["symbol"], dividend_fetch_start.isoformat(), dividend_end.isoformat()
         ):
             missing.add(f"dividends:{asset['symbol']}")
-        if asset["symbol"] in selected_asset_symbols and asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"} and missing_adjustment_factor_ranges(
-            conn,
-            asset["symbol"],
-            dividend_fetch_start.isoformat(),
-            price_end.isoformat(),
-            exclude_proxy_prices=isinstance(asset.get("price_fallback"), dict),
-        ):
-            missing.add(f"adj_factors:{asset['symbol']}")
+        if asset["symbol"] in selected_asset_symbols and asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"}:
+            adjustment_gaps = missing_adjustment_factor_ranges(
+                conn,
+                asset["symbol"],
+                dividend_fetch_start.isoformat(),
+                price_end.isoformat(),
+                exclude_proxy_prices=isinstance(asset.get("price_fallback"), dict),
+            )
+            tail_is_tolerable = (
+                asset.get("allow_adj_factor_tail_carry_forward")
+                and adjustment_factor_tail_is_tolerable(conn, asset["symbol"], adjustment_gaps)
+            )
+            if adjustment_gaps and not tail_is_tolerable:
+                missing.add(f"adj_factors:{asset['symbol']}")
 
     cn_data_end = effective_price_end_for_market("CN", end)
     cn_data_end_text = cn_data_end.isoformat()
@@ -868,7 +968,7 @@ def legacy_unscaled_index_proxy_price_ranges(conn, symbol: str, start: str, end:
         """
         SELECT trade_date FROM prices
         WHERE symbol=? AND trade_date BETWEEN ? AND ? AND ABS(close) >= 100
-          AND (source LIKE '%:splice_scale_1' OR source IN (?, ?, ?, ?))
+          AND (source LIKE '%:splice_scale_1' OR source IN (?, ?, ?, ?, ?))
         ORDER BY trade_date
         """,
         (symbol, start, end, *sorted(INDEX_PROXY_PRICE_SOURCES)),
@@ -1666,6 +1766,74 @@ def fetch_index_prices(token: str, symbol: str, start: str, end: str) -> list[di
     ]
 
 
+def fetch_csindex_prices(
+    proxy_symbol: str,
+    target_symbol: str,
+    start: str,
+    end: str,
+    currency: str,
+) -> list[dict[str, Any]]:
+    """Fetch an official CSI index performance series, including total-return indices."""
+    index_code = str(proxy_symbol).split(".", 1)[0].upper()
+    if not re.fullmatch(r"[A-Z]\d{5}", index_code):
+        raise SyncWarning(f"CSI index source does not support {proxy_symbol}")
+
+    rows_by_date: dict[str, dict[str, Any]] = {}
+    referer = f"https://www.csindex.com.cn/#/indices/family/detail?indexCode={index_code}"
+    for chunk_index, (chunk_start, chunk_end) in enumerate(chunk_date_ranges(start, end, 1825)):
+        # The official endpoint occasionally omits the exact end-date row of a
+        # long request. Overlap adjacent chunks so boundary trading days cannot
+        # disappear; rows_by_date removes the duplicates.
+        if chunk_index:
+            chunk_start = (parse_date(chunk_start) - timedelta(days=7)).isoformat()
+        url = (
+            "https://www.csindex.com.cn/csindex-home/perf/index-perf?"
+            f"indexCode={index_code}&startDate={tushare_date(chunk_start)}&endDate={tushare_date(chunk_end)}"
+        )
+        body: dict[str, Any] | None = None
+        errors: list[str] = []
+        for attempt in range(2):
+            try:
+                candidate = json.loads(
+                    fetch_text(url, timeout=CSINDEX_TOTAL_RETURN_TIMEOUT_SECONDS, referer=referer)
+                )
+                if str(candidate.get("code")) != "200" or candidate.get("success") is False:
+                    raise SyncWarning(
+                        f"response failed: {candidate.get('msg') or candidate.get('code')}"
+                    )
+                body = candidate
+                break
+            except (json.JSONDecodeError, SyncWarning) as exc:
+                errors.append(str(exc))
+                if attempt == 0:
+                    time.sleep(0.5)
+        if body is None:
+            raise SyncWarning(
+                f"CSI official index fetch failed for {index_code}: {'; '.join(errors)}"
+            )
+        for item in body.get("data") or []:
+            close = finite_float(item.get("close"))
+            if close is None or close <= 0 or not item.get("tradeDate"):
+                continue
+            trade_date = from_tushare_date(str(item["tradeDate"]))
+            rows_by_date[trade_date] = price_row(
+                target_symbol,
+                trade_date,
+                close,
+                currency,
+                "csindex:index_perf",
+                open_=finite_float(item.get("open")),
+                high=finite_float(item.get("high")),
+                low=finite_float(item.get("low")),
+                volume=finite_float(item.get("tradingVol")) or 0.0,
+                amount=finite_float(item.get("tradingValue")) or 0.0,
+            )
+    rows = [rows_by_date[key] for key in sorted(rows_by_date)]
+    if not rows:
+        raise SyncWarning(f"CSI official index source returned no rows for {index_code}")
+    return rows
+
+
 def fetch_index_proxy_prices(
     token: str,
     proxy_symbol: str,
@@ -1674,18 +1842,27 @@ def fetch_index_proxy_prices(
     end: str,
     currency: str,
 ) -> list[dict[str, Any]]:
-    """Fetch an index proxy from all available sources, preferring Tushare per date."""
+    """Fetch an index proxy from available sources, preferring its authoritative source per date."""
     attempts: list[str] = []
     fetchers = []
-    if token:
+    is_official_csi_symbol = str(proxy_symbol).upper().endswith(".CSI")
+    if is_official_csi_symbol:
+        fetchers.append(
+            (
+                "csindex:index_perf",
+                lambda: fetch_csindex_prices(proxy_symbol, target_symbol, start, end, currency),
+            )
+        )
+    elif token:
         fetchers.append(("tushare:index_daily", lambda: fetch_index_prices(token, proxy_symbol, start, end)))
-    fetchers.extend(
-        [
-            ("datasrc:index", lambda: fetch_datasrc_market_prices(proxy_symbol, start, end, currency)),
-            ("sohu:index_kline", lambda: fetch_sohu_prices(proxy_symbol, start, end, currency, "sohu:index_kline")),
-            ("eastmoney:index_kline", lambda: fetch_eastmoney_prices(proxy_symbol, start, end, currency, "eastmoney:index_kline")),
-        ]
-    )
+    if not is_official_csi_symbol:
+        fetchers.extend(
+            [
+                ("datasrc:index", lambda: fetch_datasrc_market_prices(proxy_symbol, start, end, currency)),
+                ("sohu:index_kline", lambda: fetch_sohu_prices(proxy_symbol, start, end, currency, "sohu:index_kline")),
+                ("eastmoney:index_kline", lambda: fetch_eastmoney_prices(proxy_symbol, start, end, currency, "eastmoney:index_kline")),
+            ]
+        )
     selected_rows: list[dict[str, Any]] = []
     for source_name, fetcher in fetchers:
         try:
@@ -1716,10 +1893,24 @@ def fetch_chinabond_index_prices(asset: dict[str, Any], start: str, end: str) ->
     )
     cmd = [
         curl_executable(), "-sS", "-L", "-X", "POST", "-A", "Mozilla/5.0",
-        "--connect-timeout", "5", "--max-time", "30", url,
+        # The official endpoint returns the entire total-return history, even
+        # for a small requested range.  The general eight-second market-data
+        # timeout (and the former 30-second local override) cuts off valid
+        # multi-thousand-row responses under concurrent automatic syncs.
+        # Bypass an operator proxy as well: it is particularly prone to
+        # truncating these large JSON responses.
+        "--noproxy", "*",
+        "--connect-timeout", str(CHINABOND_CONNECT_TIMEOUT_SECONDS),
+        "--max-time", str(CHINABOND_TOTAL_RETURN_TIMEOUT_SECONDS),
+        url,
     ]
     try:
-        completed = subprocess.run(cmd, capture_output=True, check=False, timeout=35)
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            check=False,
+            timeout=CHINABOND_TOTAL_RETURN_TIMEOUT_SECONDS + 5,
+        )
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", errors="replace").strip()
             raise SyncWarning(f"exit {completed.returncode}: {detail}")
@@ -2737,7 +2928,16 @@ def sync_all(
                     if source_rows:
                         range_prices = merge_rows_by_trade_date(range_prices, source_rows)
                         logger.info("sync price source complete symbol=%s source=%s range=%s..%s rows=%d", symbol, source_name, range_start, range_end, len(source_rows))
-            expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+            if asset.get("asset_type") == "cn_bond_index":
+                # ChinaBond's bond-market calendar is authoritative.  Its
+                # reported dates must not be measured against the mainland
+                # equity weekday calendar, or valid holiday gaps become false
+                # "missing" warnings after a successful insert.
+                expected_price_dates = {row["trade_date"] for row in range_prices}
+                if not range_prices:
+                    asset_missing.append(f"prices:{symbol}")
+            else:
+                expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
             missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
             if missing_price_dates and allow_network and asset.get("price_fallback"):
                 raise_if_cancelled(should_cancel)
@@ -2763,7 +2963,7 @@ def sync_all(
                     asset_warnings.append(str(exc))
                 raise_if_cancelled(should_cancel)
             missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
-            if missing_price_dates:
+            if missing_price_dates and f"prices:{symbol}" not in asset_missing:
                 asset_missing.append(f"prices:{symbol}")
             prices = merge_rows_by_trade_date(prices, range_prices)
         dividends: list[dict[str, Any]] = []
@@ -2842,10 +3042,16 @@ def sync_all(
             "seconds": time.perf_counter() - asset_started_at,
         }
 
-    max_workers = min(max(len(assets), 1), 8)
+    # ChinaBond's official endpoint serves a complete historical JSON series
+    # for every request.  Serialise only these large transfers so they cannot
+    # collectively exceed the upstream/proxy transfer window; ordinary asset
+    # feeds keep the existing bounded parallelism.
+    chinabond_assets = [asset for asset in assets if asset.get("asset_type") == "cn_bond_index"]
+    concurrent_assets = [asset for asset in assets if asset.get("asset_type") != "cn_bond_index"]
+    max_workers = min(max(len(concurrent_assets), 1), 8)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         raise_if_cancelled(should_cancel)
-        futures = [executor.submit(fetch_asset_bundle, asset) for asset in assets]
+        futures = [executor.submit(fetch_asset_bundle, asset) for asset in concurrent_assets]
         for future in as_completed(futures):
             raise_if_cancelled(should_cancel)
             bundle = future.result()
@@ -2872,7 +3078,7 @@ def sync_all(
                         """
                         DELETE FROM prices
                         WHERE symbol=? AND trade_date BETWEEN ? AND ? AND ABS(close) >= 100
-                          AND (source LIKE '%:splice_scale_1' OR source IN (?, ?, ?, ?))
+                          AND (source LIKE '%:splice_scale_1' OR source IN (?, ?, ?, ?, ?))
                         """,
                         (bundle["symbol"], range_start, range_end, *sorted(INDEX_PROXY_PRICE_SOURCES)),
                     )
@@ -2881,6 +3087,51 @@ def sync_all(
             for coverage_symbol, coverage_start, coverage_end, coverage_source in bundle["dividend_coverage"]:
                 mark_sync_coverage(conn, "dividends", coverage_symbol, coverage_start, coverage_end, coverage_source)
             inserted["adj_factors"] += insert_many(conn, "adj_factors", bundle["adj"])
+
+    for asset in chinabond_assets:
+        raise_if_cancelled(should_cancel)
+        bundle = fetch_asset_bundle(asset)
+        logger.info(
+            "sync ChinaBond asset complete symbol=%s prices=%d dividends=%d adj=%d seconds=%.3f warnings=%d missing=%s",
+            bundle["symbol"],
+            len(bundle["prices"]),
+            len(bundle["dividends"]),
+            len(bundle["adj"]),
+            bundle["seconds"],
+            len(bundle["warnings"]),
+            bundle["missing"],
+        )
+        warnings.extend(bundle["warnings"])
+        missing_data.extend(bundle["missing"])
+        inserted["prices"] += insert_many(conn, "prices", bundle["prices"])
+        inserted["dividends"] += upsert_dividend_rows(conn, bundle["dividends"])
+        for coverage_symbol, coverage_start, coverage_end, coverage_source in bundle["dividend_coverage"]:
+            mark_sync_coverage(conn, "dividends", coverage_symbol, coverage_start, coverage_end, coverage_source)
+        inserted["adj_factors"] += insert_many(conn, "adj_factors", bundle["adj"])
+
+    if allow_network:
+        for asset in assets:
+            symbol = asset["symbol"]
+            if (
+                symbol not in plan["asset_adjustments"]
+                or not asset.get("allow_adj_factor_tail_carry_forward")
+            ):
+                continue
+            carry_rows = carry_forward_adjustment_factor_rows(
+                conn,
+                symbol,
+                asset_trade_start_date(asset, start),
+                effective_price_end_for_asset(asset, end).isoformat(),
+            )
+            if carry_rows:
+                inserted["adj_factors"] += insert_many(conn, "adj_factors", carry_rows)
+                logger.info(
+                    "sync adjustment factor tail carried symbol=%s rows=%d range=%s..%s",
+                    symbol,
+                    len(carry_rows),
+                    carry_rows[0]["trade_date"],
+                    carry_rows[-1]["trade_date"],
+                )
 
     index_prices: list[dict[str, Any]] = []
     index_started_at = time.perf_counter()

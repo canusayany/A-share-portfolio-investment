@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
+import calendar
 import hashlib
 import json
 import logging
@@ -46,8 +48,8 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 19
-RANKING_VERSION = 2
+BACKTEST_ENGINE_VERSION = 27
+RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
 RANKING_EXCESS_RETURN_CAP = 0.15
@@ -132,7 +134,15 @@ def get_cached_backtest_run(conn, user_config: dict[str, Any] | None = None) -> 
     }
 
 
-def load_price_map(conn, symbols: list[str], start: str, end: str, field: str = "close") -> dict[str, dict[str, float]]:
+def load_price_map(
+    conn,
+    symbols: list[str],
+    start: str,
+    end: str,
+    field: str = "close",
+    share_splits: dict[str, dict[str, float]] | None = None,
+    share_scale_maps: dict[str, dict[str, float]] | None = None,
+) -> dict[str, dict[str, float]]:
     if field not in {"open", "close"}:
         raise ValueError("price field must be open or close")
     result: dict[str, dict[str, float]] = {}
@@ -149,11 +159,14 @@ def load_price_map(conn, symbols: list[str], start: str, end: str, field: str = 
             """,
             (symbol, start, end),
         ).fetchall()
-        result[symbol] = adjusted_price_series(rows)
+        prices, scales = adjusted_price_and_share_scale_series(rows, (share_splits or {}).get(symbol))
+        result[symbol] = prices
+        if share_scale_maps is not None:
+            share_scale_maps[symbol] = scales
     return result
 
 
-def adjusted_price_series(rows: list[Any]) -> dict[str, float]:
+def adjusted_price_series(rows: list[Any], known_splits: dict[str, float] | None = None) -> dict[str, float]:
     """Convert raw ETF prices to a continuous share-price series only at verified splits.
 
     Tushare's ``fund_adj`` factor changes for both cash distributions and ETF share
@@ -166,7 +179,22 @@ def adjusted_price_series(rows: list[Any]) -> dict[str, float]:
     when that factor restores price continuity. CN ETF raw prices are explicitly
     kept out of Yahoo's adjusted-price feed before this function is called.
     """
+    result, _scales = adjusted_price_and_share_scale_series(rows, known_splits)
+    return result
+
+
+def adjusted_price_and_share_scale_series(
+    rows: list[Any],
+    known_splits: dict[str, float] | None = None,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Return normalized prices and the matching actual-share multiplier.
+
+    The engine keeps position quantities in one continuous unit across ETF share
+    splits and consolidations.  Cash distributions are quoted per actual share,
+    so they must use the same cumulative multiplier as normalized prices.
+    """
     result: dict[str, float] = {}
+    share_scales: dict[str, float] = {}
     previous_price: float | None = None
     previous_factor: float | None = None
     cumulative_split_scale = 1.0
@@ -175,16 +203,21 @@ def adjusted_price_series(rows: list[Any]) -> dict[str, float]:
         factor = row["adj_factor"]
         factor = float(factor) if factor not in (None, 0) else None
         normalized_price = price * cumulative_split_scale
-        if previous_price is not None and previous_factor:
+        if previous_price is not None:
             raw_jump = abs(normalized_price / previous_price - 1.0)
             split_ratio: float | None = None
-            if factor:
+            configured_ratio = (known_splits or {}).get(str(row["trade_date"]))
+            if configured_ratio and configured_ratio > 0 and raw_jump >= 0.25:
+                configured_price = normalized_price * configured_ratio
+                if abs(configured_price / previous_price - 1.0) <= 0.08:
+                    split_ratio = configured_ratio
+            if split_ratio is None and previous_factor and factor:
                 factor_ratio = factor / previous_factor
                 adjusted_price = normalized_price * factor_ratio
                 adjusted_jump = abs(adjusted_price / previous_price - 1.0)
                 if raw_jump >= 0.25 and adjusted_jump <= 0.08:
                     split_ratio = factor_ratio
-            if split_ratio is None and raw_jump >= 0.25:
+            if split_ratio is None and previous_factor and raw_jump >= 0.25:
                 for future_row in rows[index + 1 : index + 4]:
                     future_factor = future_row["adj_factor"]
                     future_factor = float(future_factor) if future_factor not in (None, 0) else None
@@ -199,9 +232,25 @@ def adjusted_price_series(rows: list[Any]) -> dict[str, float]:
                 cumulative_split_scale *= split_ratio
                 normalized_price *= split_ratio
         result[str(row["trade_date"])] = normalized_price
+        share_scales[str(row["trade_date"])] = cumulative_split_scale
         previous_price = normalized_price
         if factor:
             previous_factor = factor
+    return result, share_scales
+
+
+def configured_share_splits(assets: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    result: dict[str, dict[str, float]] = {}
+    for asset in assets:
+        for event in asset.get("share_splits") or []:
+            if not isinstance(event, dict) or not event.get("effective_date"):
+                continue
+            try:
+                multiplier = float(event.get("price_multiplier"))
+            except (TypeError, ValueError):
+                continue
+            if multiplier > 0:
+                result.setdefault(asset["symbol"], {})[str(event["effective_date"])] = multiplier
     return result
 
 
@@ -222,6 +271,7 @@ def price_proxy_asset(asset: dict[str, Any]) -> dict[str, Any] | None:
     }
     proxy.pop("price_fallback", None)
     proxy.pop("replacement_assets", None)
+    proxy.pop("share_splits", None)
     return proxy
 
 
@@ -253,14 +303,82 @@ def simulation_assets(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def annual_expense_factor(start: date, end: date, annual_rate: float) -> float:
+    """Return the remaining NAV factor after daily calendar-day expenses.
+
+    Fund management and custody fees accrue every calendar day.  Splitting the
+    interval at year boundaries keeps leap years aligned with the usual
+    ``annual rate / days in year`` fund-accounting convention.
+    """
+    if end <= start or annual_rate <= 0:
+        return 1.0
+    if not math.isfinite(annual_rate) or annual_rate >= 1:
+        raise BacktestError("proxy annual expense drag rate must be between 0 and 1")
+    factor = 1.0
+    cursor = start
+    while cursor < end:
+        next_year = date(cursor.year + 1, 1, 1)
+        segment_end = min(end, next_year)
+        days_in_year = 366 if calendar.isleap(cursor.year) else 365
+        factor *= (1.0 - annual_rate / days_in_year) ** (segment_end - cursor).days
+        cursor = segment_end
+    return factor
+
+
+def apply_proxy_expense_drag(
+    prices: dict[str, float],
+    annual_rate: float,
+) -> dict[str, float]:
+    """Net a gross index proxy for ETF expenses while keeping the splice continuous.
+
+    The stored index is already scaled to the real ETF at the listing boundary.
+    Anchoring the last proxy close and increasing older synthetic prices by the
+    accumulated expense factor reduces the simulated return without creating a
+    jump when the engine switches to the real ETF.
+    """
+    if not prices or annual_rate <= 0:
+        return dict(prices)
+    ordered_dates = sorted(prices)
+    anchor = parse_date(ordered_dates[-1])
+    adjusted: dict[str, float] = {}
+    for trade_date in ordered_dates:
+        remaining_factor = annual_expense_factor(parse_date(trade_date), anchor, annual_rate)
+        adjusted[trade_date] = prices[trade_date] / remaining_factor
+    return adjusted
+
+
 def attach_proxy_price_maps(price_maps: dict[str, dict[str, float]], assets: list[dict[str, Any]]) -> None:
     for asset in assets:
         proxy = price_proxy_asset(asset)
         if not proxy:
             continue
         proxy_symbol = proxy["symbol"]
+        primary_start = parse_date(
+            asset.get("allocation_start_date")
+            or asset.get("trade_start_date")
+            or asset.get("inception_date")
+        )
+        target_prices = price_maps.get(asset["symbol"], {})
         merged = dict(price_maps.get(proxy_symbol, {}))
-        merged.update(price_maps.get(asset["symbol"], {}))
+        merged.update(target_prices)
+        fallback = asset.get("price_fallback") or {}
+        annual_rate = float(fallback.get("annual_expense_drag_rate", 0.0) or 0.0)
+        if annual_rate > 0:
+            proxy_segment = {
+                trade_date: value
+                for trade_date, value in merged.items()
+                if parse_date(trade_date) < primary_start
+            }
+            merged.update(apply_proxy_expense_drag(proxy_segment, annual_rate))
+            # Always keep genuine ETF observations untouched.  Their market
+            # price/NAV already reflects fund operating expenses.
+            merged.update(
+                {
+                    trade_date: value
+                    for trade_date, value in target_prices.items()
+                    if parse_date(trade_date) >= primary_start
+                }
+            )
         if merged:
             price_maps[proxy_symbol] = merged
 
@@ -299,7 +417,13 @@ def load_repo_map(conn, symbol: str, start: str, end: str) -> dict[str, float]:
     return {row["trade_date"]: float(row["close_rate"]) for row in rows}
 
 
-def load_dividend_events(conn, symbols: list[str], start: str, end: str) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+def load_dividend_events(
+    conn,
+    symbols: list[str],
+    start: str,
+    end: str,
+    share_scale_maps: dict[str, dict[str, float]] | None = None,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
     ex_events: dict[str, list[dict[str, Any]]] = {}
     pay_events: dict[str, list[dict[str, Any]]] = {}
     if not symbols:
@@ -313,8 +437,19 @@ def load_dividend_events(conn, symbols: list[str], start: str, end: str) -> tupl
         """,
         (*symbols, start, end),
     ).fetchall()
+    scale_dates = {
+        symbol: sorted(values)
+        for symbol, values in (share_scale_maps or {}).items()
+    }
     for row in rows:
         event = dict(row)
+        dates = scale_dates.get(row["symbol"], [])
+        scale_index = bisect_right(dates, row["ex_date"]) - 1
+        event["normalized_share_scale"] = (
+            float((share_scale_maps or {})[row["symbol"]][dates[scale_index]])
+            if scale_index >= 0
+            else 1.0
+        )
         ex_events.setdefault(row["ex_date"], []).append(event)
         pay_events.setdefault(row["pay_date"], []).append(event)
     return ex_events, pay_events
@@ -565,6 +700,62 @@ def compute_metrics(
     return daily_returns, cumulative, drawdowns
 
 
+def _shift_years(value: date, years: int) -> date:
+    try:
+        return value.replace(year=value.year + years)
+    except ValueError:
+        # Keep a leap-day anchor inside February in non-leap years.
+        return value.replace(year=value.year + years, day=28)
+
+
+def rolling_window_ranges(
+    start: str,
+    end: str,
+    window_years: int = 3,
+    step_years: int = 1,
+) -> list[dict[str, Any]]:
+    """Return complete inclusive ranges for independently initialized backtests.
+
+    A five-year window starting on 2001-01-01 ends on 2005-12-31.  Each
+    following range advances the start by one year, so the next range is
+    2002-01-01 through 2006-12-31.
+    """
+    if window_years < 1 or step_years < 1:
+        return []
+    overall_start = parse_date(start)
+    overall_end = parse_date(end)
+    if overall_end < overall_start:
+        return []
+    rows: list[dict[str, Any]] = []
+    anchor = overall_start
+    sequence = 1
+    while True:
+        window_end = _shift_years(anchor, window_years) - timedelta(days=1)
+        if window_end > overall_end:
+            break
+        rows.append(
+            {
+                "sequence": sequence,
+                "period": f"{anchor.year}–{window_end.year}",
+                "start_date": anchor.isoformat(),
+                "end_date": window_end.isoformat(),
+                "window_years": window_years,
+            }
+        )
+        sequence += 1
+        anchor = _shift_years(anchor, step_years)
+    return rows
+
+
+def annual_return_drawdown_ratio(annualized_return: float, max_drawdown: float) -> float | None:
+    """Return the raw annualized-return/max-drawdown ratio (Calmar ratio)."""
+    annualized = float(annualized_return or 0.0)
+    drawdown = abs(float(max_drawdown or 0.0))
+    if not math.isfinite(annualized) or not math.isfinite(drawdown) or drawdown <= 1e-12:
+        return None
+    return annualized / drawdown
+
+
 def yearly_return_counts(dates: list[str], daily_returns: list[float]) -> tuple[int, int]:
     """Return positive and total complete calendar years from daily portfolio returns."""
     yearly_nav: dict[str, float] = {}
@@ -573,11 +764,15 @@ def yearly_return_counts(dates: list[str], daily_returns: list[float]) -> tuple[
         year = trade_date[:4]
         yearly_nav[year] = yearly_nav.get(year, 1.0) * (1.0 + float(daily_return or 0.0))
         year_dates.setdefault(year, []).append(trade_date)
-    complete = [
-        nav
-        for year, nav in yearly_nav.items()
-        if year_dates[year][0][5:7] == "01" and year_dates[year][-1][5:7] == "12"
-    ]
+    complete = []
+    for year, nav in yearly_nav.items():
+        first_day = parse_date(year_dates[year][0])
+        last_day = parse_date(year_dates[year][-1])
+        # A month-only check incorrectly treats Jan 31..Dec 1 as a complete
+        # calendar year.  Allow normal market holidays around both boundaries,
+        # but require coverage of the opening and closing week.
+        if first_day.month == 1 and first_day.day <= 7 and last_day.month == 12 and last_day.day >= 24:
+            complete.append(nav)
     return sum(1 for nav in complete if nav > 1.0 + 1e-12), len(complete)
 
 
@@ -595,6 +790,7 @@ def ranking_metrics(
     """Return the capped 0-100 leaderboard score and its transparent components."""
     excess_annualized_return = annualized_return - repo_annualized_return
     adjusted_calmar = excess_annualized_return / max(abs(max_drawdown), RANKING_MIN_DRAWDOWN)
+    return_drawdown_ratio = annual_return_drawdown_ratio(annualized_return, max_drawdown)
     positive_year_ratio = positive_year_count / complete_year_count if complete_year_count else 0.0
     excess_return_score = min(max(excess_annualized_return / RANKING_EXCESS_RETURN_CAP, 0.0), 1.0)
     calmar_score = min(max(adjusted_calmar / RANKING_CALMAR_CAP, 0.0), 1.0)
@@ -604,6 +800,7 @@ def ranking_metrics(
         "repo_annualized_return": repo_annualized_return,
         "excess_annualized_return": excess_annualized_return,
         "adjusted_calmar": adjusted_calmar,
+        "annual_return_drawdown_ratio": return_drawdown_ratio,
         "positive_year_ratio": positive_year_ratio,
         "ranking_eligible": excess_annualized_return >= RANKING_MIN_EXCESS_ANNUALIZED_RETURN,
         "ranking_score": score,
@@ -622,6 +819,166 @@ def benchmark_returns(benchmark_values: list[float | None]) -> list[float]:
             last = value
         returns.append(last / base - 1.0 if base else 0.0)
     return returns
+
+
+def _compounded_return(values: list[float]) -> float:
+    growth = 1.0
+    for value in values:
+        growth *= 1.0 + float(value or 0.0)
+    return growth - 1.0
+
+
+def worst_calendar_periods(dates: list[str], daily_returns: list[float]) -> dict[str, dict[str, Any] | None]:
+    """Return the worst complete calendar year and calendar half-year.
+
+    Partial periods are ignored when at least one complete peer exists. This
+    prevents a few opening or closing trading days from being compared with a
+    full year or half-year. Short backtests still return their available period.
+    """
+    year_groups: dict[int, dict[str, Any]] = {}
+    half_groups: dict[tuple[int, int], dict[str, Any]] = {}
+    for trade_date, daily_return in zip(dates, daily_returns):
+        current = parse_date(trade_date)
+        year_group = year_groups.setdefault(current.year, {"dates": [], "returns": []})
+        year_group["dates"].append(trade_date)
+        year_group["returns"].append(float(daily_return or 0.0))
+        half = 1 if current.month <= 6 else 2
+        half_group = half_groups.setdefault((current.year, half), {"dates": [], "returns": []})
+        half_group["dates"].append(trade_date)
+        half_group["returns"].append(float(daily_return or 0.0))
+
+    def year_row(year: int, group: dict[str, Any]) -> dict[str, Any]:
+        first = parse_date(group["dates"][0])
+        last = parse_date(group["dates"][-1])
+        complete = first.month == 1 and first.day <= 7 and last.month == 12 and last.day >= 24
+        return {
+            "period": f"{year}年",
+            "start_date": group["dates"][0],
+            "end_date": group["dates"][-1],
+            "return": _compounded_return(group["returns"]),
+            "complete": complete,
+        }
+
+    def half_row(key: tuple[int, int], group: dict[str, Any]) -> dict[str, Any]:
+        year, half = key
+        first = parse_date(group["dates"][0])
+        last = parse_date(group["dates"][-1])
+        if half == 1:
+            complete = first.month == 1 and first.day <= 7 and last.month == 6 and last.day >= 24
+        else:
+            complete = first.month == 7 and first.day <= 7 and last.month == 12 and last.day >= 24
+        return {
+            "period": f"{year}年{'上' if half == 1 else '下'}半年",
+            "start_date": group["dates"][0],
+            "end_date": group["dates"][-1],
+            "return": _compounded_return(group["returns"]),
+            "complete": complete,
+        }
+
+    def choose_worst(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        complete_rows = [row for row in rows if row["complete"]]
+        candidates = complete_rows or rows
+        return min(candidates, key=lambda row: row["return"]) if candidates else None
+
+    return {
+        "worst_year": choose_worst([year_row(year, group) for year, group in year_groups.items()]),
+        "worst_half_year": choose_worst([half_row(key, group) for key, group in half_groups.items()]),
+    }
+
+
+def drawdown_recovery_metrics(dates: list[str], cumulative_returns: list[float]) -> dict[str, Any] | None:
+    """Describe recovery from the maximum-drawdown trough to its prior peak."""
+    if not dates or not cumulative_returns:
+        return None
+    navs = [1.0 + float(value or 0.0) for value in cumulative_returns]
+    peak_nav = 1.0
+    peak_index = 0
+    max_drawdown = 0.0
+    trough_index = 0
+    trough_peak_index = 0
+    trough_peak_nav = peak_nav
+    for index, nav in enumerate(navs):
+        if nav > peak_nav:
+            peak_nav = nav
+            peak_index = index
+        drawdown = nav / peak_nav - 1.0 if peak_nav else 0.0
+        if drawdown < max_drawdown:
+            max_drawdown = drawdown
+            trough_index = index
+            trough_peak_index = peak_index
+            trough_peak_nav = peak_nav
+
+    peak_date = parse_date(dates[trough_peak_index])
+    trough_date = parse_date(dates[trough_index])
+    recovery_index = next(
+        (index for index in range(trough_index, len(navs)) if navs[index] >= trough_peak_nav * (1.0 - 1e-12)),
+        None,
+    )
+    recovery_date = parse_date(dates[recovery_index]) if recovery_index is not None else None
+    end_date = parse_date(dates[-1])
+    return {
+        "peak_date": peak_date.isoformat(),
+        "trough_date": trough_date.isoformat(),
+        "recovery_date": recovery_date.isoformat() if recovery_date else None,
+        "recovery_days": (recovery_date - trough_date).days if recovery_date else None,
+        "underwater_days": ((recovery_date or end_date) - peak_date).days,
+        "ongoing_days": 0 if recovery_date else (end_date - trough_date).days,
+        "recovered": recovery_date is not None,
+    }
+
+
+def market_capture_metrics(
+    dates: list[str],
+    daily_returns: list[float],
+    benchmark_values: list[float | None],
+) -> dict[str, Any]:
+    """Return standard monthly upside/downside capture ratios versus the benchmark."""
+    monthly_endpoints: dict[str, tuple[float, float]] = {}
+    strategy_nav = 1.0
+    last_benchmark: float | None = None
+    for trade_date, daily_return, benchmark_value in zip(dates, daily_returns, benchmark_values):
+        strategy_nav *= 1.0 + float(daily_return or 0.0)
+        if benchmark_value is not None and float(benchmark_value) > 0:
+            last_benchmark = float(benchmark_value)
+        if last_benchmark is not None:
+            monthly_endpoints[trade_date[:7]] = (strategy_nav, last_benchmark)
+
+    strategy_up: list[float] = []
+    benchmark_up: list[float] = []
+    strategy_down: list[float] = []
+    benchmark_down: list[float] = []
+    endpoints = list(monthly_endpoints.values())
+    for previous, current in zip(endpoints, endpoints[1:]):
+        strategy_return = current[0] / previous[0] - 1.0 if previous[0] else 0.0
+        benchmark_return = current[1] / previous[1] - 1.0 if previous[1] else 0.0
+        if benchmark_return > 1e-12:
+            strategy_up.append(strategy_return)
+            benchmark_up.append(benchmark_return)
+        elif benchmark_return < -1e-12:
+            strategy_down.append(strategy_return)
+            benchmark_down.append(benchmark_return)
+
+    def annualized_period_return(values: list[float]) -> float | None:
+        if not values:
+            return None
+        growth = 1.0
+        for value in values:
+            growth *= max(1.0 + value, 0.0)
+        return growth ** (12.0 / len(values)) - 1.0
+
+    def capture(strategy: list[float], benchmark: list[float]) -> float | None:
+        strategy_annualized = annualized_period_return(strategy)
+        benchmark_annualized = annualized_period_return(benchmark)
+        if strategy_annualized is None or benchmark_annualized is None or abs(benchmark_annualized) <= 1e-12:
+            return None
+        return strategy_annualized / benchmark_annualized
+
+    return {
+        "upside_capture_ratio": capture(strategy_up, benchmark_up),
+        "downside_capture_ratio": capture(strategy_down, benchmark_down),
+        "up_market_months": len(benchmark_up),
+        "down_market_months": len(benchmark_down),
+    }
 
 
 def reference_trading_days(
@@ -1046,7 +1403,11 @@ def _apply_dividend_events(
         pos = state.positions.get(event["symbol"])
         if not pos or pos.quantity <= 0:
             continue
-        dividend = pos.quantity * float(event["div_cash"])
+        dividend = (
+            pos.quantity
+            * float(event["div_cash"])
+            * float(event.get("normalized_share_scale", 1.0) or 1.0)
+        )
         if event["currency"] == "USD":
             fx = currency_to_cny_rate("USD", fx_rates)
             tax_rate = float(fees["tax"].get("us_dividend_withholding_rate", 0.10))
@@ -1265,7 +1626,16 @@ def _simulate_comparison_series(
     return totals
 
 
-def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=None) -> dict[str, Any]:
+def run_backtest(
+    conn,
+    user_config: dict[str, Any] | None = None,
+    should_cancel=None,
+    *,
+    persist: bool = True,
+    include_comparison: bool = True,
+    include_month_analysis: bool = True,
+    include_rolling_analysis: bool = True,
+) -> dict[str, Any]:
     started_at = time.perf_counter()
     raise_if_cancelled(should_cancel)
     config = normalize_config(user_config)
@@ -1273,10 +1643,11 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     if errors:
         raise BacktestError("; ".join(errors))
     config_hash = canonical_config_hash(config)
-    cached = get_cached_backtest_run(conn, config)
-    if cached:
-        logger.info("run_backtest cache hit range=%s..%s seconds=%.3f", config["start_date"], config["end_date"], time.perf_counter() - started_at)
-        return cached
+    if persist:
+        cached = get_cached_backtest_run(conn, config)
+        if cached:
+            logger.info("run_backtest cache hit range=%s..%s seconds=%.3f", config["start_date"], config["end_date"], time.perf_counter() - started_at)
+            return cached
 
     raise_if_cancelled(should_cancel)
     start = config["start_date"]
@@ -1310,10 +1681,19 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     raise_if_cancelled(should_cancel)
     sim_assets = simulation_assets(all_assets)
     symbols = [asset["symbol"] for asset in sim_assets]
+    share_splits = configured_share_splits(all_assets)
     benchmark_symbol = "000300.SH"
     load_started_at = time.perf_counter()
-    price_maps = load_price_map(conn, symbols + [benchmark_symbol], start, end)
-    open_price_maps = load_price_map(conn, symbols + [benchmark_symbol], start, end, "open")
+    share_scale_maps: dict[str, dict[str, float]] = {}
+    price_maps = load_price_map(
+        conn,
+        symbols + [benchmark_symbol],
+        start,
+        end,
+        share_splits=share_splits,
+        share_scale_maps=share_scale_maps,
+    )
+    open_price_maps = load_price_map(conn, symbols + [benchmark_symbol], start, end, "open", share_splits)
     attach_proxy_price_maps(price_maps, all_assets)
     attach_proxy_price_maps(open_price_maps, all_assets)
     needed_fx_pairs = required_fx_pairs_for_assets(all_assets)
@@ -1324,7 +1704,13 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     # databases may contain rows from the generic dividend synchronizer; never
     # add those to the already total-return market price.
     dividend_symbols = [asset["symbol"] for asset in sim_assets if asset.get("asset_type") != "money_fund"]
-    ex_events, pay_events = load_dividend_events(conn, dividend_symbols, start, end)
+    ex_events, pay_events = load_dividend_events(
+        conn,
+        dividend_symbols,
+        start,
+        end,
+        share_scale_maps,
+    )
     days = reference_trading_days(start, end, price_maps.get(benchmark_symbol, {}), repo_map)
     logger.info(
         "run_backtest data loaded days=%d price_rows=%d fx_rows=%d repo_rows=%d one_day_repo_rows=%d dividend_events=%d seconds=%.3f",
@@ -1357,7 +1743,7 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     repo_benchmark_values: list[float] = []
 
     monthly_spend_days = first_business_day_by_month(days)
-    reb_days = rebalance_days(days, config["rebalance_frequency"])
+    reb_days = rebalance_days(days, config["rebalance_frequency"], int(config["annual_rebalance_month"]))
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
     latest_open_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
     latest_fx_rates: dict[str, float | None] = {pair: None for pair in needed_fx_pairs}
@@ -1409,6 +1795,17 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         if any(value is None for value in latest_fx_rates.values()):
             continue
         fx_rates = {pair: float(value) for pair, value in latest_fx_rates.items() if value is not None}
+        if current_year != day.year:
+            # Establish the annual baseline before this year's first maturity,
+            # spend, fee or trade.  Resetting after the day's work omitted the
+            # opening rebalance fees and January cash flow from annual metrics.
+            current_year = day.year
+            year_nav = 1.0
+            year_peak_nav = 1.0
+            year_max_drawdown = 0.0
+            year_fee_start = state.total_fees_cny
+            year_start_values = dict(last_close_values)
+            year_external_flows = {"REPO": 0.0}
         if latest_repo_rate is not None:
             repo_benchmark_nav *= 1.0 + (latest_repo_rate / 100.0) * repo_actual_days(day, 1) / 365.0
 
@@ -1634,15 +2031,6 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         benchmark_values.append(latest_prices.get(benchmark_symbol))
         repo_benchmark_values.append(repo_benchmark_nav)
 
-        if current_year != day.year:
-            current_year = day.year
-            year_nav = 1.0
-            year_peak_nav = 1.0
-            year_max_drawdown = 0.0
-            year_fee_start = state.total_fees_cny
-            year_start_values = dict(last_close_values)
-            year_external_flows = {"REPO": 0.0}
-
         period_previous_total = (
             daily_total_assets[-2]
             if len(daily_total_assets) > 1
@@ -1749,25 +2137,28 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
 
     raise_if_cancelled(should_cancel)
     comparison_started_at = time.perf_counter()
-    comparison_totals = _simulate_comparison_series(
-        config,
-        days,
-        price_maps,
-        fx_maps,
-        repo_map,
-        one_day_repo_map,
-        ex_events,
-        pay_events,
-        set(monthly_spend_days),
-        set(reb_days),
-        should_cancel,
-    )
+    comparison_totals = {}
+    if include_comparison:
+        comparison_totals = _simulate_comparison_series(
+            config,
+            days,
+            price_maps,
+            fx_maps,
+            repo_map,
+            one_day_repo_map,
+            ex_events,
+            pay_events,
+            set(monthly_spend_days),
+            set(reb_days),
+            should_cancel,
+        )
     for row, payload in zip(daily_rows, daily_payloads):
-        comparison_total = comparison_totals.get(row["trade_date"])
-        payload["comparison"] = {
-            "name": "沪深300基金加黄金基金加国债逆回购",
-            "total_asset_cny": comparison_total,
-        }
+        if include_comparison:
+            comparison_total = comparison_totals.get(row["trade_date"])
+            payload["comparison"] = {
+                "name": "沪深300基金加黄金基金加国债逆回购",
+                "total_asset_cny": comparison_total,
+            }
         row["payload_json"] = json_dumps(payload)
     logger.info("run_backtest comparison complete rows=%d seconds=%.3f", len(comparison_totals), time.perf_counter() - comparison_started_at)
 
@@ -1785,10 +2176,8 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     annualized = (1.0 + total_return) ** (1.0 / years) - 1.0
     repo_total_return = repo_benchmark_values[-1] / repo_benchmark_values[0] - 1.0
     repo_annualized_return = (1.0 + repo_total_return) ** (1.0 / years) - 1.0
-    positive_year_count, complete_year_count = yearly_return_counts(
-        [row["trade_date"] for row in daily_rows],
-        daily_returns,
-    )
+    trade_dates = [row["trade_date"] for row in daily_rows]
+    positive_year_count, complete_year_count = yearly_return_counts(trade_dates, daily_returns)
     max_drawdown = min(drawdowns)
     ranking = ranking_metrics(
         annualized,
@@ -1799,7 +2188,9 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
     )
     returns_np = np.array(daily_returns or [0.0], dtype=float)
     volatility = float(np.std(returns_np) * math.sqrt(252))
-
+    calendar_risk = worst_calendar_periods(trade_dates, daily_returns)
+    drawdown_recovery = drawdown_recovery_metrics(trade_dates, cumulative_returns)
+    market_capture = market_capture_metrics(trade_dates, daily_returns, benchmark_values)
     for idx, row in enumerate(daily_rows):
         row["daily_return"] = daily_returns[idx]
         row["cumulative_return"] = cumulative_returns[idx]
@@ -1815,6 +2206,9 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         "total_return": total_return,
         "annualized_return": annualized,
         "max_drawdown": max_drawdown,
+        **calendar_risk,
+        "drawdown_recovery": drawdown_recovery,
+        **market_capture,
         "positive_year_count": positive_year_count,
         "complete_year_count": complete_year_count,
         **ranking,
@@ -1828,10 +2222,86 @@ def run_backtest(conn, user_config: dict[str, Any] | None = None, should_cancel=
         "rebalance_count": len(rebalance_rows),
         "final_unrealized_pnl_cny": sum(final_payload.get("unrealized_pnl_cny", {}).values()),
         "comparison_final_asset_cny": final_payload.get("comparison", {}).get("total_asset_cny"),
+        "rolling_window_years": int(config["rolling_window_years"]),
+        "rolling_periods": [],
+        "annual_rebalance_month": int(config["annual_rebalance_month"]),
+        "rebalance_month_scenarios": [],
     }
+
+    if include_rolling_analysis:
+        rolling_rows = []
+        for window in rolling_window_ranges(start, end, int(config["rolling_window_years"])):
+            raise_if_cancelled(should_cancel)
+            scenario_config = dict(config)
+            scenario_config["start_date"] = window["start_date"]
+            scenario_config["end_date"] = window["end_date"]
+            scenario_config["rebalance_month_analysis_enabled"] = False
+            scenario_summary = run_backtest(
+                conn,
+                scenario_config,
+                should_cancel=should_cancel,
+                persist=False,
+                include_comparison=False,
+                include_month_analysis=False,
+                include_rolling_analysis=False,
+            )["summary"]
+            rolling_rows.append(
+                {
+                    **window,
+                    "actual_start_date": scenario_summary["start_date"],
+                    "actual_end_date": scenario_summary["end_date"],
+                    "total_return": scenario_summary["total_return"],
+                    "annualized_return": scenario_summary["annualized_return"],
+                    "max_drawdown": scenario_summary["max_drawdown"],
+                    "annual_return_drawdown_ratio": scenario_summary["annual_return_drawdown_ratio"],
+                }
+            )
+        summary["rolling_periods"] = rolling_rows
+
+    if (
+        include_month_analysis
+        and config["rebalance_frequency"] == "yearly"
+        and config.get("rebalance_month_analysis_enabled", False)
+    ):
+        month_rows = []
+        selected_month = int(config["annual_rebalance_month"])
+        for month in range(1, 13):
+            raise_if_cancelled(should_cancel)
+            if month == selected_month:
+                scenario_summary = summary
+            else:
+                scenario_config = dict(config)
+                scenario_config["annual_rebalance_month"] = month
+                scenario_config["rebalance_month_analysis_enabled"] = False
+                scenario_summary = run_backtest(
+                    conn,
+                    scenario_config,
+                    should_cancel=should_cancel,
+                    persist=False,
+                    include_comparison=False,
+                    include_month_analysis=False,
+                    include_rolling_analysis=False,
+                )["summary"]
+            month_rows.append(
+                {
+                    "month": month,
+                    "month_name": f"{month}月",
+                    "selected": month == selected_month,
+                    "final_asset_cny": scenario_summary["final_asset_cny"],
+                    "total_return": scenario_summary["total_return"],
+                    "annualized_return": scenario_summary["annualized_return"],
+                    "max_drawdown": scenario_summary["max_drawdown"],
+                    "annual_return_drawdown_ratio": scenario_summary["annual_return_drawdown_ratio"],
+                }
+            )
+        summary["rebalance_month_scenarios"] = month_rows
     logger.info("run_backtest metrics complete seconds=%.3f", time.perf_counter() - metrics_started_at)
 
     raise_if_cancelled(should_cancel)
+    if not persist:
+        logger.info("run_backtest analysis complete month=%s total_seconds=%.3f", config["annual_rebalance_month"], time.perf_counter() - started_at)
+        return {"run_id": run_id, "summary": summary, "cache": {"hit": False, "mode": "分析计算"}}
+
     persist_started_at = time.perf_counter()
     conn.execute(
         "INSERT INTO backtest_runs(run_id, created_at, config_hash, config_json, summary_json) VALUES(?,?,?,?,?)",

@@ -10,7 +10,7 @@ from urllib import request
 
 import app.main as main_module
 from app.config import normalize_config
-from app.db import init_db
+from app.db import db_session, init_db
 from app.main import create_server
 from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
@@ -50,16 +50,57 @@ class ApiTests(unittest.TestCase):
         cls.thread.join(timeout=5)
 
     def test_default_config_and_status(self) -> None:
+        health = http_json(f"{self.base_url}/api/health")
         cfg = http_json(f"{self.base_url}/api/default-config")
         status = http_json(f"{self.base_url}/api/data/status")
+        self.assertEqual(health["service"], "portfolio-backtest")
+        self.assertTrue(health["ok"])
+        self.assertGreaterEqual(self.server.request_queue_size, 64)
+        self.assertTrue(self.server.daemon_threads)
         self.assertIn("assets", cfg)
+        self.assertEqual(cfg["annual_rebalance_month"], 1)
+        self.assertEqual(cfg["rolling_window_years"], 3)
+        self.assertFalse(cfg["rebalance_month_analysis_enabled"])
         self.assertTrue(status["status"])
+
+    def test_data_sync_invalidates_cached_backtests_when_rows_change(self) -> None:
+        result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        with db_session(self.db_path) as conn:
+            before = conn.execute(
+                "SELECT config_hash FROM backtest_runs WHERE run_id=?", (result["run_id"],)
+            ).fetchone()
+        self.assertIsNotNone(before["config_hash"])
+
+        original_sync_all = main_module.sync_all
+        main_module.sync_all = lambda *_args, **_kwargs: {
+            "inserted": {"prices": 1, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "fx_rates": 0},
+            "warnings": [],
+            "missing_data": [],
+        }
+        try:
+            synced = http_json(f"{self.base_url}/api/data/sync", {"config": self.config})
+        finally:
+            main_module.sync_all = original_sync_all
+
+        with db_session(self.db_path) as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS count FROM backtest_runs WHERE config_hash IS NOT NULL"
+            ).fetchone()["count"]
+        self.assertTrue(synced["cache_invalidated"])
+        self.assertEqual(remaining, 0)
 
     def test_run_and_read_backtest_sections(self) -> None:
         result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
         run_id = result["run_id"]
         self.assertFalse(result["cache"]["hit"])
         self.assertGreater(result["summary"]["final_asset_cny"], 0)
+        self.assertIn("rolling_periods", result["summary"])
+        self.assertIn("rebalance_month_scenarios", result["summary"])
+        self.assertIn("worst_year", result["summary"])
+        self.assertIn("worst_half_year", result["summary"])
+        self.assertIn("drawdown_recovery", result["summary"])
+        self.assertIn("upside_capture_ratio", result["summary"])
+        self.assertIn("downside_capture_ratio", result["summary"])
         detail = http_json(f"{self.base_url}/api/backtest/{run_id}")
         series = http_json(f"{self.base_url}/api/backtest/{run_id}/series")
         chart_series = http_json(f"{self.base_url}/api/backtest/{run_id}/chart-series")
@@ -97,10 +138,13 @@ class ApiTests(unittest.TestCase):
         entry = next(item for item in history["records"] if item["run_id"] == run_id)
         self.assertLessEqual(len(history["records"]), 20)
         self.assertLessEqual(len(leaderboard["records"]), 100)
+        self.assertNotIn("config_json", entry)
+        self.assertNotIn("summary_json", entry)
         self.assertIn("positive_year_count", entry["summary"])
         self.assertIn("ranking_score", entry["summary"])
         self.assertIn("excess_annualized_return", entry["summary"])
         self.assertIn("adjusted_calmar", entry["summary"])
+        self.assertIn("annual_return_drawdown_ratio", entry["summary"])
         self.assertIn("positive_year_ratio", entry["summary"])
         self.assertEqual(entry["ranking_score"], entry["summary"]["ranking_score"])
         if leaderboard["records"]:
@@ -126,7 +170,13 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(static_headers.get("Content-Encoding"), "gzip")
         self.assertEqual(static_headers.get("Cache-Control"), "public, max-age=3600")
-        self.assertIn(b"currentRunId", gzip.decompress(static_body))
+        decoded_app_js = gzip.decompress(static_body)
+        self.assertIn(b"currentRunId", decoded_app_js)
+        self.assertIn(b"ApiNetworkError", decoded_app_js)
+        self.assertIn(b"/api/health", decoded_app_js)
+        self.assertIn(b"recoverApiConnection", decoded_app_js)
+        self.assertIn(b"Object.keys(row.payload?.weights", decoded_app_js)
+        self.assertNotIn(b"payload?.values", decoded_app_js)
 
         versioned_headers, _versioned_body = http_get_raw(
             f"{self.base_url}/static/app.js?v=20260715-perf-2",
@@ -163,11 +213,18 @@ class ApiTests(unittest.TestCase):
         self.assertIn("dailyReturnChart", html)
         self.assertIn("repoTargetMode", html)
         self.assertIn("assetWeightTitle", html)
+        self.assertIn("annualRebalanceMonth", html)
+        self.assertIn("rollingWindowYears", html)
+        self.assertIn("rollingTable", html)
+        self.assertIn("monthsTable", html)
         self.assertIn("controlSummary", html)
         self.assertIn('id="historyPanel"', html)
         self.assertIn('id="mobileHistoryToggle"', html)
         self.assertIn('id="historyRecentMeta"', html)
         self.assertIn('id="leaderboardList"', html)
+        self.assertIn('id="historySearch"', html)
+        self.assertIn('id="historySort"', html)
+        self.assertIn('data-history-view="leaderboard"', html)
         self.assertIn("allocationSummary", html)
         self.assertIn("data-repo-mode", html)
         self.assertIn("static/echarts.min.js", html)
@@ -186,11 +243,17 @@ class ApiTests(unittest.TestCase):
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/", timeout=10) as resp:
             detail = resp.read().decode("utf-8")
-            self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
+        self.assertIn("20260825-dividend-explainer-2", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")
+        self.assertIn("实际到账现金分红", app_js)
+        self.assertIn("2023—2025 年未实施利润分配", app_js)
+        self.assertIn("annual_expense_drag_rate", app_js)
+        self.assertIn("H20269全收益指数代理阶段", app_js)
+        self.assertIn("0.63%/年", app_js)
         self.assertIn("/backtest/permanent-investment", app_js)
         self.assertIn("MAX_RUN_HISTORY = 20", app_js)
         self.assertIn("MAX_LEADERBOARD_RUNS = 100", app_js)
@@ -278,6 +341,49 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(current["status"], "completed")
         self.assertGreater(current["result"]["summary"]["final_asset_cny"], 0)
+
+    def test_async_backtest_returns_primary_result_before_extended_analysis(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        cfg = json.loads(json.dumps(cfg))
+        cfg["rebalance_frequency"] = "yearly"
+        cfg["rebalance_month_analysis_enabled"] = True
+        server = create_server(port=0, db_path=db_path)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}"
+            job = http_json(f"{base_url}/api/backtest/start", {"config": cfg})
+            for _ in range(60):
+                current = http_json(f"{base_url}/api/backtest/jobs/{job['job_id']}")
+                if current["status"] == "completed":
+                    break
+                if current["status"] == "failed":
+                    self.fail(current.get("error", "job failed"))
+                time.sleep(0.05)
+            else:
+                self.fail("primary backtest did not complete")
+
+            result = current["result"]
+            self.assertTrue(result["analysis_pending"])
+            self.assertEqual(result["summary"]["analysis_status"], "pending")
+            self.assertEqual(result["summary"]["rebalance_month_scenarios"], [])
+
+            for _ in range(120):
+                detail = http_json(f"{base_url}/api/backtest/{result['run_id']}")
+                if detail["summary"].get("analysis_status") == "completed":
+                    break
+                if detail["summary"].get("analysis_status") == "failed":
+                    self.fail(detail["summary"].get("analysis_error", "analysis failed"))
+                time.sleep(0.05)
+            else:
+                self.fail("extended analysis did not complete")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(len(detail["summary"]["rebalance_month_scenarios"]), 12)
 
     def test_async_backtest_start_reuses_client_request_id(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
