@@ -233,6 +233,13 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "asset_type": "cn_bond_index",
         "inception_date": "2011-01-04",
         "index_id": "8a8b2cef77b239980177b485d20a6379",
+        "price_fallback": {
+            "kind": "chinabond_30y_yield_total_return",
+            "symbol": "CN30Y.YIELD-TR",
+            "name": "财政部30年期国债收益率曲线（模型化总回报）",
+            "start_date": "2006-03-01",
+            "asset_type": "cn_bond_index",
+        },
     },
     {
         "key": "cn_gold_etf",
@@ -253,7 +260,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
             "start_date": "2002-10-30",
             "scale_mode": "fixed",
             "price_scale": 0.01,
-            "required": False,
+            "required": True,
         },
         "replacement_assets": [
             {

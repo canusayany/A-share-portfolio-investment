@@ -48,7 +48,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 27
+BACKTEST_ENGINE_VERSION = 29
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -1603,7 +1603,7 @@ def _simulate_comparison_series(
                 False,
                 targets,
                 float(config["rebalance_band"]),
-                config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                not initial_rebalance_done or config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
             )
         if is_rebalance_day and has_investable_asset_target(targets):
             initial_rebalance_done = True
@@ -1927,7 +1927,7 @@ def run_backtest(
                     bool(config.get("allow_fractional_us_shares", True)),
                     targets,
                     rebalance_band,
-                    config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                    not initial_rebalance_done or config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
                 )
                 _after_total, after_values = _portfolio_value(state, latest_prices, fx_rates, day)
                 rebalance_action = "trade"

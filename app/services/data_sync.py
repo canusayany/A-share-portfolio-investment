@@ -25,7 +25,10 @@ HTTP_TIMEOUT_SECONDS = 2
 CURL_TIMEOUT_SECONDS = 8
 CHINABOND_CONNECT_TIMEOUT_SECONDS = 10
 CHINABOND_TOTAL_RETURN_TIMEOUT_SECONDS = 90
+CHINABOND_YIELD_TIMEOUT_SECONDS = 30
+CHINABOND_RETRY_COUNT = 2
 CSINDEX_TOTAL_RETURN_TIMEOUT_SECONDS = 60
+TROY_OUNCE_GRAMS = 31.1034768
 DATASRC_MARKET_APPSETTINGS = Path.home() / "Documents" / "code" / "DataSrc" / "market-data-platform" / "src" / "Market.Api" / "appsettings.json"
 DATASRC_SOURCE_PRIORITY = {"tushare": 0, "akshare": 1, "amazingdata": 2, "tdx": 3}
 CN_PRICE_SOURCE_PRIORITY = {
@@ -800,7 +803,12 @@ def asset_price_sync_ranges(
     ranges: list[tuple[str, str]] = []
     fallback_end = min(requested_end, primary_start - timedelta(days=1))
     if price_start <= fallback_end:
-        fallback_gaps = missing_date_ranges(
+        fallback_range_func = (
+            missing_tail_date_ranges
+            if fallback.get("kind") in {"sge_au9999", "chinabond_30y_yield_total_return"}
+            else missing_date_ranges
+        )
+        fallback_gaps = fallback_range_func(
             conn,
             "prices",
             "symbol",
@@ -1256,6 +1264,55 @@ def fetch_cn_fund_prices(token: str, symbol: str, start: str, end: str) -> list[
     ]
 
 
+def fetch_tushare_sge_au9999_prices(
+    token: str,
+    target_symbol: str,
+    start: str,
+    end: str,
+    currency: str,
+) -> list[dict[str, Any]]:
+    """Fetch Shanghai Gold Exchange Au99.99 daily bars from Tushare.
+
+    The endpoint is capped at 2,000 rows.  Chunking keeps the full history
+    available when a backtest begins years before the gold ETFs were listed.
+    """
+    rows: list[dict[str, Any]] = []
+    for chunk_start, chunk_end in chunk_date_ranges(start, end, 1460):
+        fetched = tushare_call(
+            token,
+            "sge_daily",
+            {
+                "ts_code": "Au99.99",
+                "start_date": tushare_date(chunk_start),
+                "end_date": tushare_date(chunk_end),
+            },
+            "ts_code,trade_date,open,high,low,close,price_avg,change,pct_change,vol,amount,oi,settle_vol,settle_dire",
+        )
+        for row in fetched:
+            close = finite_float(row.get("close"))
+            trade_date = from_tushare_date(row.get("trade_date"))
+            if not trade_date or close is None or close <= 0:
+                continue
+            rows.append(
+                price_row(
+                    target_symbol,
+                    trade_date,
+                    close,
+                    currency,
+                    "tushare:sge_daily:Au99.99",
+                    open_=finite_float(row.get("open")),
+                    high=finite_float(row.get("high")),
+                    low=finite_float(row.get("low")),
+                    volume=finite_float(row.get("vol")) or 0.0,
+                    amount=finite_float(row.get("amount")) or 0.0,
+                )
+            )
+    rows = merge_rows_by_trade_date(rows, [])
+    if not rows:
+        raise SyncWarning("Tushare returned no sge_daily rows for Au99.99")
+    return rows
+
+
 def eastmoney_secid(symbol: str) -> str:
     code = symbol.split(".")[0]
     suffix = symbol.split(".")[-1].upper() if "." in symbol else ""
@@ -1532,9 +1589,22 @@ def fetch_sge_au9999_report_prices(target_symbol: str, start: str, end: str, cur
     return rows
 
 
-def fetch_au9999_proxy_prices(target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
+def fetch_au9999_proxy_prices(
+    target_symbol: str,
+    start: str,
+    end: str,
+    currency: str,
+    token: str = "",
+) -> list[dict[str, Any]]:
     warnings: list[str] = []
     rows: list[dict[str, Any]] = []
+    if token:
+        try:
+            rows = fetch_tushare_sge_au9999_prices(token, target_symbol, start, end, currency)
+        except SyncWarning as exc:
+            warnings.append(str(exc))
+    if rows:
+        return rows
     try:
         rows = fetch_sge_au9999_spot_prices(target_symbol, start, end, currency)
     except SyncWarning as exc:
@@ -1546,9 +1616,69 @@ def fetch_au9999_proxy_prices(target_symbol: str, start: str, end: str, currency
             rows = merge_rows_by_trade_date(rows, report_rows)
         except SyncWarning as exc:
             warnings.append(str(exc))
+    if expected_dates - {row["trade_date"] for row in rows}:
+        try:
+            public_rows = fetch_yahoo_gold_cny_proxy_prices(target_symbol, start, end, currency)
+            rows = merge_rows_by_trade_date(rows, public_rows)
+        except SyncWarning as exc:
+            warnings.append(str(exc))
     if not rows:
         raise SyncWarning("; ".join(warnings) or "no Au99.99 fallback rows")
     return rows
+
+
+def fetch_yahoo_gold_cny_proxy_prices(
+    target_symbol: str,
+    start: str,
+    end: str,
+    currency: str,
+) -> list[dict[str, Any]]:
+    """Build a keyless CNY/gram gold proxy from public USD gold and FX bars."""
+    if currency != "CNY":
+        raise SyncWarning(f"gold CNY proxy does not support {currency}")
+    fx_start = (parse_date(start) - timedelta(days=10)).isoformat()
+    gold_rows = fetch_yahoo_prices("GC=F", start, end, "USD")
+    fx_rows = fetch_yahoo_fx_rates(fx_start, end, "USD/CNY")
+    ordered_fx = sorted(
+        (parse_date(row["trade_date"]), float(row["rate"]))
+        for row in fx_rows
+        if finite_float(row.get("rate")) is not None and float(row["rate"]) > 0
+    )
+    if not ordered_fx:
+        raise SyncWarning("Yahoo returned no usable USD/CNY rows for gold conversion")
+
+    result: list[dict[str, Any]] = []
+    fx_index = 0
+    latest_rate: float | None = None
+    for gold_row in sorted(gold_rows, key=lambda row: row["trade_date"]):
+        trade_day = parse_date(gold_row["trade_date"])
+        while fx_index < len(ordered_fx) and ordered_fx[fx_index][0] <= trade_day:
+            latest_rate = ordered_fx[fx_index][1]
+            fx_index += 1
+        close = finite_float(gold_row.get("close"))
+        if latest_rate is None or close is None or close <= 0:
+            continue
+
+        def cny_per_gram(field: str) -> float:
+            value = finite_float(gold_row.get(field)) or close
+            return value * latest_rate / TROY_OUNCE_GRAMS
+
+        result.append(
+            price_row(
+                target_symbol,
+                trade_day.isoformat(),
+                cny_per_gram("close"),
+                currency,
+                "yahoo:GC=F+CNY=X:synthetic_cny_per_gram",
+                open_=cny_per_gram("open"),
+                high=cny_per_gram("high"),
+                low=cny_per_gram("low"),
+                volume=finite_float(gold_row.get("volume")) or 0.0,
+            )
+        )
+    if not result:
+        raise SyncWarning("Yahoo gold and USD/CNY histories have no overlapping rows")
+    return result
 
 
 def price_scale_from_overlap(target_rows: list[dict[str, Any]], fallback_rows: list[dict[str, Any]]) -> float | None:
@@ -1606,7 +1736,9 @@ def fetch_price_fallback_rows(
     if kind == "open_fund_nav":
         fallback_rows = fetch_fund_nav_proxy_prices(str(fallback["symbol"]), symbol, fetch_start, fetch_end, currency)
     elif kind == "sge_au9999":
-        fallback_rows = fetch_au9999_proxy_prices(symbol, fetch_start, fetch_end, currency)
+        fallback_rows = fetch_au9999_proxy_prices(symbol, fetch_start, fetch_end, currency, token=token)
+    elif kind == "chinabond_30y_yield_total_return":
+        fallback_rows = fetch_chinabond_30y_modeled_prices(asset, symbol, fetch_start, fetch_end, currency)
     elif kind == "index":
         fallback_rows = fetch_index_proxy_prices(
             token,
@@ -1902,6 +2034,9 @@ def fetch_chinabond_index_prices(asset: dict[str, Any], start: str, end: str) ->
         "--noproxy", "*",
         "--connect-timeout", str(CHINABOND_CONNECT_TIMEOUT_SECONDS),
         "--max-time", str(CHINABOND_TOTAL_RETURN_TIMEOUT_SECONDS),
+        "--retry", str(CHINABOND_RETRY_COUNT),
+        "--retry-all-errors",
+        "--retry-delay", "1",
         url,
     ]
     try:
@@ -1909,7 +2044,7 @@ def fetch_chinabond_index_prices(asset: dict[str, Any], start: str, end: str) ->
             cmd,
             capture_output=True,
             check=False,
-            timeout=CHINABOND_TOTAL_RETURN_TIMEOUT_SECONDS + 5,
+            timeout=(CHINABOND_TOTAL_RETURN_TIMEOUT_SECONDS + 1) * (CHINABOND_RETRY_COUNT + 1) + 5,
         )
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", errors="replace").strip()
@@ -1934,6 +2069,152 @@ def fetch_chinabond_index_prices(asset: dict[str, Any], start: str, end: str) ->
     if not rows:
         raise SyncWarning(f"ChinaBond returned no index rows for {asset['symbol']}")
     return rows
+
+
+def fetch_chinabond_30y_yields(start: str, end: str) -> dict[str, float]:
+    """Fetch the Ministry of Finance/ChinaBond 30-year CGB yield curve.
+
+    The public history endpoint limits each query to less than one year, so a
+    long pre-index backtest is split into bounded requests and merged by date.
+    Returned yields are decimals (for example, 0.0482 for 4.82%).
+    """
+    yields: dict[str, float] = {}
+    for chunk_start, chunk_end in chunk_date_ranges(start, end, 360):
+        url = (
+            "https://yield.chinabond.com.cn/cbweb-mn/pgxh/historyQuery?"
+            f"startDate={chunk_start}&endDate={chunk_end}&gjqx=30&locale=zh_CN"
+        )
+        cmd = [
+            curl_executable(),
+            "-sS",
+            "-L",
+            "-X",
+            "POST",
+            "-A",
+            "Mozilla/5.0",
+            "--noproxy",
+            "*",
+            "--connect-timeout",
+            str(CHINABOND_CONNECT_TIMEOUT_SECONDS),
+            "--max-time",
+            str(CHINABOND_YIELD_TIMEOUT_SECONDS),
+            "--retry",
+            str(CHINABOND_RETRY_COUNT),
+            "--retry-all-errors",
+            "--retry-delay",
+            "1",
+            url,
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                check=False,
+                timeout=(CHINABOND_YIELD_TIMEOUT_SECONDS + 1) * (CHINABOND_RETRY_COUNT + 1) + 5,
+            )
+            if completed.returncode != 0:
+                detail = completed.stderr.decode("utf-8", errors="replace").strip()
+                raise SyncWarning(f"exit {completed.returncode}: {detail}")
+            payload = json.loads(completed.stdout.decode("utf-8", errors="replace"))
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, SyncWarning) as exc:
+            raise SyncWarning(f"ChinaBond 30-year yield fetch failed: {exc}") from exc
+        if not isinstance(payload, list):
+            raise SyncWarning("ChinaBond 30-year yield series is invalid")
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            trade_date = str(item.get("workTime") or "")
+            yield_percent = finite_float(item.get("thirtyYear"))
+            if not trade_date or yield_percent is None or yield_percent <= 0:
+                continue
+            yields[trade_date] = yield_percent / 100.0
+    if not yields:
+        raise SyncWarning("ChinaBond returned no 30-year yield rows")
+    return yields
+
+
+def thirty_year_par_bond_price(yield_rate: float, coupon_rate: float) -> float:
+    """Price a 30-year semiannual par bond per CNY 100 face value."""
+    periods = 60
+    discount = 1.0 + yield_rate / 2.0
+    coupon = 100.0 * coupon_rate / 2.0
+    return sum(coupon / discount**period for period in range(1, periods)) + (100.0 + coupon) / discount**periods
+
+
+def model_chinabond_30y_total_return_rows(
+    target_symbol: str,
+    yields: dict[str, float],
+    currency: str = "CNY",
+) -> list[dict[str, Any]]:
+    """Build a constant-maturity 30-year total-return proxy from official yields.
+
+    Each interval reprices the previous day's par 30-year bond at the current
+    yield and adds the elapsed coupon carry.  The resulting daily return series
+    closely tracks the later official 30-year total-return index while retaining
+    a real 30-year duration exposure before that index begins.
+    """
+    ordered = sorted(
+        (parse_date(trade_date), float(yield_rate))
+        for trade_date, yield_rate in yields.items()
+        if yield_rate and math.isfinite(float(yield_rate)) and float(yield_rate) > 0
+    )
+    if not ordered:
+        return []
+    level = 100.0
+    rows = [
+        price_row(
+            target_symbol,
+            ordered[0][0].isoformat(),
+            level,
+            currency,
+            "chinabond:30y_yield_curve:modeled_total_return",
+        )
+    ]
+    previous_day, previous_yield = ordered[0]
+    for current_day, current_yield in ordered[1:]:
+        elapsed_days = (current_day - previous_day).days
+        if elapsed_days <= 0:
+            continue
+        repriced = thirty_year_par_bond_price(current_yield, previous_yield)
+        holding_factor = repriced / 100.0 * (1.0 + previous_yield * elapsed_days / 365.0)
+        if not math.isfinite(holding_factor) or holding_factor <= 0:
+            continue
+        level *= holding_factor
+        rows.append(
+            price_row(
+                target_symbol,
+                current_day.isoformat(),
+                level,
+                currency,
+                "chinabond:30y_yield_curve:modeled_total_return",
+            )
+        )
+        previous_day = current_day
+        previous_yield = current_yield
+    return rows
+
+
+def fetch_chinabond_30y_modeled_prices(
+    asset: dict[str, Any],
+    target_symbol: str,
+    start: str,
+    end: str,
+    currency: str,
+) -> list[dict[str, Any]]:
+    """Return an official-yield-based proxy spliced to the official 30-year index."""
+    primary_start = parse_date(asset.get("inception_date") or "2011-01-04")
+    anchor_end = primary_start + timedelta(days=370)
+    curve_end = max(parse_date(end), anchor_end)
+    yields = fetch_chinabond_30y_yields(start, curve_end.isoformat())
+    modeled_rows = model_chinabond_30y_total_return_rows(target_symbol, yields, currency)
+    official_rows = fetch_chinabond_index_prices(asset, primary_start.isoformat(), anchor_end.isoformat())
+    scale = price_scale_from_overlap(official_rows, modeled_rows)
+    if scale is None:
+        raise SyncWarning("modeled 30-year Treasury history has no official index splice anchor")
+    scaled_rows = scale_price_rows(modeled_rows, scale, f"splice_scale_{scale:.8g}")
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    return [row for row in scaled_rows if start_date <= parse_date(row["trade_date"]) <= end_date]
 
 
 def fetch_fund_dividends(token: str, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
@@ -2832,6 +3113,10 @@ def sync_all(
         asset_warnings: list[str] = []
         asset_missing: list[str] = []
         symbol = asset["symbol"]
+        fallback = asset.get("price_fallback") if isinstance(asset.get("price_fallback"), dict) else None
+        fallback_kind = fallback.get("kind") if fallback else None
+        authoritative_fallback = fallback_kind in {"sge_au9999", "chinabond_30y_yield_total_return"}
+        primary_start = parse_date(asset_trade_start_date(asset, start))
         price_ranges = asset_price_ranges[symbol]
         dividend_ranges = asset_dividend_ranges[symbol]
         prices: list[dict[str, Any]] = []
@@ -2934,22 +3219,39 @@ def sync_all(
                 # equity weekday calendar, or valid holiday gaps become false
                 # "missing" warnings after a successful insert.
                 expected_price_dates = {row["trade_date"] for row in range_prices}
-                if not range_prices:
-                    asset_missing.append(f"prices:{symbol}")
+                fallback_end = min(parse_date(range_end), primary_start - timedelta(days=1))
+                if authoritative_fallback and parse_date(range_start) <= fallback_end:
+                    # These dates only trigger the fallback fetch.  Afterward,
+                    # the returned official curve calendar becomes authoritative.
+                    expected_price_dates.update(day.isoformat() for day in business_days(range_start, fallback_end))
             else:
                 expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
             missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
             if missing_price_dates and allow_network and asset.get("price_fallback"):
                 raise_if_cancelled(should_cancel)
                 try:
-                    fallback_rows = fetch_price_fallback_rows(
-                        asset,
-                        range_start,
-                        range_end,
-                        existing_price_rows.get(symbol, []) + range_prices,
-                        token=token,
+                    fallback_range_end = range_end
+                    if authoritative_fallback:
+                        fallback_range_end = min(
+                            parse_date(range_end), primary_start - timedelta(days=1)
+                        ).isoformat()
+                    fallback_rows = (
+                        fetch_price_fallback_rows(
+                            asset,
+                            range_start,
+                            fallback_range_end,
+                            existing_price_rows.get(symbol, []) + range_prices,
+                            token=token,
+                        )
+                        if parse_date(range_start) <= parse_date(fallback_range_end)
+                        else []
                     )
-                    fallback_rows = [row for row in fallback_rows if row["trade_date"] in missing_price_dates]
+                    fallback_rows = [
+                        row
+                        for row in fallback_rows
+                        if row["trade_date"] in missing_price_dates
+                        and (not authoritative_fallback or parse_date(row["trade_date"]) < primary_start)
+                    ]
                     if fallback_rows:
                         range_prices = merge_rows_by_trade_date(range_prices, fallback_rows)
                         logger.info(
@@ -2962,6 +3264,16 @@ def sync_all(
                 except SyncWarning as exc:
                     asset_warnings.append(str(exc))
                 raise_if_cancelled(should_cancel)
+            if authoritative_fallback:
+                wants_fallback = parse_date(range_start) < primary_start
+                has_fallback = any(parse_date(row["trade_date"]) < primary_start for row in range_prices)
+                wants_primary = parse_date(range_end) >= primary_start
+                has_primary = any(parse_date(row["trade_date"]) >= primary_start for row in range_prices)
+                if (wants_fallback and not has_fallback) or (wants_primary and not has_primary):
+                    if f"prices:{symbol}" not in asset_missing:
+                        asset_missing.append(f"prices:{symbol}")
+                # SGE and ChinaBond publish on their own trading calendars.
+                expected_price_dates = {row["trade_date"] for row in range_prices}
             missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
             if missing_price_dates and f"prices:{symbol}" not in asset_missing:
                 asset_missing.append(f"prices:{symbol}")

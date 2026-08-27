@@ -204,7 +204,7 @@ class CalendarAndConfigTests(unittest.TestCase):
 
         self.assertFalse(gold["enabled"])
         self.assertEqual(gold["target_weight"], 0.25)
-        self.assertFalse(gold["price_fallback"]["required"])
+        self.assertTrue(gold["price_fallback"]["required"])
         self.assertTrue(gold["replacement_assets"])
         self.assertEqual(validate_config(cfg), [])
 
@@ -249,6 +249,10 @@ class CalendarAndConfigTests(unittest.TestCase):
         treasuries = [asset for asset in cfg["assets"] if asset.get("asset_type") == "cn_bond_index"]
         self.assertEqual({asset["symbol"] for asset in treasuries}, {"CBA03101", "CBA06501", "CBA21801"})
         self.assertEqual(next(asset for asset in treasuries if asset["symbol"] == "CBA03101")["inception_date"], "2008-01-02")
+        thirty_year = next(asset for asset in treasuries if asset["symbol"] == "CBA21801")
+        self.assertEqual(thirty_year["price_fallback"]["kind"], "chinabond_30y_yield_total_return")
+        self.assertEqual(thirty_year["price_fallback"]["symbol"], "CN30Y.YIELD-TR")
+        self.assertEqual(thirty_year["price_fallback"]["start_date"], "2006-03-01")
         for asset in treasuries:
             asset["enabled"] = True
             asset["target_weight"] = 0.1

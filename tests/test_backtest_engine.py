@@ -186,6 +186,35 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(cached["run_id"], run_id)
         self.assertTrue(cached["cache"]["hit"])
 
+    def test_initial_rebalance_uses_exact_targets_instead_of_band_edges(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-02", "2020-01-31")
+        selected_symbols = {"VOO", "CBA03101", "CBA06501", "CBA21801"}
+        cfg["monthly_spend_cny"] = 0.0
+        cfg["rebalance_band"] = 0.25
+        for asset in cfg["assets"]:
+            selected = asset["symbol"] in selected_symbols
+            asset["enabled"] = selected
+            asset["target_weight"] = 0.25 if selected else 0.0
+
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            first_rebalance = conn.execute(
+                "SELECT payload_json FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+            first_daily = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+
+        rebalance_payload = json.loads(first_rebalance["payload_json"])
+        daily_payload = json.loads(first_daily["payload_json"])
+        for symbol in selected_symbols:
+            self.assertAlmostEqual(rebalance_payload["targets"][symbol], 0.25)
+            self.assertAlmostEqual(rebalance_payload["desired_weights"][symbol], 0.25)
+            self.assertAlmostEqual(daily_payload["weights"][symbol], 0.25, delta=0.002)
+        self.assertLess(daily_payload["weights"].get("REPO", 0.0), 0.002)
+
     def test_disabled_asset_weight_flows_to_repo(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
         cfg["assets"][0]["enabled"] = False
@@ -904,6 +933,55 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertNotIn("510300.SH", weights)
         self.assertIn("Au99.99", weights)
         self.assertNotIn("518880.SH", weights)
+
+    def test_2008_backtest_buys_gold_and_30y_treasury_proxies(self) -> None:
+        cfg = normalize_config(
+            {
+                "start_date": "2008-01-02",
+                "end_date": "2008-02-01",
+                "monthly_spend_cny": 0,
+            }
+        )
+        for asset in cfg["assets"]:
+            selected = asset["symbol"] in {"518880.SH", "CBA21801"}
+            asset["enabled"] = selected
+            asset["target_weight"] = 0.45 if selected else 0.0
+
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
+            result = run_backtest(conn, cfg)
+            buys = rows_to_dicts(
+                conn.execute(
+                    "SELECT symbol,side FROM trades WHERE run_id=? AND side='BUY'",
+                    (result["run_id"],),
+                )
+            )
+
+        bought_symbols = {trade["symbol"] for trade in buys}
+        self.assertIn("Au99.99", bought_symbols)
+        self.assertIn("CN30Y.YIELD-TR", bought_symbols)
+        self.assertNotIn("518880.SH", bought_symbols)
+        self.assertNotIn("CBA21801", bought_symbols)
+
+    def test_30y_treasury_switches_from_proxy_to_official_index(self) -> None:
+        cfg = normalize_config({"start_date": "2008-01-02"})
+        for asset in cfg["assets"]:
+            selected = asset["symbol"] == "CBA21801"
+            asset["enabled"] = selected
+            asset["target_weight"] = 0.50 if selected else 0.0
+
+        prices = {asset["symbol"]: None for asset in cfg["assets"]}
+        prices["CN30Y.YIELD-TR"] = 100.0
+        before = effective_weights(cfg, date(2008, 1, 3), prices)
+        prices["CBA21801"] = 1000.0
+        after = effective_weights(cfg, date(2011, 1, 4), prices)
+
+        self.assertAlmostEqual(before["CN30Y.YIELD-TR"], 0.50)
+        self.assertNotIn("CBA21801", before)
+        self.assertAlmostEqual(after["CBA21801"], 0.50)
+        self.assertNotIn("CN30Y.YIELD-TR", after)
 
     def test_a100_uses_csi100_proxy_before_etf_inception(self) -> None:
         cfg = normalize_config({"start_date": "2021-01-01"})

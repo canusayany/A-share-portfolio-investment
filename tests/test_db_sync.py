@@ -209,17 +209,30 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(effective_price_end_for_asset(asset, "2026-07-31").isoformat(), "2020-12-31")
         self.assertEqual(effective_price_end_for_asset(asset, "2020-12-20").isoformat(), "2020-12-20")
 
-    def test_optional_gold_proxy_does_not_scan_unavailable_pre_inception_history(self) -> None:
+    def test_required_gold_proxy_scans_pre_inception_history(self) -> None:
         cfg = normalize_config({})
         asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "518880.SH")
-        calls = []
+        fallback_calls = []
+        primary_calls = []
+        original_missing_tail = data_sync_module.missing_tail_date_ranges
 
-        def fake_tail(*args):
-            calls.append(args[5:])
+        def fake_fallback_tail(*args):
+            fallback_calls.append(args[5:])
+            return [(args[5], args[6])]
+
+        def fake_primary_tail(*args):
+            primary_calls.append(args[5:])
             return []
 
-        self.assertEqual(asset_price_sync_ranges(None, asset, "2012-01-01", "2020-12-31", fake_tail), [])
-        self.assertEqual(calls, [("2013-07-18", "2020-12-31")])
+        try:
+            data_sync_module.missing_tail_date_ranges = fake_fallback_tail
+            ranges = asset_price_sync_ranges(None, asset, "2008-01-01", "2020-12-31", fake_primary_tail)
+        finally:
+            data_sync_module.missing_tail_date_ranges = original_missing_tail
+
+        self.assertEqual(fallback_calls, [("2008-01-01", "2013-07-17")])
+        self.assertEqual(primary_calls, [("2013-07-18", "2020-12-31")])
+        self.assertEqual(ranges, [("2008-01-01", "2013-07-17")])
 
     def test_optional_a100_proxy_does_not_block_on_unavailable_pre_etf_history(self) -> None:
         cfg = normalize_config({})
@@ -1141,7 +1154,8 @@ class DbAndSyncTests(unittest.TestCase):
         asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "518880.SH")
         original_fetch_gold = data_sync_module.fetch_au9999_proxy_prices
 
-        def fake_fetch_gold(target_symbol, _start, _end, currency):
+        def fake_fetch_gold(target_symbol, _start, _end, currency, token=""):
+            self.assertEqual(token, "test-token")
             return [
                 {
                     "symbol": target_symbol,
@@ -1160,13 +1174,141 @@ class DbAndSyncTests(unittest.TestCase):
 
         try:
             data_sync_module.fetch_au9999_proxy_prices = fake_fetch_gold
-            rows = data_sync_module.fetch_price_fallback_rows(asset, "2020-01-10", "2020-01-10", [])
+            rows = data_sync_module.fetch_price_fallback_rows(
+                asset, "2020-01-10", "2020-01-10", [], token="test-token"
+            )
         finally:
             data_sync_module.fetch_au9999_proxy_prices = original_fetch_gold
 
         self.assertEqual(len(rows), 1)
         self.assertAlmostEqual(rows[0]["close"], 9.0)
         self.assertIn("fixed_scale_0.01", rows[0]["source"])
+
+    def test_tushare_sge_daily_fetch_parses_au9999_history(self) -> None:
+        original_call = data_sync_module.tushare_call
+
+        def fake_call(token, api_name, params, fields):
+            self.assertEqual(token, "test-token")
+            self.assertEqual(api_name, "sge_daily")
+            self.assertEqual(params["ts_code"], "Au99.99")
+            self.assertIn("trade_date", fields)
+            return [
+                {
+                    "ts_code": "Au99.99",
+                    "trade_date": "20080103",
+                    "open": 203.1,
+                    "high": 205.0,
+                    "low": 202.8,
+                    "close": 204.5,
+                    "vol": 321.0,
+                    "amount": 654.0,
+                }
+            ]
+
+        try:
+            data_sync_module.tushare_call = fake_call
+            rows = data_sync_module.fetch_tushare_sge_au9999_prices(
+                "test-token", "518880.SH", "2008-01-03", "2008-01-03", "CNY"
+            )
+        finally:
+            data_sync_module.tushare_call = original_call
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trade_date"], "2008-01-03")
+        self.assertEqual(rows[0]["close"], 204.5)
+        self.assertEqual(rows[0]["source"], "tushare:sge_daily:Au99.99")
+
+    def test_keyless_gold_fallback_converts_usd_ounce_to_cny_gram(self) -> None:
+        original_gold = data_sync_module.fetch_yahoo_prices
+        original_fx = data_sync_module.fetch_yahoo_fx_rates
+
+        def fake_gold(symbol, start, end, currency):
+            self.assertEqual((symbol, start, end, currency), ("GC=F", "2008-01-02", "2008-01-02", "USD"))
+            return [
+                {
+                    "symbol": symbol,
+                    "trade_date": "2008-01-02",
+                    "open": 850.0,
+                    "high": 860.0,
+                    "low": 840.0,
+                    "close": 857.0,
+                    "volume": 130.0,
+                }
+            ]
+
+        def fake_fx(start, end, pair):
+            self.assertEqual((start, end, pair), ("2007-12-23", "2008-01-02", "USD/CNY"))
+            return [{"pair": pair, "trade_date": "2008-01-02", "rate": 7.2852, "source": "test:fx"}]
+
+        try:
+            data_sync_module.fetch_yahoo_prices = fake_gold
+            data_sync_module.fetch_yahoo_fx_rates = fake_fx
+            rows = data_sync_module.fetch_yahoo_gold_cny_proxy_prices(
+                "518880.SH", "2008-01-02", "2008-01-02", "CNY"
+            )
+        finally:
+            data_sync_module.fetch_yahoo_prices = original_gold
+            data_sync_module.fetch_yahoo_fx_rates = original_fx
+
+        expected = 857.0 * 7.2852 / data_sync_module.TROY_OUNCE_GRAMS
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["close"], expected)
+        self.assertEqual(rows[0]["currency"], "CNY")
+        self.assertEqual(rows[0]["source"], "yahoo:GC=F+CNY=X:synthetic_cny_per_gram")
+
+    def test_30y_yield_model_builds_positive_total_return_series(self) -> None:
+        rows = data_sync_module.model_chinabond_30y_total_return_rows(
+            "CBA21801",
+            {
+                "2008-01-02": 0.0480,
+                "2008-01-03": 0.0480,
+                "2008-01-04": 0.0475,
+            },
+        )
+
+        self.assertEqual([row["trade_date"] for row in rows], ["2008-01-02", "2008-01-03", "2008-01-04"])
+        self.assertEqual(rows[0]["close"], 100.0)
+        self.assertGreater(rows[1]["close"], rows[0]["close"])
+        self.assertGreater(rows[2]["close"], rows[1]["close"])
+        self.assertTrue(all("modeled_total_return" in row["source"] for row in rows))
+
+    def test_2008_30y_sync_uses_yield_model_when_official_index_has_not_started(self) -> None:
+        cfg = normalize_config({})
+        asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "CBA21801")
+        asset["enabled"] = True
+        db_path = temp_db_path()
+        init_db(db_path)
+        original_index = data_sync_module.fetch_chinabond_index_prices
+        original_model = data_sync_module.fetch_chinabond_30y_modeled_prices
+
+        def no_official_index(*_args, **_kwargs):
+            raise data_sync_module.SyncWarning("official index has not started")
+
+        def fake_model(_asset, target_symbol, start, end, currency):
+            self.assertEqual(target_symbol, "CBA21801")
+            return fixture_price_series(target_symbol, start, end, currency, 100.0)
+
+        try:
+            data_sync_module.fetch_chinabond_index_prices = no_official_index
+            data_sync_module.fetch_chinabond_30y_modeled_prices = fake_model
+            with db_session(db_path) as conn:
+                result = sync_all(
+                    conn,
+                    "",
+                    "2008-01-02",
+                    "2008-01-04",
+                    [asset],
+                    missing_items=["prices:CBA21801"],
+                )
+                stored = conn.execute(
+                    "SELECT COUNT(*) AS count FROM prices WHERE symbol='CBA21801' AND trade_date BETWEEN '2008-01-02' AND '2008-01-04'"
+                ).fetchone()["count"]
+        finally:
+            data_sync_module.fetch_chinabond_index_prices = original_index
+            data_sync_module.fetch_chinabond_30y_modeled_prices = original_model
+
+        self.assertEqual(stored, 3)
+        self.assertNotIn("prices:CBA21801", result["missing_data"])
 
     def test_required_data_missing_uses_fallback_price_start_but_not_dividend_start(self) -> None:
         db_path, cfg = build_synced_db("2012-01-01", "2012-01-31")
