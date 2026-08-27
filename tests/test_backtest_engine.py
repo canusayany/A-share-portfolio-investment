@@ -423,7 +423,7 @@ class BacktestEngineTests(unittest.TestCase):
             seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
             conn.execute("UPDATE prices SET open=9.0, high=9.0, low=9.0, close=9.0 WHERE symbol='510500.SH'")
             conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH' AND trade_date='2020-01-01'")
-            conn.execute("UPDATE prices SET open=8.25 WHERE symbol='510500.SH' AND trade_date='2020-01-13'")
+            conn.execute("UPDATE prices SET open=8.25 WHERE symbol='510500.SH' AND trade_date='2020-01-09'")
             result = run_backtest(conn, cfg)
             dip_trades = rows_to_dicts(
                 conn.execute(
@@ -431,21 +431,21 @@ class BacktestEngineTests(unittest.TestCase):
                     (result["run_id"],),
                 )
             )
-            jan_09 = conn.execute(
-                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-09'",
+            jan_07 = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-07'",
                 (result["run_id"],),
             ).fetchone()
             maturity_day = conn.execute(
-                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-10'",
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-08'",
                 (result["run_id"],),
             ).fetchone()
 
-        jan_09_dip = json.loads(jan_09["payload_json"])["dip_buy"]
+        jan_07_dip = json.loads(jan_07["payload_json"])["dip_buy"]
         maturity_dip = json.loads(maturity_day["payload_json"])["dip_buy"]
-        self.assertEqual(jan_09_dip["deferred_recheck_dates"]["510500.SH"], "2020-01-10")
+        self.assertEqual(jan_07_dip["deferred_recheck_dates"]["510500.SH"], "2020-01-08")
         self.assertEqual(maturity_dip["deferred_count"], 0)
         self.assertEqual(maturity_dip["pending_count"], 1)
-        self.assertEqual(dip_trades, [{"trade_date": "2020-01-13", "price": 8.25}])
+        self.assertEqual(dip_trades, [{"trade_date": "2020-01-09", "price": 8.25}])
 
     def test_dip_buy_asset_scope_and_declining_monthly_cash_buffer(self) -> None:
         cfg = normalize_config({})
@@ -825,6 +825,8 @@ class BacktestEngineTests(unittest.TestCase):
 
         self.assertEqual(len(state.repo_lots), 1)
         lot = state.repo_lots[0]
+        self.assertEqual(lot.actual_days, 7)
+        self.assertEqual(lot.fee, 0.5)
         same_day_value = _portfolio_value(state, {}, {}, trade_day)[0]
         mid_day = date(2026, 7, 15)
         mid_value = _portfolio_value(state, {}, {}, mid_day)[0]

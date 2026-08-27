@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from datetime import date, timedelta
 from functools import lru_cache
 
@@ -88,6 +89,33 @@ def add_business_days(day: date, count: int) -> date:
     return current
 
 
-def repo_actual_days(trade_day: date, tenor_days: int = 1) -> int:
-    maturity = add_business_days(trade_day, tenor_days)
+def repo_maturity_day(
+    trade_day: date,
+    tenor_days: int = 1,
+    trading_days: list[date] | None = None,
+) -> date:
+    """Return the repo settlement date using calendar-day tenor rules.
+
+    Exchange repo tenors are calendar days.  If the contractual maturity is
+    not a trading day, settlement rolls to the next trading day.  A supplied
+    market calendar also handles mainland public holidays; the weekday
+    fallback keeps isolated fee/unit tests deterministic.
+    """
+    contractual_maturity = trade_day + timedelta(days=max(int(tenor_days), 1))
+    if trading_days:
+        index = bisect_left(trading_days, contractual_maturity)
+        if index < len(trading_days):
+            return trading_days[index]
+    maturity = contractual_maturity
+    while not is_weekday(maturity):
+        maturity += timedelta(days=1)
+    return maturity
+
+
+def repo_actual_days(
+    trade_day: date,
+    tenor_days: int = 1,
+    trading_days: list[date] | None = None,
+) -> int:
+    maturity = repo_maturity_day(trade_day, tenor_days, trading_days)
     return max((maturity - trade_day).days, 1)

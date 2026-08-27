@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 
 from app.config import (
+    REPO_COMMISSION_RATE_BY_TENOR,
     backtest_assets,
     fx_pair_for_currency,
     normalize_config,
@@ -25,7 +26,7 @@ from app.config import (
     validate_config,
 )
 from app.db import insert_many, json_dumps, utc_now
-from app.services.calendar import add_business_days, business_days, first_business_day_by_month, parse_date, rebalance_days, repo_actual_days
+from app.services.calendar import add_business_days, business_days, first_business_day_by_month, parse_date, rebalance_days, repo_actual_days, repo_maturity_day
 from app.services.fees import (
     CnEtfFeeConfig,
     FxFeeConfig,
@@ -48,7 +49,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 31
+BACKTEST_ENGINE_VERSION = 32
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -1361,14 +1362,29 @@ def repo_tenor_days(config: dict[str, Any]) -> int:
         return 1
 
 
+def repo_fee_config_for_tenor(config: dict[str, Any], tenor_days: int) -> RepoFeeConfig:
+    values = dict(config["fees"]["repo"])
+    configured_rate = float(values.get("investor_commission_rate", REPO_COMMISSION_RATE_BY_TENOR[1]))
+    # The default one-day value activates the official tenor schedule.  A
+    # non-default value remains an explicit broker-specific override (including
+    # zero-commission accounts) and is applied to every selected tenor.
+    if math.isclose(configured_rate, REPO_COMMISSION_RATE_BY_TENOR[1], rel_tol=0.0, abs_tol=1e-12):
+        values["investor_commission_rate"] = REPO_COMMISSION_RATE_BY_TENOR.get(
+            int(tenor_days),
+            REPO_COMMISSION_RATE_BY_TENOR[1],
+        )
+    return dict_to_dataclass(RepoFeeConfig, values)
+
+
 def _repo_spend_reserve(
     day: date,
     tenor_days: int,
     monthly_spend_days: set[date],
     monthly_spend_cny: float,
     spend_day_ordinals: list[int] | None = None,
+    trading_days: list[date] | None = None,
 ) -> float:
-    maturity = add_business_days(day, tenor_days)
+    maturity = repo_maturity_day(day, tenor_days, trading_days)
     if spend_day_ordinals is None:
         spend_count = sum(1 for spend_day in monthly_spend_days if day < spend_day < maturity)
     else:
@@ -1386,6 +1402,7 @@ def _invest_idle_cash_in_repo(
     tenor_days: int,
     reserve_cny: float = 0.0,
     repo_fee_config: RepoFeeConfig | None = None,
+    trading_days: list[date] | None = None,
 ) -> None:
     if repo_rate is None:
         return
@@ -1393,15 +1410,26 @@ def _invest_idle_cash_in_repo(
     investable_cash = max(state.cash_cny - max(reserve_cny, 0.0), 0.0)
     investable = math.floor(investable_cash / lot_size) * lot_size
     if investable >= lot_size:
-        actual_days = repo_actual_days(day, tenor_days)
+        actual_days = repo_actual_days(day, tenor_days, trading_days)
         interest = repo_interest(investable, repo_rate, actual_days)
-        fee = repo_fee(investable, repo_fee_config or dict_to_dataclass(RepoFeeConfig, fees["repo"]))
+        if repo_fee_config is None:
+            fallback_values = dict(fees["repo"])
+            configured_rate = float(
+                fallback_values.get("investor_commission_rate", REPO_COMMISSION_RATE_BY_TENOR[1])
+            )
+            if math.isclose(configured_rate, REPO_COMMISSION_RATE_BY_TENOR[1], rel_tol=0.0, abs_tol=1e-12):
+                fallback_values["investor_commission_rate"] = REPO_COMMISSION_RATE_BY_TENOR.get(
+                    int(tenor_days),
+                    REPO_COMMISSION_RATE_BY_TENOR[1],
+                )
+            repo_fee_config = dict_to_dataclass(RepoFeeConfig, fallback_values)
+        fee = repo_fee(investable, repo_fee_config)
         state.cash_cny -= investable
         state.total_fees_cny += fee
         state.repo_lots.append(
             RepoLot(
                 principal=investable,
-                maturity_date=add_business_days(day, tenor_days),
+                maturity_date=repo_maturity_day(day, tenor_days, trading_days),
                 interest=interest,
                 fee=fee,
                 start_date=day,
@@ -1428,6 +1456,8 @@ def _invest_repo_cash(
     extra_reserve_cny: float = 0.0,
     repo_fee_config: RepoFeeConfig | None = None,
     spend_day_ordinals: list[int] | None = None,
+    trading_days: list[date] | None = None,
+    one_day_repo_fee_config: RepoFeeConfig | None = None,
 ) -> None:
     reserve_cny = _repo_spend_reserve(
         day,
@@ -1435,15 +1465,32 @@ def _invest_repo_cash(
         monthly_spend_days,
         monthly_spend_cny,
         spend_day_ordinals,
+        trading_days,
     ) + max(extra_reserve_cny, 0.0)
-    maturity = add_business_days(day, selected_tenor_days)
-    crosses_rebalance = any(day < rebalance_day <= maturity for rebalance_day in (rebalance_days_set or set()))
+    maturity = repo_maturity_day(day, selected_tenor_days, trading_days)
+    crosses_rebalance = any(day < rebalance_day < maturity for rebalance_day in (rebalance_days_set or set()))
     rate_for_selected_tenor = None if crosses_rebalance else selected_repo_rate
     _invest_idle_cash_in_repo(
-        state, day, rate_for_selected_tenor, fees, selected_tenor_days, reserve_cny, repo_fee_config
+        state,
+        day,
+        rate_for_selected_tenor,
+        fees,
+        selected_tenor_days,
+        reserve_cny,
+        repo_fee_config,
+        trading_days,
     )
     overnight_reserve_cny = _next_spend_reserve(day, monthly_spend_days, monthly_spend_cny) + max(extra_reserve_cny, 0.0)
-    _invest_idle_cash_in_repo(state, day, one_day_repo_rate, fees, 1, overnight_reserve_cny, repo_fee_config)
+    _invest_idle_cash_in_repo(
+        state,
+        day,
+        one_day_repo_rate,
+        fees,
+        1,
+        overnight_reserve_cny,
+        one_day_repo_fee_config,
+        trading_days,
+    )
 
 
 def _mature_repo_lots(state: PortfolioState, day: date) -> None:
@@ -1686,7 +1733,8 @@ def _simulate_comparison_series(
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
     tenor_days = repo_tenor_days(comparison_config)
-    repo_fee_config = dict_to_dataclass(RepoFeeConfig, config["fees"]["repo"])
+    repo_fee_config = repo_fee_config_for_tenor(config, tenor_days)
+    one_day_repo_fee_config = repo_fee_config_for_tenor(config, 1)
     prepared_routes = prepare_active_asset_routes(comparison_config)
     monthly_spend_ordinals = sorted(day.toordinal() for day in monthly_spend_days)
     totals: dict[str, float] = {}
@@ -1794,6 +1842,8 @@ def _simulate_comparison_series(
             0.0,
             repo_fee_config,
             monthly_spend_ordinals,
+            days,
+            one_day_repo_fee_config,
         )
         total, _values = _portfolio_value(state, latest_prices, fx_rates, day)
         next_day = days[idx + 1] if idx + 1 < len(days) else None
@@ -1941,7 +1991,8 @@ def run_backtest(
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
     tenor_days = repo_tenor_days(config)
-    repo_fee_config = dict_to_dataclass(RepoFeeConfig, config["fees"]["repo"])
+    repo_fee_config = repo_fee_config_for_tenor(config, tenor_days)
+    one_day_repo_fee_config = repo_fee_config_for_tenor(config, 1)
     period_start_nav = 1.0
     nav_for_period = 1.0
     period_peak_nav = 1.0
@@ -2008,7 +2059,7 @@ def run_backtest(
             year_start_values = dict(last_close_values)
             year_external_flows = {"REPO": 0.0}
         if latest_repo_rate is not None:
-            repo_benchmark_nav *= 1.0 + (latest_repo_rate / 100.0) * repo_actual_days(day, 1) / 365.0
+            repo_benchmark_nav *= 1.0 + (latest_repo_rate / 100.0) * repo_actual_days(day, 1, days) / 365.0
 
         dip_buy_blackout_today = bool(
             dip_buy_active
@@ -2386,6 +2437,8 @@ def run_backtest(
             dip_buy_reserve_cny,
             repo_fee_config,
             monthly_spend_ordinals,
+            days,
+            one_day_repo_fee_config,
         )
 
         total, values = _portfolio_value(state, latest_prices, fx_rates, day)

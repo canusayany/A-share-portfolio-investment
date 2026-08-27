@@ -496,6 +496,28 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertIn("fx_rates:USD/CNY", missing_previous_day)
         self.assertIn("repo_rates:204001", missing_previous_day)
 
+    def test_chinabond_current_day_uses_previous_published_day(self) -> None:
+        db_path, cfg = build_synced_db("2026-06-15", "2026-06-25")
+        original_datetime = data_sync_module.datetime
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 6, 25, 10, 30, tzinfo=timezone.utc)
+
+        try:
+            data_sync_module.datetime = FixedDateTime
+            with db_session(db_path) as conn:
+                conn.execute("DELETE FROM prices WHERE symbol='CBA21801' AND trade_date='2026-06-25'")
+                missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+                conn.execute("DELETE FROM prices WHERE symbol='CBA21801' AND trade_date='2026-06-24'")
+                missing_previous_day = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
+        finally:
+            data_sync_module.datetime = original_datetime
+
+        self.assertNotIn("prices:CBA21801", missing)
+        self.assertIn("prices:CBA21801", missing_previous_day)
+
     def test_hk_price_for_today_uses_previous_completed_business_day(self) -> None:
         db_path, cfg = build_synced_db("2026-06-15", "2026-07-01")
         next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")["enabled"] = True

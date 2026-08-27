@@ -17,7 +17,7 @@ from app.config import (
     selected_repo_option,
     validate_config,
 )
-from app.services.calendar import business_days, first_business_day_by_month, rebalance_days, repo_actual_days
+from app.services.calendar import business_days, first_business_day_by_month, rebalance_days, repo_actual_days, repo_maturity_day
 from app.services.fees import (
     CnEtfFeeConfig,
     FxFeeConfig,
@@ -72,6 +72,7 @@ class FeeTests(unittest.TestCase):
     def test_repo_interest_and_fee(self) -> None:
         self.assertAlmostEqual(repo_interest(100000, 1.825, 2), 10)
         self.assertEqual(repo_fee(100000, RepoFeeConfig(investor_commission_rate=0.00001, fee_cap_cny=30)), 1)
+        self.assertEqual(repo_fee(1_000_000, RepoFeeConfig(investor_commission_rate=0.00030, fee_cap_cny=0)), 300)
 
     def test_hk_connect_etf_fees_include_connect_charges_and_fx_spread(self) -> None:
         cfg = HkConnectEtfFeeConfig(
@@ -88,6 +89,7 @@ class FeeTests(unittest.TestCase):
         )
         fee = hk_connect_etf_trade_fee(100000, cfg)
         self.assertAlmostEqual(fee, 42.7)
+        self.assertEqual(hk_connect_etf_trade_fee(1000, cfg), 0.43)
         self.assertGreater(hk_connect_portfolio_fee(100000, cfg), 0)
         self.assertAlmostEqual(hk_connect_portfolio_fee(100000, cfg, 3), hk_connect_portfolio_fee(100000, cfg) * 3, places=5)
         cny_cost, buy_fx_fee = cny_cost_for_hkd(10000, 0.9, cfg)
@@ -111,11 +113,18 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(rebalance_days(days, "yearly", 5), {date(2020, 1, 1), date(2020, 5, 1)})
         self.assertEqual(rebalance_days(days, "daily"), set(days))
         self.assertEqual(repo_actual_days(date(2020, 1, 3)), 3)
+        self.assertEqual(repo_maturity_day(date(2026, 7, 10), 7), date(2026, 7, 17))
+        self.assertEqual(repo_actual_days(date(2026, 7, 10), 7), 7)
 
     def test_config_merge_and_validation(self) -> None:
         cfg = normalize_config({"initial_capital_cny": 500000, "fees": {"cn_etf": {"commission_rate": 0.00005}}})
         self.assertEqual(cfg["initial_capital_cny"], 500000)
         self.assertEqual(cfg["fees"]["cn_etf"]["commission_rate"], 0.00005)
+        self.assertEqual(cfg["fees"]["repo"]["fee_cap_cny"], 0.0)
+        self.assertEqual(
+            next(option for option in cfg["repo_options"] if option["symbol"] == "204091")["commission_rate"],
+            0.00030,
+        )
         hk_asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")
         self.assertEqual(hk_asset["expense_ratio"], 0.0079)
         cn_sp500 = next(asset for asset in cfg["assets"] if asset["symbol"] == "513500.SH")

@@ -173,6 +173,7 @@ class ApiTests(unittest.TestCase):
         decoded_app_js = gzip.decompress(static_body)
         self.assertIn(b"currentRunId", decoded_app_js)
         self.assertIn(b"ApiNetworkError", decoded_app_js)
+        self.assertNotIn(b"weight_label_", decoded_app_js)
         self.assertIn(b"/api/health", decoded_app_js)
         self.assertIn(b"recoverApiConnection", decoded_app_js)
         self.assertIn(b"Object.keys(row.payload?.weights", decoded_app_js)
@@ -264,7 +265,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260827-dip-buy-2", detail)
+        self.assertIn("20260827-audit-1", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")

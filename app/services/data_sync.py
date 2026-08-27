@@ -481,7 +481,7 @@ def previous_weekday(day):
     return current
 
 
-def latest_completed_market_day(market: str):
+def latest_completed_market_day(market: str, close_hour: int | None = None):
     now_utc = datetime.now(timezone.utc)
     if market == "US":
         now_market = now_utc.astimezone(ZoneInfo("America/New_York"))
@@ -491,7 +491,7 @@ def latest_completed_market_day(market: str):
         return previous_weekday(now_market.date())
     else:
         now_market = now_utc.astimezone(ZoneInfo("Asia/Shanghai"))
-        close_hour = 18
+        close_hour = 18 if close_hour is None else close_hour
     today = now_market.date()
     if today.weekday() >= 5 or now_market.hour < close_hour:
         return previous_weekday(today)
@@ -529,7 +529,17 @@ def effective_asset_end(asset: dict[str, Any], end: str) -> date:
 
 
 def effective_price_end_for_asset(asset: dict[str, Any], end: str):
-    market_end = effective_price_end_for_market(asset.get("market", "CN"), end)
+    if asset.get("asset_type") == "cn_bond_index":
+        # ChinaBond total-return indices are published after the exchange close
+        # and the exact release time is not guaranteed.  Treat the current
+        # natural day's value as eligible on the following day.  Historical
+        # end dates remain strict.
+        market_end = min(
+            parse_date(end),
+            latest_completed_market_day("CN", close_hour=24),
+        )
+    else:
+        market_end = effective_price_end_for_market(asset.get("market", "CN"), end)
     return min(market_end, effective_asset_end(asset, end))
 
 
@@ -3094,8 +3104,14 @@ def sync_all(
 
     price_anchor_start = (parse_date(start) - timedelta(days=370)).isoformat()
     price_anchor_end = (parse_date(end) + timedelta(days=370)).isoformat()
+    planned_asset_symbols = (
+        set(plan["asset_prices"])
+        | set(plan["asset_dividends"])
+        | set(plan["asset_adjustments"])
+    )
+    sync_assets = [asset for asset in assets if asset["symbol"] in planned_asset_symbols]
     existing_price_rows: dict[str, list[dict[str, Any]]] = {}
-    for asset in assets:
+    for asset in sync_assets:
         rows = conn.execute(
             """
             SELECT trade_date, close, source FROM prices
@@ -3358,8 +3374,8 @@ def sync_all(
     # for every request.  Serialise only these large transfers so they cannot
     # collectively exceed the upstream/proxy transfer window; ordinary asset
     # feeds keep the existing bounded parallelism.
-    chinabond_assets = [asset for asset in assets if asset.get("asset_type") == "cn_bond_index"]
-    concurrent_assets = [asset for asset in assets if asset.get("asset_type") != "cn_bond_index"]
+    chinabond_assets = [asset for asset in sync_assets if asset.get("asset_type") == "cn_bond_index"]
+    concurrent_assets = [asset for asset in sync_assets if asset.get("asset_type") != "cn_bond_index"]
     max_workers = min(max(len(concurrent_assets), 1), 8)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         raise_if_cancelled(should_cancel)

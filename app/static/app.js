@@ -685,16 +685,13 @@ function currentAssetControls() {
 }
 
 function setAssetWeightDisplay(key, weight, mode, enabled, effectiveWeight) {
-  const label = $(`weight_label_${key}`);
   const effective = $(`effective_${key}`);
   if (!effective) return;
   $(`enabled_${key}`)?.closest(".asset-control")?.classList.toggle("is-disabled", !enabled);
   if (mode === "fixed_bucket") {
-    if (label) label.textContent = enabled ? fmtPct(effectiveWeight) : "0.00%";
     effective.hidden = false;
-    effective.textContent = enabled ? `输入 ${fmtPct(weight)}` : "未启用";
+    effective.textContent = enabled ? `实际配置 ${fmtPct(effectiveWeight)}` : "未启用";
   } else {
-    if (label) label.textContent = fmtPct(weight);
     effective.hidden = true;
     effective.textContent = "";
   }
@@ -1024,7 +1021,6 @@ function renderControls() {
       <input id="enabled_${asset.key}" type="checkbox" aria-label="启用${assetName(asset.symbol)}" ${asset.enabled ? "checked" : ""} />
       <input id="weight_${asset.key}" type="range" min="0" max="0.8" step="0.01" value="${asset.target_weight}" aria-label="${assetName(asset.symbol)}目标权重" />
       <label class="asset-percent"><input id="weight_percent_${asset.key}" type="number" min="0" max="80" step="1" value="${Number(asset.target_weight || 0) * 100}" /><span>%</span></label>
-      <strong id="weight_label_${asset.key}">${fmtPct(asset.target_weight)}</strong>
       <div class="asset-name">
         <span class="asset-title">${assetName(asset.symbol)}</span>
         <span id="effective_${asset.key}" class="asset-effective" hidden></span>
@@ -1054,7 +1050,6 @@ function renderBroadEtfControl(host) {
     <input id="enabled_${BROAD_ETF_CONTROL_KEY}" type="checkbox" aria-label="启用宽基ETF" ${enabled ? "checked" : ""} />
     <input id="weight_${BROAD_ETF_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="宽基ETF目标权重" />
     <label class="asset-percent"><input id="weight_percent_${BROAD_ETF_CONTROL_KEY}" type="number" min="0" max="80" step="1" value="${Number(weight || 0) * 100}" /><span>%</span></label>
-    <strong id="weight_label_${BROAD_ETF_CONTROL_KEY}">${fmtPct(weight)}</strong>
     <div class="asset-name">
       <span class="asset-title">宽基 ETF</span>
       <span id="effective_${BROAD_ETF_CONTROL_KEY}" class="asset-effective" hidden></span>
@@ -1086,7 +1081,6 @@ function renderSp500Control(host) {
     <input id="enabled_${SP500_CONTROL_KEY}" type="checkbox" aria-label="启用标普500" ${enabled ? "checked" : ""} />
     <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="标普500目标权重" />
     <label class="asset-percent"><input id="weight_percent_${SP500_CONTROL_KEY}" type="number" min="0" max="80" step="1" value="${Number(weight || 0) * 100}" /><span>%</span></label>
-    <strong id="weight_label_${SP500_CONTROL_KEY}">${fmtPct(weight)}</strong>
     <div class="asset-name">
       <span class="asset-title">标普500</span>
       <span id="effective_${SP500_CONTROL_KEY}" class="asset-effective" hidden></span>

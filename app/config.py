@@ -280,16 +280,29 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
     },
 ]
 
+REPO_COMMISSION_RATE_BY_TENOR = {
+    1: 0.00001,
+    2: 0.00002,
+    3: 0.00003,
+    4: 0.00004,
+    7: 0.00005,
+    14: 0.00010,
+    28: 0.00020,
+    91: 0.00030,
+    182: 0.00030,
+}
+
+
 REPO_OPTIONS: list[dict[str, Any]] = [
-    {"symbol": "204001", "name": "1天国债逆回购", "instrument_type": "repo", "tenor_days": 1},
-    {"symbol": "204002", "name": "2天国债逆回购", "instrument_type": "repo", "tenor_days": 2},
-    {"symbol": "204003", "name": "3天国债逆回购", "instrument_type": "repo", "tenor_days": 3},
-    {"symbol": "204004", "name": "4天国债逆回购", "instrument_type": "repo", "tenor_days": 4},
-    {"symbol": "204007", "name": "7天国债逆回购", "instrument_type": "repo", "tenor_days": 7},
-    {"symbol": "204014", "name": "14天国债逆回购", "instrument_type": "repo", "tenor_days": 14},
-    {"symbol": "204028", "name": "28天国债逆回购", "instrument_type": "repo", "tenor_days": 28},
-    {"symbol": "204091", "name": "91天国债逆回购", "instrument_type": "repo", "tenor_days": 91},
-    {"symbol": "204182", "name": "182天国债逆回购", "instrument_type": "repo", "tenor_days": 182},
+    {"symbol": "204001", "name": "1天国债逆回购", "instrument_type": "repo", "tenor_days": 1, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[1]},
+    {"symbol": "204002", "name": "2天国债逆回购", "instrument_type": "repo", "tenor_days": 2, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[2]},
+    {"symbol": "204003", "name": "3天国债逆回购", "instrument_type": "repo", "tenor_days": 3, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[3]},
+    {"symbol": "204004", "name": "4天国债逆回购", "instrument_type": "repo", "tenor_days": 4, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[4]},
+    {"symbol": "204007", "name": "7天国债逆回购", "instrument_type": "repo", "tenor_days": 7, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[7]},
+    {"symbol": "204014", "name": "14天国债逆回购", "instrument_type": "repo", "tenor_days": 14, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[14]},
+    {"symbol": "204028", "name": "28天国债逆回购", "instrument_type": "repo", "tenor_days": 28, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[28]},
+    {"symbol": "204091", "name": "91天国债逆回购", "instrument_type": "repo", "tenor_days": 91, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[91]},
+    {"symbol": "204182", "name": "182天国债逆回购", "instrument_type": "repo", "tenor_days": 182, "commission_rate": REPO_COMMISSION_RATE_BY_TENOR[182]},
     {
         "key": "money_fund_511990",
         "symbol": "511990.SH",
@@ -346,7 +359,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "repo": {
             "investor_commission_rate": 0.00001,
-            "fee_cap_cny": 30.0,
+            # 0 means no absolute cap.  The official maximum commission is a
+            # tenor-specific percentage, not CNY 30 for the whole order.
+            "fee_cap_cny": 0.0,
             "lot_size_cny": 1000.0,
         },
         "ibkr_us_etf": {

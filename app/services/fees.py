@@ -56,7 +56,7 @@ class HkConnectEtfFeeConfig:
 @dataclass(frozen=True)
 class RepoFeeConfig:
     investor_commission_rate: float = 0.00001
-    fee_cap_cny: float = 30.0
+    fee_cap_cny: float = 0.0
     lot_size_cny: float = 1000.0
 
 
@@ -71,7 +71,7 @@ def cn_etf_fee(gross_amount_cny: float, config: CnEtfFeeConfig) -> float:
     commission = max(gross_amount_cny * config.commission_rate, config.min_commission_cny)
     handling = 0.0 if config.include_exchange_in_commission else gross_amount_cny * config.exchange_handling_rate
     taxes = gross_amount_cny * (config.stamp_tax_rate + config.transfer_fee_rate)
-    return round(commission + handling + taxes, 6)
+    return round(commission + handling + taxes, 2)
 
 
 def ibkr_us_etf_fee(shares: float, gross_amount_usd: float, config: IbkrFeeConfig) -> float:
@@ -79,7 +79,8 @@ def ibkr_us_etf_fee(shares: float, gross_amount_usd: float, config: IbkrFeeConfi
     if plan == "lite":
         return round(config.lite_commission_usd, 6)
     if plan == "pro_tiered":
-        return round(max(shares * config.tiered_per_share_usd, config.tiered_min_usd), 6)
+        tiered = max(shares * config.tiered_per_share_usd, config.tiered_min_usd)
+        return round(min(tiered, gross_amount_usd * config.fixed_max_trade_pct), 6)
     fixed = max(shares * config.fixed_per_share_usd, config.fixed_min_usd)
     return round(min(fixed, gross_amount_usd * config.fixed_max_trade_pct), 6)
 
@@ -134,16 +135,21 @@ def usd_to_cny(usd_amount: float, usd_cny_rate: float, config: FxFeeConfig, incl
 def hk_connect_etf_trade_fee(gross_amount_hkd: float, config: HkConnectEtfFeeConfig) -> float:
     if gross_amount_hkd <= 0:
         return 0.0
-    commission = max(gross_amount_hkd * config.broker_commission_rate, config.min_broker_commission_hkd)
+    # HKEX levies are rounded to the nearest cent item by item.  Rounding only
+    # the final sum understates small Southbound ETF trades.
+    commission = round(max(gross_amount_hkd * config.broker_commission_rate, config.min_broker_commission_hkd), 2)
     settlement = gross_amount_hkd * config.stock_settlement_fee_rate
-    settlement = min(max(settlement, config.min_stock_settlement_fee_hkd), config.max_stock_settlement_fee_hkd)
-    pass_through = gross_amount_hkd * (
-        config.trading_fee_rate
-        + config.transaction_levy_rate
-        + config.afrc_transaction_levy_rate
-        + config.stamp_duty_rate
+    settlement = round(min(max(settlement, config.min_stock_settlement_fee_hkd), config.max_stock_settlement_fee_hkd), 2)
+    pass_through = sum(
+        round(gross_amount_hkd * rate, 2)
+        for rate in (
+            config.trading_fee_rate,
+            config.transaction_levy_rate,
+            config.afrc_transaction_levy_rate,
+            config.stamp_duty_rate,
+        )
     )
-    return round(commission + settlement + pass_through, 6)
+    return round(commission + settlement + pass_through, 2)
 
 
 def hk_connect_portfolio_fee(value_hkd: float, config: HkConnectEtfFeeConfig, calendar_days: int = 1) -> float:
@@ -171,8 +177,11 @@ def hkd_to_cny(hkd_amount: float, hkd_cny_rate: float, config: HkConnectEtfFeeCo
 
 
 def repo_fee(principal_cny: float, config: RepoFeeConfig) -> float:
-    return round(min(principal_cny * config.investor_commission_rate, config.fee_cap_cny), 6)
+    commission = max(principal_cny, 0.0) * max(config.investor_commission_rate, 0.0)
+    if config.fee_cap_cny > 0:
+        commission = min(commission, config.fee_cap_cny)
+    return round(commission, 2)
 
 
 def repo_interest(principal_cny: float, annual_rate_percent: float, actual_days: int) -> float:
-    return round(principal_cny * (annual_rate_percent / 100.0) * actual_days / 365.0, 6)
+    return round(principal_cny * (annual_rate_percent / 100.0) * actual_days / 365.0, 2)
