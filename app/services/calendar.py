@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from functools import lru_cache
 
 
 def parse_date(value: str | date) -> date:
@@ -71,6 +72,7 @@ def rebalance_days(days: list[date], frequency: str, annual_rebalance_month: int
     return result
 
 
+@lru_cache(maxsize=4096)
 def next_business_day(day: date) -> date:
     current = day + timedelta(days=1)
     while not is_weekday(current):
@@ -78,6 +80,7 @@ def next_business_day(day: date) -> date:
     return current
 
 
+@lru_cache(maxsize=16384)
 def add_business_days(day: date, count: int) -> date:
     current = day
     for _ in range(max(count, 1)):

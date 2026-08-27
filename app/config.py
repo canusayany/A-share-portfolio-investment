@@ -24,8 +24,8 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "key": "us_sp500",
         "symbol": "VOO",
         "name": "标普500指数基金",
-        "target_weight": 0.20,
-        "enabled": True,
+        "target_weight": 0.0,
+        "enabled": False,
         "currency": "USD",
         "market": "US",
         "asset_type": "us_etf",
@@ -67,7 +67,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "key": "cn_dividend_low_vol",
         "symbol": "512890.SH",
         "name": "红利低波基金",
-        "target_weight": 0.08,
+        "target_weight": 0.25,
         "enabled": True,
         "currency": "CNY",
         "market": "CN",
@@ -107,8 +107,8 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "key": "cn_hs300_etf",
         "symbol": "510300.SH",
         "name": "沪深300基金",
-        "target_weight": 0.12,
-        "enabled": True,
+        "target_weight": 0.0,
+        "enabled": False,
         "currency": "CNY",
         "market": "CN",
         "asset_type": "cn_etf",
@@ -226,8 +226,8 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "key": "cn_treasury_30y_index",
         "symbol": "CBA21801",
         "name": "中债-30年期国债指数",
-        "target_weight": 0.0,
-        "enabled": False,
+        "target_weight": 0.25,
+        "enabled": True,
         "currency": "CNY",
         "market": "CN",
         "asset_type": "cn_bond_index",
@@ -245,7 +245,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "key": "cn_gold_etf",
         "symbol": "518880.SH",
         "name": "黄金基金（2021年起自动切换518850）",
-        "target_weight": 0.10,
+        "target_weight": 0.25,
         "enabled": True,
         "currency": "CNY",
         "market": "CN",
@@ -326,7 +326,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "repo_symbol": "204001",
     "dip_buy_enabled": False,
     "dip_buy_drawdown": 0.05,
-    "dip_buy_cash_ratio": 0.05,
+    "dip_buy_total_parts": 10,
+    "dip_buy_parts_per_trigger": 1,
+    "dip_buy_cooldown_trading_days": 10,
+    "dip_buy_blackout_enabled": True,
+    "dip_buy_blackout_months": 1,
     "repo_options": REPO_OPTIONS,
     "allow_fractional_us_shares": True,
     "liquidity_policy": "sell_overweight",
@@ -485,8 +489,12 @@ def backtest_assets(config: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def repo_rate_symbol(config: dict[str, Any]) -> str:
-    # Reverse repo remains the cash ledger and fallback rate; a money-fund choice
-    # is an investable cash asset, not a replacement for its settlement mechanics.
+    option = selected_repo_option(config)
+    # A selected multi-day reverse repo must use its own quoted annualized rate.
+    # Money funds remain investable cash assets and use the one-day repo only as
+    # the pre-listing/missing-price settlement fallback.
+    if option.get("instrument_type", "repo") == "repo":
+        return str(option.get("symbol") or "204001")
     return "204001"
 
 
@@ -632,6 +640,10 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("rolling_window_years must be an integer between 1 and 20")
     if not isinstance(config.get("rebalance_month_analysis_enabled", False), bool):
         errors.append("rebalance_month_analysis_enabled must be boolean")
+    if not isinstance(config.get("dip_buy_enabled", False), bool):
+        errors.append("dip_buy_enabled must be boolean")
+    if not isinstance(config.get("dip_buy_blackout_enabled", True), bool):
+        errors.append("dip_buy_blackout_enabled must be boolean")
     if repo_target_mode not in {"residual_weight", "fixed_bucket"}:
         errors.append("repo_target_mode must be residual_weight or fixed_bucket")
     try:
@@ -648,13 +660,49 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("monthly_spend_cny must be numeric")
     try:
         dip_buy_drawdown = float(config.get("dip_buy_drawdown", 0.05))
-        dip_buy_cash_ratio = float(config.get("dip_buy_cash_ratio", 0.05))
         if not math.isfinite(dip_buy_drawdown) or not 0 < dip_buy_drawdown < 1:
             errors.append("dip_buy_drawdown must be between 0 and 1")
-        if not math.isfinite(dip_buy_cash_ratio) or not 0 < dip_buy_cash_ratio <= 1:
-            errors.append("dip_buy_cash_ratio must be between 0 and 1")
     except (TypeError, ValueError):
-        errors.append("dip buy parameters must be numeric")
+        errors.append("dip_buy_drawdown must be numeric")
+    try:
+        total_parts_value = config.get("dip_buy_total_parts", 10)
+        parts_per_trigger_value = config.get("dip_buy_parts_per_trigger", 1)
+        total_parts = float(total_parts_value)
+        parts_per_trigger = float(parts_per_trigger_value)
+        if (
+            isinstance(total_parts_value, bool)
+            or not math.isfinite(total_parts)
+            or not total_parts.is_integer()
+            or total_parts < 1
+        ):
+            errors.append("dip_buy_total_parts must be a positive integer")
+        if (
+            isinstance(parts_per_trigger_value, bool)
+            or not math.isfinite(parts_per_trigger)
+            or not parts_per_trigger.is_integer()
+            or parts_per_trigger < 1
+        ):
+            errors.append("dip_buy_parts_per_trigger must be a positive integer")
+        elif math.isfinite(total_parts) and total_parts.is_integer() and total_parts >= 1 and parts_per_trigger > total_parts:
+            errors.append("dip_buy_parts_per_trigger cannot exceed dip_buy_total_parts")
+    except (TypeError, ValueError):
+        errors.append("dip buy part parameters must be integers")
+    for key, default, minimum, maximum in (
+        ("dip_buy_cooldown_trading_days", 10, 0, 252),
+        ("dip_buy_blackout_months", 1, 0, 11),
+    ):
+        try:
+            raw_value = config.get(key, default)
+            numeric_value = float(raw_value)
+            if (
+                isinstance(raw_value, bool)
+                or not math.isfinite(numeric_value)
+                or not numeric_value.is_integer()
+                or not minimum <= numeric_value <= maximum
+            ):
+                errors.append(f"{key} must be an integer between {minimum} and {maximum}")
+        except (TypeError, ValueError):
+            errors.append(f"{key} must be an integer between {minimum} and {maximum}")
     try:
         repo_fixed_target_cny = float(config.get("repo_fixed_target_cny", 0))
         if not math.isfinite(repo_fixed_target_cny) or repo_fixed_target_cny < 0:

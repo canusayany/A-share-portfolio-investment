@@ -204,6 +204,25 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(chart["dates"][0], "day-0000")
         self.assertEqual(chart["dates"][-1], "day-2500")
 
+    def test_chart_payload_preserves_short_lived_routes_and_does_not_mutate_rows(self) -> None:
+        rows = [
+            {
+                "trade_date": f"day-{index:04d}",
+                "total_asset_cny": float(index),
+                "daily_return": 0.0,
+                "cumulative_return": 0.0,
+                "drawdown": -0.5 if index == 501 else 0.0,
+                "benchmark_return": 0.0,
+                "payload_json": json.dumps({"weights": {"BRIEF": 1.0} if index == 501 else {"REPO": 1.0}}),
+            }
+            for index in range(2000)
+        ]
+        chart = main_module.columnar_chart_payload(rows, max_points=100)
+
+        self.assertIn("BRIEF", chart["weights"])
+        self.assertIn("day-0501", chart["dates"])
+        self.assertIn("payload_json", rows[0])
+
     def test_static_index_is_served(self) -> None:
         opener = request.build_opener(request.ProxyHandler({}))
         with opener.open(f"{self.base_url}/", timeout=10) as resp:
@@ -227,7 +246,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn('data-history-view="leaderboard"', html)
         self.assertIn("allocationSummary", html)
         self.assertIn("data-repo-mode", html)
-        self.assertIn("static/echarts.min.js", html)
+        self.assertNotIn('<script src="static/echarts.min.js', html)
         self.assertNotIn("cdn.jsdelivr.net", html)
         self.assertNotIn("syncBtn", html)
 
@@ -245,7 +264,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260825-dividend-explainer-2", detail)
+        self.assertIn("20260827-dip-buy-2", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")
@@ -341,6 +360,7 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(current["status"], "completed")
         self.assertGreater(current["result"]["summary"]["final_asset_cny"], 0)
+        self.assertTrue(current["result"]["chart"]["dates"])
 
     def test_async_backtest_returns_primary_result_before_extended_analysis(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")

@@ -12,6 +12,7 @@ from app.config import (
     load_dotenv_if_present,
     normalize_config,
     repo_rate_symbol,
+    selected_bond_etf_asset,
     selected_money_fund_asset,
     selected_repo_option,
     validate_config,
@@ -157,6 +158,21 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(cfg["annual_rebalance_month"], 1)
         self.assertEqual(cfg["rolling_window_years"], 3)
         self.assertFalse(cfg["rebalance_month_analysis_enabled"])
+        self.assertEqual(cfg["dip_buy_drawdown"], 0.05)
+        self.assertEqual(cfg["dip_buy_total_parts"], 10)
+        self.assertEqual(cfg["dip_buy_parts_per_trigger"], 1)
+        self.assertEqual(cfg["dip_buy_cooldown_trading_days"], 10)
+        self.assertTrue(cfg["dip_buy_blackout_enabled"])
+        self.assertEqual(cfg["dip_buy_blackout_months"], 1)
+        enabled_allocations = {
+            asset["symbol"]: asset["target_weight"]
+            for asset in cfg["assets"]
+            if asset["enabled"]
+        }
+        self.assertEqual(
+            enabled_allocations,
+            {"512890.SH": 0.25, "CBA21801": 0.25, "518880.SH": 0.25},
+        )
 
         invalid = normalize_config(
             {
@@ -171,18 +187,52 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertTrue(any("rebalance_month_analysis_enabled" in error for error in errors))
         self.assertEqual(validate_config(cfg), [])
         bad = default_config()
-        bad["assets"] = [{**bad["assets"][0], "target_weight": 1.2}]
+        bad["assets"] = [{**bad["assets"][0], "enabled": True, "target_weight": 1.2}]
         self.assertTrue(validate_config(bad))
         fixed_bucket = normalize_config({"repo_target_mode": "fixed_bucket"})
         fixed_bucket["assets"] = [{**fixed_bucket["assets"][0], "target_weight": 1.2}]
         self.assertFalse(any("target weights cannot exceed" in item for item in validate_config(fixed_bucket)))
         bad_fixed_bucket = normalize_config({"repo_target_mode": "fixed_bucket", "repo_fixed_target_ratio": 1.2})
         self.assertTrue(any("repo_fixed_target_ratio" in item for item in validate_config(bad_fixed_bucket)))
+        self.assertTrue(any("dip_buy_drawdown" in item for item in validate_config(normalize_config({"dip_buy_drawdown": 1.0}))))
+        self.assertTrue(any("dip_buy_total_parts" in item for item in validate_config(normalize_config({"dip_buy_total_parts": 0}))))
+        self.assertTrue(
+            any(
+                "dip_buy_parts_per_trigger" in item
+                for item in validate_config(normalize_config({"dip_buy_parts_per_trigger": 0}))
+            )
+        )
+        self.assertTrue(
+            any(
+                "dip_buy_parts_per_trigger" in item
+                for item in validate_config(normalize_config({"dip_buy_total_parts": 2, "dip_buy_parts_per_trigger": 3}))
+            )
+        )
+        self.assertTrue(
+            any(
+                "dip buy part parameters" in item
+                for item in validate_config(normalize_config({"dip_buy_total_parts": "ten"}))
+            )
+        )
+        self.assertTrue(
+            any(
+                "dip_buy_cooldown_trading_days" in item
+                for item in validate_config(normalize_config({"dip_buy_cooldown_trading_days": -1}))
+            )
+        )
+        self.assertTrue(
+            any(
+                "dip_buy_blackout_months" in item
+                for item in validate_config(normalize_config({"dip_buy_blackout_months": 12}))
+            )
+        )
         duplicate_sp500 = normalize_config({})
+        next(asset for asset in duplicate_sp500["assets"] if asset["symbol"] == "VOO")["enabled"] = True
         next(asset for asset in duplicate_sp500["assets"] if asset["symbol"] == "03195.HK")["enabled"] = True
         self.assertTrue(any("exclusive asset group sp500" in item for item in validate_config(duplicate_sp500)))
         duplicate_broad = normalize_config({})
         next(asset for asset in duplicate_broad["assets"] if asset["symbol"] == "159631.SZ")["enabled"] = True
+        next(asset for asset in duplicate_broad["assets"] if asset["symbol"] == "510500.SH")["enabled"] = True
         self.assertTrue(any("exclusive asset group cn_broad_etf" in item for item in validate_config(duplicate_broad)))
 
     def test_blank_date_inputs_keep_default_dates(self) -> None:
@@ -215,6 +265,7 @@ class CalendarAndConfigTests(unittest.TestCase):
         cfg = normalize_config({"repo_symbol": "204007", "repo_options": stale_options})
 
         self.assertEqual(selected_repo_option(cfg)["tenor_days"], 7)
+        self.assertEqual(repo_rate_symbol(cfg), "204007")
 
     def test_validation_rejects_malformed_and_non_finite_fee_inputs(self) -> None:
         malformed_assets = normalize_config({"assets": "not-a-list"})
@@ -236,6 +287,9 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(repo_rate_symbol(cfg), "204001")
         self.assertIn("511990.SH", {asset["symbol"] for asset in backtest_assets(cfg)})
         self.assertEqual(validate_config(cfg), [])
+
+    def test_legacy_bond_etf_selector_is_disabled(self) -> None:
+        self.assertIsNone(selected_bond_etf_asset(normalize_config({})))
 
     def test_validation_rejects_negative_financial_inputs(self) -> None:
         self.assertTrue(any("monthly_spend_cny" in item for item in validate_config(normalize_config({"monthly_spend_cny": -1}))))

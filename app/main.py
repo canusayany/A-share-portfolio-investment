@@ -70,15 +70,61 @@ def response_bytes(data: object) -> bytes:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def columnar_chart_payload(rows: list[dict], max_points: int = 1000) -> dict:
-    """Return chart data as compact arrays instead of repeating JSON keys per day."""
+def _chart_sample_indices(rows: list[dict], payloads: list[dict], max_points: int) -> list[int]:
     source_points = len(rows)
-    if source_points > max_points:
-        indices = sorted({round(index * (source_points - 1) / (max_points - 1)) for index in range(max_points)})
-        rows = [rows[index] for index in indices]
+    if source_points <= max_points:
+        return list(range(source_points))
+    if max_points <= 2:
+        return [0, source_points - 1][:max_points]
+
+    mandatory = {0, source_points - 1}
+    previous_symbols: frozenset[str] = frozenset()
+    for index, payload in enumerate(payloads):
+        symbols = frozenset(symbol for symbol, weight in payload.get("weights", {}).items() if abs(float(weight or 0.0)) > 1e-12)
+        if symbols != previous_symbols:
+            mandatory.update({max(index - 1, 0), index})
+        previous_symbols = symbols
+    if len(mandatory) >= max_points:
+        ordered = sorted(mandatory)
+        return sorted({ordered[round(index * (len(ordered) - 1) / (max_points - 1))] for index in range(max_points)})
+
+    selected = set(mandatory)
+    remaining = max_points - len(selected)
+    bucket_count = max(remaining // 2, 1)
+    for bucket in range(bucket_count):
+        start = round(bucket * source_points / bucket_count)
+        end = max(round((bucket + 1) * source_points / bucket_count), start + 1)
+        candidates = range(start, min(end, source_points))
+        if not candidates:
+            continue
+        selected.add(min(candidates, key=lambda index: float(rows[index].get("drawdown") or 0.0)))
+        selected.add(max(candidates, key=lambda index: float(rows[index].get("cumulative_return") or 0.0)))
+    if len(selected) < max_points:
+        for index in (round(point * (source_points - 1) / (max_points - 1)) for point in range(max_points)):
+            selected.add(index)
+            if len(selected) >= max_points:
+                break
+    if len(selected) > max_points:
+        non_mandatory = sorted(selected - mandatory)
+        keep = max_points - len(mandatory)
+        non_mandatory = [
+            non_mandatory[round(index * (len(non_mandatory) - 1) / max(keep - 1, 1))]
+            for index in range(keep)
+        ] if keep > 0 else []
+        selected = mandatory | set(non_mandatory)
+    return sorted(selected)
+
+
+def columnar_chart_payload(rows: list[dict], max_points: int = 1000) -> dict:
+    """Return compact chart arrays while retaining route changes and extrema."""
+    source_points = len(rows)
+    all_payloads = [json_loads(row.get("payload_json"), {}) for row in rows]
+    indices = _chart_sample_indices(rows, all_payloads, max_points)
+    sampled_rows = [rows[index] for index in indices]
+    parsed_payloads = [all_payloads[index] for index in indices]
     chart = {
         "source_points": source_points,
-        "display_points": len(rows),
+        "display_points": len(sampled_rows),
         "dates": [],
         "total_assets": [],
         "daily_returns": [],
@@ -88,16 +134,13 @@ def columnar_chart_payload(rows: list[dict], max_points: int = 1000) -> dict:
         "comparison_total_assets": [],
         "weights": {},
     }
-    parsed_payloads: list[dict] = []
     symbols: list[str] = []
-    for row in rows:
-        payload = json_loads(row.pop("payload_json"), {})
-        parsed_payloads.append(payload)
+    for payload in all_payloads:
         for symbol in payload.get("weights", {}):
             if symbol not in symbols:
                 symbols.append(symbol)
     chart["weights"] = {symbol: [] for symbol in symbols}
-    for row, payload in zip(rows, parsed_payloads):
+    for row, payload in zip(sampled_rows, parsed_payloads):
         chart["dates"].append(row["trade_date"])
         chart["total_assets"].append(row["total_asset_cny"])
         chart["daily_returns"].append(row["daily_return"])
@@ -646,6 +689,21 @@ def run_backtest_job(server, job_id: str, config: dict) -> None:
         if job_cancel_requested(server, job_id):
             set_job(server, job_id, status="cancelled", message=CANCELLED_JOB_MESSAGE, error=CANCELLED_JOB_MESSAGE, completed_at=iso_now())
         else:
+            try:
+                with db_session(server.settings.db_path) as conn:  # type: ignore[attr-defined]
+                    chart_rows = rows_to_dicts(
+                        conn.execute(
+                            """
+                            SELECT trade_date,total_asset_cny,flow_cny,
+                                   daily_return,cumulative_return,drawdown,benchmark_return,payload_json
+                            FROM portfolio_daily WHERE run_id=? ORDER BY trade_date
+                            """,
+                            (result.get("run_id"),),
+                        )
+                    )
+                result["chart"] = columnar_chart_payload(chart_rows, max_points=800)
+            except Exception:
+                logger.exception("failed to attach initial chart payload job_id=%s", job_id)
             set_job(server, job_id, status="completed", message="回测完成", result=result, completed_at=iso_now())
             if result.get("analysis_pending"):
                 schedule_deferred_backtest_analysis(server, result["run_id"], config)
@@ -756,18 +814,32 @@ class ApiHandler(BaseHTTPRequestHandler):
                 relative = relative[len("static/") :]
             file_path = STATIC_DIR / relative
         file_path = file_path.resolve()
-        if not str(file_path).startswith(str(STATIC_DIR.resolve())) or not file_path.exists():
+        try:
+            file_path.relative_to(STATIC_DIR.resolve())
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if not file_path.exists() or not file_path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        body = file_path.read_bytes()
         use_gzip = (
-            len(body) > 1024
+            file_path.stat().st_size > 1024
             and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
             and (content_type.startswith("text/") or content_type in {"application/javascript", "application/json"})
         )
-        if use_gzip:
-            body = gzip.compress(body, compresslevel=5)
+        stat = file_path.stat()
+        cache_key = (str(file_path), stat.st_mtime_ns, stat.st_size, use_gzip)
+        with self.server.static_cache_lock:  # type: ignore[attr-defined]
+            body = self.server.static_cache.get(cache_key)  # type: ignore[attr-defined]
+        if body is None:
+            body = file_path.read_bytes()
+            if use_gzip:
+                body = gzip.compress(body, compresslevel=5)
+            with self.server.static_cache_lock:  # type: ignore[attr-defined]
+                if len(self.server.static_cache) >= 32:  # type: ignore[attr-defined]
+                    self.server.static_cache.clear()  # type: ignore[attr-defined]
+                self.server.static_cache[cache_key] = body  # type: ignore[attr-defined]
         is_versioned = bool(parse_qs(urlparse(self.path).query).get("v"))
         if is_index:
             cache_control = "public, max-age=60, s-maxage=300, stale-while-revalidate=60"
@@ -1060,6 +1132,8 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | Path
     server.job_request_index = {}  # type: ignore[attr-defined]
     server.analysis_lock = Lock()  # type: ignore[attr-defined]
     server.analysis_futures = {}  # type: ignore[attr-defined]
+    server.static_cache_lock = Lock()  # type: ignore[attr-defined]
+    server.static_cache = {}  # type: ignore[attr-defined]
     server.job_abandoned_seconds = float(os.getenv("PORTFOLIO_JOB_ABANDONED_SECONDS", DEFAULT_ABANDONED_JOB_SECONDS))  # type: ignore[attr-defined]
     server.job_retention_seconds = float(os.getenv("PORTFOLIO_JOB_RETENTION_SECONDS", DEFAULT_JOB_RETENTION_SECONDS))  # type: ignore[attr-defined]
     server.job_executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[attr-defined]

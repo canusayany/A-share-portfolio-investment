@@ -6,6 +6,7 @@ from datetime import date
 
 from app.config import normalize_config
 from app.db import db_session, init_db, rows_to_dicts
+from app.services.calendar import business_days, repo_actual_days
 from app.services.backtest_engine import (
     BacktestError,
     PortfolioState,
@@ -28,6 +29,9 @@ from app.services.backtest_engine import (
     attach_proxy_price_maps,
     comparison_assets,
     compute_metrics,
+    dip_buy_assets,
+    dip_buy_cash_buffer_cny,
+    is_dip_buy_blackout_month,
     drawdown_recovery_metrics,
     effective_weights,
     minimal_rebalance_weights,
@@ -217,14 +221,13 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_disabled_asset_weight_flows_to_repo(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
-        cfg["assets"][0]["enabled"] = False
-        cfg["assets"][1]["enabled"] = False
+        next(asset for asset in cfg["assets"] if asset["symbol"] == "512890.SH")["enabled"] = False
         with db_session(db_path) as conn:
             result = run_backtest(conn, cfg)
             daily = rows_to_dicts(conn.execute("SELECT payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date", (result["run_id"],)))
         first_payload = json.loads(daily[0]["payload_json"])
         self.assertEqual(first_payload["targets"].get("VOO", 0), 0)
-        self.assertGreater(first_payload["targets"]["REPO"], 0.6)
+        self.assertAlmostEqual(first_payload["targets"]["REPO"], 0.5)
 
     def test_fixed_bucket_mode_allocates_repo_first_then_scales_risk_assets(self) -> None:
         cfg = normalize_config(
@@ -239,41 +242,307 @@ class BacktestEngineTests(unittest.TestCase):
 
         self.assertAlmostEqual(repo_fixed_target_weight(cfg, 1_000_000), 0.40)
         self.assertAlmostEqual(weights["REPO"], 0.40)
-        self.assertAlmostEqual(weights["VOO"], 0.24)
-        self.assertAlmostEqual(weights["512890.SH"], 0.096)
+        self.assertNotIn("VOO", weights)
+        self.assertAlmostEqual(weights["512890.SH"], 0.20)
+        self.assertAlmostEqual(weights["CBA21801"], 0.20)
+        self.assertAlmostEqual(weights["518880.SH"], 0.20)
         self.assertAlmostEqual(sum(weights.values()), 1.0)
 
-    def test_dip_buy_uses_local_peak_and_next_day_available_repo_cash(self) -> None:
+    def test_dip_buy_uses_cost_basis_cash_pool_parts_and_next_day_open(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        cfg["dip_buy_enabled"] = True
+        cfg["dip_buy_total_parts"] = 10
+        cfg["dip_buy_parts_per_trigger"] = 2
+        cfg["monthly_spend_cny"] = 10_000.0
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH'")
+            for trade_date, open_price, close_price in (
+                ("2020-01-01", 10.0, 10.0),
+                ("2020-01-02", 10.0, 11.0),
+                # This is more than 5% below the local peak, but remains above
+                # cost and must not trigger the new rule.
+                ("2020-01-03", 10.0, 10.3),
+                ("2020-01-06", 10.0, 9.4),
+                ("2020-01-07", 8.75, 9.4),
+            ):
+                conn.execute(
+                    "UPDATE prices SET open=?, high=?, low=?, close=? WHERE symbol='510500.SH' AND trade_date=?",
+                    (open_price, max(open_price, close_price), min(open_price, close_price), close_price, trade_date),
+                )
+            result = run_backtest(conn, cfg)
+            dip_trades = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date, reason, price, gross_amount, fee FROM trades WHERE run_id=? AND reason='dip_buy' ORDER BY trade_date",
+                    (result["run_id"],),
+                )
+            )
+            first_day = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-01'",
+                (result["run_id"],),
+            ).fetchone()
+
+        self.assertEqual(result["summary"]["dip_buy_count"], 1)
+        self.assertEqual(len(dip_trades), 1)
+        self.assertEqual(dip_trades[0]["trade_date"], "2020-01-07")
+        self.assertEqual(dip_trades[0]["price"], 8.75)
+        first_payload = json.loads(first_day["payload_json"])
+        expected_budget = first_payload["dip_buy"]["piece_cny"] * 2
+        actual_spend = dip_trades[0]["gross_amount"] + dip_trades[0]["fee"]
+        self.assertLessEqual(actual_spend, expected_budget)
+        self.assertLess(expected_budget - actual_spend, 8.75 * 100 + 1)
+        self.assertEqual(first_payload["dip_buy"]["cash_buffer_cny"], 230_000.0)
+        self.assertGreater(first_payload["repo_lots"], 0)
+
+    def test_dip_buy_waits_when_the_next_session_open_is_missing(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-08")
         for asset in cfg["assets"]:
             asset["enabled"] = asset["symbol"] == "510500.SH"
             asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
         cfg["dip_buy_enabled"] = True
         cfg["monthly_spend_cny"] = 0.0
         with db_session(db_path) as conn:
-            conn.execute("UPDATE prices SET open=9.9, high=9.9, low=9.9, close=9.9 WHERE symbol='510500.SH'")
-            for trade_date, price in (("2020-01-01", 10.0), ("2020-01-02", 10.5), ("2020-01-03", 9.9)):
-                conn.execute(
-                    "UPDATE prices SET open=?, high=?, low=?, close=? WHERE symbol='510500.SH' AND trade_date=?",
-                    (price, price, price, price, trade_date),
-                )
+            conn.execute("UPDATE prices SET open=10,high=10,low=10,close=10 WHERE symbol='510500.SH'")
+            conn.execute(
+                "UPDATE prices SET low=9,close=9 WHERE symbol='510500.SH' AND trade_date='2020-01-02'"
+            )
+            conn.execute(
+                "UPDATE prices SET open=NULL,low=9,close=9 WHERE symbol='510500.SH' AND trade_date='2020-01-03'"
+            )
+            conn.execute(
+                "UPDATE prices SET open=8.5,low=8.5,close=9 WHERE symbol='510500.SH' AND trade_date='2020-01-06'"
+            )
             result = run_backtest(conn, cfg)
             dip_trades = rows_to_dicts(
                 conn.execute(
-                    "SELECT trade_date, reason, gross_amount FROM trades WHERE run_id=? AND reason='dip_buy' ORDER BY trade_date",
+                    "SELECT trade_date,price FROM trades WHERE run_id=? AND reason='dip_buy' ORDER BY trade_date",
                     (result["run_id"],),
                 )
             )
-            prior_day = conn.execute(
-                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-02'",
+
+        self.assertTrue(dip_trades)
+        self.assertEqual(dip_trades[0]["trade_date"], "2020-01-06")
+        self.assertEqual(dip_trades[0]["price"], 8.5)
+
+    def test_dip_buy_requires_cash_equivalents_above_living_expense_buffer(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-06")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.80 if asset["enabled"] else 0.0
+        cfg["dip_buy_enabled"] = True
+        cfg["monthly_spend_cny"] = 10_000.0
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=9.0, close=9.0 WHERE symbol='510500.SH'")
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH' AND trade_date='2020-01-01'")
+            result = run_backtest(conn, cfg)
+            dip_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM trades WHERE run_id=? AND reason='dip_buy'",
+                (result["run_id"],),
+            ).fetchone()["count"]
+
+        self.assertEqual(dip_count, 0)
+        self.assertEqual(result["summary"]["dip_buy_count"], 0)
+
+    def test_dip_buy_is_inactive_when_rebalance_frequency_is_not_yearly(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        cfg["dip_buy_enabled"] = True
+        cfg["rebalance_frequency"] = "monthly"
+        cfg["monthly_spend_cny"] = 10_000.0
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE prices SET open=9.0, high=9.0, low=9.0, close=9.0 WHERE symbol='510500.SH'")
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH' AND trade_date='2020-01-01'")
+            result = run_backtest(conn, cfg)
+            final_daily = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date DESC LIMIT 1",
                 (result["run_id"],),
             ).fetchone()
 
-        self.assertEqual(result["summary"]["dip_buy_count"], 1)
-        self.assertEqual(len(dip_trades), 1)
-        self.assertEqual(dip_trades[0]["trade_date"], "2020-01-06")
-        self.assertGreater(dip_trades[0]["gross_amount"], 0)
-        self.assertGreater(json.loads(prior_day["payload_json"])["repo_lots"], 0)
+        self.assertEqual(result["summary"]["dip_buy_count"], 0)
+        self.assertFalse(json.loads(final_daily["payload_json"])["dip_buy"]["active"])
+
+    def test_dip_buy_sells_selected_money_fund_at_next_open_for_funding(self) -> None:
+        cfg = normalize_config(
+            {
+                "start_date": "2020-01-01",
+                "end_date": "2020-01-06",
+                "repo_symbol": "511990.SH",
+                "dip_buy_enabled": True,
+                "monthly_spend_cny": 10_000.0,
+            }
+        )
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=9.0, close=9.0 WHERE symbol='510500.SH'")
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH' AND trade_date='2020-01-01'")
+            conn.execute("UPDATE prices SET open=8.5 WHERE symbol='510500.SH' AND trade_date='2020-01-03'")
+            result = run_backtest(conn, cfg)
+            funding_trades = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date,symbol,side,reason,price FROM trades WHERE run_id=? AND reason='dip_buy_funding'",
+                    (result["run_id"],),
+                )
+            )
+            dip_trade = conn.execute(
+                "SELECT trade_date,price FROM trades WHERE run_id=? AND reason='dip_buy'",
+                (result["run_id"],),
+            ).fetchone()
+
+        self.assertEqual(len(funding_trades), 1)
+        self.assertEqual(funding_trades[0]["symbol"], "511990.SH")
+        self.assertEqual(funding_trades[0]["side"], "SELL")
+        self.assertEqual(funding_trades[0]["trade_date"], "2020-01-03")
+        self.assertEqual(dip_trade["trade_date"], "2020-01-03")
+        self.assertEqual(dip_trade["price"], 8.5)
+
+    def test_multi_day_repo_rechecks_at_maturity_then_trades_following_open(self) -> None:
+        cfg = normalize_config(
+            {
+                "start_date": "2020-01-01",
+                "end_date": "2020-01-15",
+                "repo_symbol": "204007",
+                "dip_buy_enabled": True,
+                "monthly_spend_cny": 10_000.0,
+            }
+        )
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
+            conn.execute("UPDATE prices SET open=9.0, high=9.0, low=9.0, close=9.0 WHERE symbol='510500.SH'")
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH' AND trade_date='2020-01-01'")
+            conn.execute("UPDATE prices SET open=8.25 WHERE symbol='510500.SH' AND trade_date='2020-01-13'")
+            result = run_backtest(conn, cfg)
+            dip_trades = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date,price FROM trades WHERE run_id=? AND reason='dip_buy' ORDER BY trade_date",
+                    (result["run_id"],),
+                )
+            )
+            jan_09 = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-09'",
+                (result["run_id"],),
+            ).fetchone()
+            maturity_day = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-10'",
+                (result["run_id"],),
+            ).fetchone()
+
+        jan_09_dip = json.loads(jan_09["payload_json"])["dip_buy"]
+        maturity_dip = json.loads(maturity_day["payload_json"])["dip_buy"]
+        self.assertEqual(jan_09_dip["deferred_recheck_dates"]["510500.SH"], "2020-01-10")
+        self.assertEqual(maturity_dip["deferred_count"], 0)
+        self.assertEqual(maturity_dip["pending_count"], 1)
+        self.assertEqual(dip_trades, [{"trade_date": "2020-01-13", "price": 8.25}])
+
+    def test_dip_buy_asset_scope_and_declining_monthly_cash_buffer(self) -> None:
+        cfg = normalize_config({})
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] in {"VOO", "512890.SH", "510300.SH", "518880.SH", "CBA03101"}
+        prices = {asset["symbol"]: 100.0 for asset in cfg["assets"]}
+
+        symbols = {asset["symbol"] for asset in dip_buy_assets(cfg, date(2020, 1, 15), prices)}
+
+        self.assertEqual(symbols, {"512890.SH", "510300.SH", "518880.SH", "CBA03101"})
+        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2020, 1, 31)), 230_000)
+        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2020, 2, 1)), 220_000)
+        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2020, 12, 1)), 120_000)
+        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2022, 1, 1)), 120_000)
+        # A new annual rebalance date refreshes the post-spend ledger to 23 months.
+        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2021, 1, 15), date(2021, 1, 15)), 230_000)
+
+    def test_dip_buy_blackout_months_wrap_year_and_exclude_rebalance_month(self) -> None:
+        self.assertTrue(is_dip_buy_blackout_month(date(2020, 12, 1), 1, 1))
+        self.assertTrue(is_dip_buy_blackout_month(date(2020, 11, 1), 1, 2))
+        self.assertFalse(is_dip_buy_blackout_month(date(2021, 1, 1), 1, 2))
+        self.assertFalse(is_dip_buy_blackout_month(date(2020, 10, 1), 1, 2))
+        self.assertTrue(is_dip_buy_blackout_month(date(2020, 5, 1), 6, 1))
+        self.assertFalse(is_dip_buy_blackout_month(date(2020, 5, 1), 6, 0))
+
+    def test_dip_buy_optional_blackout_cancels_orders_crossing_into_quiet_month(self) -> None:
+        db_path, cfg = build_synced_db("2020-04-27", "2020-05-08")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        cfg.update(
+            {
+                "dip_buy_enabled": True,
+                "dip_buy_blackout_enabled": True,
+                "dip_buy_blackout_months": 1,
+                "annual_rebalance_month": 6,
+                "monthly_spend_cny": 0.0,
+            }
+        )
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE prices SET open=10,high=10,low=10,close=10 WHERE symbol='510500.SH'")
+            conn.execute(
+                "UPDATE prices SET close=9,low=9 WHERE symbol='510500.SH' AND trade_date='2020-04-30'"
+            )
+            result = run_backtest(conn, cfg)
+            dip_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM trades WHERE run_id=? AND reason='dip_buy'",
+                (result["run_id"],),
+            ).fetchone()["count"]
+            may_payload = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date LIKE '2020-05-%' ORDER BY trade_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+
+        self.assertEqual(dip_count, 0)
+        self.assertTrue(json.loads(may_payload["payload_json"])["dip_buy"]["blackout"])
+
+        cfg["dip_buy_blackout_enabled"] = False
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            dip_trade = conn.execute(
+                "SELECT trade_date FROM trades WHERE run_id=? AND reason='dip_buy'",
+                (result["run_id"],),
+            ).fetchone()
+        self.assertIsNotNone(dip_trade)
+        self.assertTrue(dip_trade["trade_date"].startswith("2020-05-"))
+
+    def test_dip_buy_cooldown_blocks_exact_number_of_following_trading_days(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-31")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        cfg.update(
+            {
+                "dip_buy_enabled": True,
+                "dip_buy_cooldown_trading_days": 10,
+                "dip_buy_total_parts": 10,
+                "dip_buy_parts_per_trigger": 1,
+                "monthly_spend_cny": 0.0,
+            }
+        )
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE prices SET open=9,high=9,low=9,close=9 WHERE symbol='510500.SH'")
+            conn.execute("UPDATE prices SET open=10,high=10,low=10,close=10 WHERE symbol='510500.SH' AND trade_date='2020-01-01'")
+            result = run_backtest(conn, cfg)
+            dip_trades = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date FROM trades WHERE run_id=? AND reason='dip_buy' ORDER BY trade_date",
+                    (result["run_id"],),
+                )
+            )
+
+        self.assertGreaterEqual(len(dip_trades), 2)
+        trading_dates = [day.isoformat() for day in business_days("2020-01-01", "2020-01-31")]
+        first_idx = trading_dates.index(dip_trades[0]["trade_date"])
+        second_idx = trading_dates.index(dip_trades[1]["trade_date"])
+        self.assertGreater(second_idx - first_idx, 10)
 
     def test_fixed_bucket_mode_runs_backtest_with_fixed_repo_rebalance_target(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
@@ -296,12 +565,19 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_us_and_cn_purchase_rules_are_separate(self) -> None:
         db_path, cfg = build_synced_db("2013-01-01", "2013-03-31")
+        voo = next(asset for asset in cfg["assets"] if asset["symbol"] == "VOO")
+        voo["enabled"] = True
+        voo["target_weight"] = 0.20
         with db_session(db_path) as conn:
             result = run_backtest(conn, cfg)
             trades = rows_to_dicts(conn.execute("SELECT * FROM trades WHERE run_id=? AND side='BUY'", (result["run_id"],)))
 
         voo_buys = [trade for trade in trades if trade["symbol"] == "VOO"]
-        cn_buys = [trade for trade in trades if trade["currency"] == "CNY"]
+        cn_buys = [
+            trade
+            for trade in trades
+            if trade["currency"] == "CNY" and trade["symbol"] not in {"CBA21801", "CN30Y.YIELD-TR"}
+        ]
         self.assertTrue(voo_buys)
         self.assertTrue(cn_buys)
         self.assertTrue(any(abs(trade["quantity"] - round(trade["quantity"])) > 1e-6 for trade in voo_buys))
@@ -493,8 +769,8 @@ class BacktestEngineTests(unittest.TestCase):
             ).fetchone()
         payload = json.loads(first["payload_json"])
         self.assertNotIn("512890.SH", payload["targets"])
-        self.assertAlmostEqual(payload["targets"]["H20269.CSI"], 0.08)
-        self.assertAlmostEqual(payload["targets"]["REPO"], 0.5)
+        self.assertAlmostEqual(payload["targets"]["H20269.CSI"], 0.25)
+        self.assertAlmostEqual(payload["targets"]["REPO"], 0.25)
 
     def test_start_before_repo_data_keeps_cash_until_first_real_repo_rate(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
@@ -562,6 +838,27 @@ class BacktestEngineTests(unittest.TestCase):
         _mature_repo_lots(state, lot.maturity_date)
         self.assertAlmostEqual(state.cash_cny, maturity_value)
         self.assertAlmostEqual(state.total_fees_cny, lot.fee)
+
+    def test_repo_benchmark_return_includes_first_reference_day(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        cfg["monthly_spend_cny"] = 0.0
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE repo_rates SET open_rate=3.65,close_rate=3.65,high_rate=3.65,low_rate=3.65")
+            result = run_backtest(conn, cfg)
+            dates = [
+                date.fromisoformat(row["trade_date"])
+                for row in conn.execute(
+                    "SELECT trade_date FROM portfolio_daily WHERE run_id=? ORDER BY trade_date",
+                    (result["run_id"],),
+                )
+            ]
+
+        nav = 1.0
+        for trade_day in dates:
+            nav *= 1.0 + 0.0365 * repo_actual_days(trade_day, 1) / 365.0
+        years = max((dates[-1] - dates[0]).days / 365.25, 1 / 365.25)
+        expected_annualized = nav ** (1.0 / years) - 1.0
+        self.assertAlmostEqual(result["summary"]["repo_annualized_return"], expected_annualized)
 
     def test_long_tenor_repo_stays_liquid_for_upcoming_rebalance(self) -> None:
         cfg = normalize_config({})
@@ -783,6 +1080,9 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_us_dividends_create_withheld_tax(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        voo = next(asset for asset in cfg["assets"] if asset["symbol"] == "VOO")
+        voo["enabled"] = True
+        voo["target_weight"] = 0.20
         with db_session(db_path) as conn:
             result = run_backtest(conn, cfg)
         self.assertGreater(result["summary"]["withheld_tax_cny"], 0)
@@ -873,16 +1173,16 @@ class BacktestEngineTests(unittest.TestCase):
         cfg = normalize_config({})
         assets = comparison_assets(cfg)
         weights = {asset["symbol"]: asset["target_weight"] for asset in assets}
-        self.assertAlmostEqual(weights["510300.SH"], 0.40)
+        self.assertAlmostEqual(weights["510300.SH"], 0.25)
 
-        self.assertAlmostEqual(weights["518880.SH"], 0.10)
+        self.assertAlmostEqual(weights["518880.SH"], 0.25)
         next(asset for asset in cfg["assets"] if asset["symbol"] == "VOO")["enabled"] = False
         cn_sp500 = next(asset for asset in cfg["assets"] if asset["symbol"] == "513500.SH")
         cn_sp500["enabled"] = True
         cn_sp500["target_weight"] = 0.20
         assets = comparison_assets(cfg)
         weights = {asset["symbol"]: asset["target_weight"] for asset in assets}
-        self.assertAlmostEqual(weights["510300.SH"], 0.40)
+        self.assertAlmostEqual(weights["510300.SH"], 0.45)
 
         a100 = next(asset for asset in cfg["assets"] if asset["symbol"] == "159631.SZ")
         hs300 = next(asset for asset in cfg["assets"] if asset["symbol"] == "510300.SH")
@@ -892,7 +1192,7 @@ class BacktestEngineTests(unittest.TestCase):
         assets = comparison_assets(cfg)
         weights = {asset["symbol"]: asset["target_weight"] for asset in assets}
         self.assertNotIn("510300.SH", weights)
-        self.assertAlmostEqual(weights["159631.SZ"], 0.40)
+        self.assertAlmostEqual(weights["159631.SZ"], 0.57)
 
     def test_benchmark_forward_fill_and_rebalance_band(self) -> None:
         self.assertAlmostEqual(benchmark_returns([None, 100, None, 110])[-1], 0.1)
@@ -917,6 +1217,9 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_effective_weights_respect_price_and_inception(self) -> None:
         cfg = normalize_config({"start_date": "2012-01-01"})
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] in {"VOO", "510300.SH"}
+            asset["target_weight"] = 0.20 if asset["symbol"] == "VOO" else (0.12 if asset["symbol"] == "510300.SH" else 0.0)
         weights = effective_weights(cfg, __import__("datetime").date(2012, 1, 3), {"VOO": 1, "510300.SH": None})
         self.assertIn("VOO", weights)
         self.assertNotIn("510300.SH", weights)
@@ -924,6 +1227,9 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_effective_weights_use_configured_price_proxy_before_primary_inception(self) -> None:
         cfg = normalize_config({"start_date": "2012-01-01"})
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] in {"510300.SH", "518880.SH"}
+            asset["target_weight"] = 0.25 if asset["enabled"] else 0.0
         weights = effective_weights(
             cfg,
             date(2012, 1, 3),

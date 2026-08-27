@@ -4,10 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260825-dividend-explainer-2" />
-    <script src="static/echarts.min.js?v=5.6.0"></script>
+    <link rel="stylesheet" href="static/styles.css?v=20260827-dip-buy-3" />
   </head>
-  <body>
+  <body class="history-collapsed">
     <header class="mobile-app-bar">
       <div>
         <strong>永久投资策略</strong>
@@ -115,8 +114,40 @@
             </label>
             <label class="strategy-toggle">
               <input id="dipBuyEnabled" type="checkbox" />
-              <span><strong>逢跌补仓</strong><small>宽基/黄金从最近局部高点回撤 5% 时，下一交易日用可用现金的 5% 买入</small></span>
+              <span><strong>逢低补仓</strong><small id="dipBuyAvailabilityHint">仅年度再平衡生效。现金等价物超过剩余生活费安全垫后，宽基/低波红利/黄金/国债低于成本价达到阈值时，于下一交易日开盘补仓。</small></span>
             </label>
+            <div id="dipBuySettings" class="dip-buy-settings">
+              <label class="range-field">
+                <span>相对成本价下跌 Q <strong id="dipBuyDrawdownValue"></strong></span>
+                <input id="dipBuyDrawdown" type="range" min="0.01" max="0.30" step="0.01" />
+                <small class="field-help">仅用当日收盘价判断；成交使用下一交易日开盘价，避免未来函数。</small>
+              </label>
+              <div class="field-row">
+                <label>
+                  B 平均分为 N 份
+                  <input id="dipBuyTotalParts" type="number" min="1" step="1" inputmode="numeric" />
+                </label>
+                <label>
+                  每次补仓 P 份
+                  <input id="dipBuyPartsPerTrigger" type="number" min="1" step="1" inputmode="numeric" />
+                </label>
+              </div>
+              <div class="field-row">
+                <label>
+                  同一资产冷却期（交易日）
+                  <input id="dipBuyCooldownTradingDays" type="number" min="0" max="252" step="1" inputmode="numeric" />
+                </label>
+                <label>
+                  静默期（月）
+                  <input id="dipBuyBlackoutMonths" type="number" min="0" max="11" step="1" inputmode="numeric" />
+                </label>
+              </div>
+              <label class="strategy-toggle strategy-toggle-compact">
+                <input id="dipBuyBlackoutEnabled" type="checkbox" />
+                <span><strong>再平衡前进入静默期</strong><small>年度再平衡前 N 个自然月不再触发补仓，跨入静默期的待成交单会取消。</small></span>
+              </label>
+              <small class="field-help">生活费安全垫：每次再平衡按 24 个月预留；当月生活费支付后账面剩余 23 个月，之后逐月降至 12 个月保险金，下一次再平衡刷新。超出部分记为 B。</small>
+            </div>
           </section>
 
           <section class="control-section">
@@ -166,6 +197,10 @@
                 <h2 id="assetWeightTitle">资产配置</h2>
                 <p>可同时配置 5 年、7-10 年与 30 年国债指数，并调整各自比例</p>
               </div>
+            </div>
+            <div class="default-allocation-preset">
+              <div><strong>默认稳健组合</strong><span>低波红利 25% · 30年国债 25% · 黄金 25% · 现金 25%</span></div>
+              <button id="restoreDefaultAllocation" type="button">恢复默认</button>
             </div>
             <div id="allocationSummary" class="allocation-summary"></div>
             <div id="assetControls" class="asset-controls"></div>
@@ -218,7 +253,7 @@
             <p>先看收益和回撤，再深入检查资产走势与交易记录</p>
           </div>
           <div class="workspace-actions">
-            <button id="historyToggle" class="button button-secondary" type="button" aria-controls="historyPanel" aria-expanded="true">回测记录</button>
+            <button id="historyToggle" class="button button-secondary" type="button" aria-controls="historyPanel" aria-expanded="false">回测记录</button>
             <button id="parameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">调整参数</button>
           </div>
         </header>
@@ -354,6 +389,6 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260825-dividend-explainer-2"></script>
+  <script src="static/app.js?v=20260827-dip-buy-3"></script>
   </body>
 </html>

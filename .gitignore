@@ -2,6 +2,8 @@
 data/*.sqlite3
 data/*.sqlite3-*
 data/*.sqlite3.bak_*
+logs/
+tmp-*.png
 __pycache__/
 *.pyc
 .venv/

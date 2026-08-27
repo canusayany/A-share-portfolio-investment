@@ -1,4 +1,5 @@
 let config = null;
+let defaultConfigSnapshot = null;
 let currentRunId = null;
 let runHistory = [];
 let leaderboardHistory = [];
@@ -29,6 +30,22 @@ const MAX_LEADERBOARD_RUNS = 100;
 const API_REQUEST_TIMEOUT_MS = 15000;
 const API_HEALTH_TIMEOUT_MS = 5000;
 let apiRecoveryPromise = null;
+let controlsEventController = null;
+let chartLibraryPromise = null;
+
+function loadChartLibrary() {
+  if (window.echarts) return Promise.resolve(window.echarts);
+  if (chartLibraryPromise) return chartLibraryPromise;
+  chartLibraryPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `${APP_BASE_PATH}/static/echarts.min.js?v=5.6.0`;
+    script.async = true;
+    script.onload = () => resolve(window.echarts);
+    script.onerror = () => reject(new Error("图表组件加载失败"));
+    document.head.appendChild(script);
+  });
+  return chartLibraryPromise;
+}
 
 const $ = (id) => document.getElementById(id);
 const fmtMoney = (v) => Number(v || 0).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
@@ -136,7 +153,7 @@ const DATA_KIND_NAMES = {
 };
 
 const SIDE_NAMES = { BUY: "买入", SELL: "卖出" };
-const REASON_NAMES = { rebalance: "再平衡", liquidity_shortfall: "补足现金", dip_buy: "逢跌补仓" };
+const REASON_NAMES = { rebalance: "再平衡", liquidity_shortfall: "补足现金", dip_buy: "逢低补仓", dip_buy_funding: "补仓资金" };
 const CURRENCY_NAMES = { CNY: "人民币", USD: "美元", HKD: "港币" };
 const REBALANCE_FREQUENCY_NAMES = {
   daily: "每日",
@@ -571,6 +588,12 @@ function readConfig() {
   next.repo_fixed_target_ratio = Number($("repoFixedRatio").value);
   next.repo_symbol = $("repoSymbol").value;
   next.dip_buy_enabled = $("dipBuyEnabled").checked;
+  next.dip_buy_drawdown = Number($("dipBuyDrawdown").value);
+  next.dip_buy_total_parts = Number($("dipBuyTotalParts").value);
+  next.dip_buy_parts_per_trigger = Number($("dipBuyPartsPerTrigger").value);
+  next.dip_buy_cooldown_trading_days = Number($("dipBuyCooldownTradingDays").value);
+  next.dip_buy_blackout_enabled = $("dipBuyBlackoutEnabled").checked;
+  next.dip_buy_blackout_months = Number($("dipBuyBlackoutMonths").value);
   next.assets = next.assets.map((asset) => {
     if (isSp500Asset(asset)) {
       const selected = asset.key === sp500SelectedKey;
@@ -603,6 +626,14 @@ function readConfig() {
   next.fees.hk_connect_etf.portfolio_fee_annual_rate = Number($("hkPortfolioFee").value);
   next.fees.tax.us_dividend_withholding_rate = Number($("usDividendTax").value);
   return next;
+}
+
+function compactConfigForRequest(fullConfig) {
+  const { repo_options: _repoOptions, ...requestConfig } = fullConfig;
+  return {
+    ...requestConfig,
+    assets: fullConfig.assets.map(({ key, enabled, target_weight }) => ({ key, enabled, target_weight })),
+  };
 }
 
 function repoModeLabel(mode) {
@@ -657,6 +688,7 @@ function setAssetWeightDisplay(key, weight, mode, enabled, effectiveWeight) {
   const label = $(`weight_label_${key}`);
   const effective = $(`effective_${key}`);
   if (!effective) return;
+  $(`enabled_${key}`)?.closest(".asset-control")?.classList.toggle("is-disabled", !enabled);
   if (mode === "fixed_bucket") {
     if (label) label.textContent = enabled ? fmtPct(effectiveWeight) : "0.00%";
     effective.hidden = false;
@@ -736,7 +768,11 @@ function renderControlSummary(plan) {
     ["容忍带", fmtPct($("rebalanceBand")?.value || config.rebalance_band)],
     ["现金方式", selectedTreasuryOption()?.name || assetName(config.repo_symbol)],
     ["现金模式", repoModeLabel(plan.mode)],
-    ["逢跌补仓", $("dipBuyEnabled")?.checked ? "开启（局部回撤 5%，现金 5%）" : "关闭"],
+    ["逢低补仓", $("dipBuyEnabled")?.checked
+      ? ($("rebalanceFrequency")?.value === "yearly"
+        ? `开启（跌 ${fmtPct(Number($("dipBuyDrawdown")?.value || config.dip_buy_drawdown || 0.05))}，冷却 ${Number($("dipBuyCooldownTradingDays")?.value || 0)} 个交易日${$("dipBuyBlackoutEnabled")?.checked ? `，再平衡前 ${Number($("dipBuyBlackoutMonths")?.value || 0)} 个月静默` : ""}）`
+        : "不生效（仅年度再平衡）")
+      : "关闭"],
     ["月消费", `￥${fmtMoney(monthlySpend)}`],
   ];
   host.innerHTML = `
@@ -815,9 +851,21 @@ function applyDatePreset(value) {
 
 function updateRepoWeight() {
   const yearly = $("rebalanceFrequency")?.value === "yearly";
+  const dipBuyEnabled = yearly && Boolean($("dipBuyEnabled")?.checked);
   if ($("annualRebalanceMonthField")) $("annualRebalanceMonthField").hidden = !yearly;
   if ($("rebalanceMonthAnalysisField")) $("rebalanceMonthAnalysisField").hidden = !yearly;
   if ($("rebalanceMonthAnalysisEnabled")) $("rebalanceMonthAnalysisEnabled").disabled = !yearly;
+  if ($("dipBuyEnabled")) $("dipBuyEnabled").disabled = !yearly;
+  ["dipBuyDrawdown", "dipBuyTotalParts", "dipBuyPartsPerTrigger", "dipBuyCooldownTradingDays", "dipBuyBlackoutEnabled"].forEach((id) => {
+    if ($(id)) $(id).disabled = !dipBuyEnabled;
+  });
+  if ($("dipBuyBlackoutMonths")) $("dipBuyBlackoutMonths").disabled = !dipBuyEnabled || !$("dipBuyBlackoutEnabled")?.checked;
+  if ($("dipBuySettings")) $("dipBuySettings").hidden = !dipBuyEnabled;
+  if ($("dipBuyAvailabilityHint")) {
+    $("dipBuyAvailabilityHint").textContent = yearly
+      ? "仅年度再平衡生效。现金等价物超过剩余生活费安全垫后，宽基/低波红利/黄金/国债低于成本价达到阈值时，于下一交易日开盘补仓。"
+      : "当前再平衡频率不是每年，逢低补仓不会生效。";
+  }
   if ($("enabled_sp500_group")) {
     updateSp500Route();
   }
@@ -831,6 +879,7 @@ function updateRepoWeight() {
   const fixedControls = $("repoFixedControls");
   if (fixedControls) fixedControls.hidden = mode !== "fixed_bucket";
   if ($("repoFixedRatioValue")) $("repoFixedRatioValue").textContent = fmtPct(Number($("repoFixedRatio")?.value || 0));
+  if ($("dipBuyDrawdownValue")) $("dipBuyDrawdownValue").textContent = fmtPct(Number($("dipBuyDrawdown")?.value || 0));
   const plan = currentRepoPlan(mode, enabledWeight);
   updateTreasuryHint();
   syncRepoModeTabs();
@@ -868,7 +917,49 @@ function updateBroadEtfRoute() {
     .join("");
 }
 
+function bindAssetWeightInputs(row, key) {
+  const range = row.querySelector(`#weight_${key}`);
+  const percent = row.querySelector(`#weight_percent_${key}`);
+  if (!range || !percent) return;
+  range.addEventListener("input", () => {
+    percent.value = String(Math.round(Number(range.value || 0) * 10000) / 100);
+    updateRepoWeight();
+  });
+  percent.addEventListener("input", () => {
+    const normalized = Math.min(Math.max(Number(percent.value || 0), 0), 80) / 100;
+    range.value = String(normalized);
+    updateRepoWeight();
+  });
+}
+
+function restoreDefaultAllocation() {
+  const defaults = defaultConfigSnapshot?.assets || [];
+  const sp500Default = defaults.find(isSp500Asset);
+  const broadDefault = defaults.find(isBroadEtfAsset);
+  if ($("sp500Type") && sp500Default) $("sp500Type").value = sp500Default.key;
+  if ($(`enabled_${SP500_CONTROL_KEY}`)) $(`enabled_${SP500_CONTROL_KEY}`).checked = false;
+  if ($(`weight_${SP500_CONTROL_KEY}`)) $(`weight_${SP500_CONTROL_KEY}`).value = "0";
+  if ($(`weight_percent_${SP500_CONTROL_KEY}`)) $(`weight_percent_${SP500_CONTROL_KEY}`).value = "0";
+  if ($("broadEtfType") && broadDefault) $("broadEtfType").value = broadDefault.key;
+  if ($(`enabled_${BROAD_ETF_CONTROL_KEY}`)) $(`enabled_${BROAD_ETF_CONTROL_KEY}`).checked = false;
+  if ($(`weight_${BROAD_ETF_CONTROL_KEY}`)) $(`weight_${BROAD_ETF_CONTROL_KEY}`).value = "0";
+  if ($(`weight_percent_${BROAD_ETF_CONTROL_KEY}`)) $(`weight_percent_${BROAD_ETF_CONTROL_KEY}`).value = "0";
+  for (const asset of defaults.filter((item) => !isSp500Asset(item) && !isBroadEtfAsset(item))) {
+    const enabled = $(`enabled_${asset.key}`);
+    const range = $(`weight_${asset.key}`);
+    const percent = $(`weight_percent_${asset.key}`);
+    if (enabled) enabled.checked = Boolean(asset.enabled);
+    if (range) range.value = String(asset.target_weight || 0);
+    if (percent) percent.value = String(Number(asset.target_weight || 0) * 100);
+  }
+  updateRepoWeight();
+  setMessage("已恢复默认稳健组合：低波红利、30年国债、黄金各 25%，现金 25%");
+}
+
 function renderControls() {
+  controlsEventController?.abort();
+  controlsEventController = new AbortController();
+  const listenerOptions = { signal: controlsEventController.signal };
   $("initialCapital").value = config.initial_capital_cny;
   $("startDate").value = config.start_date;
   $("endDate").value = config.end_date;
@@ -884,9 +975,16 @@ function renderControls() {
   $("repoFixedRatio").value = config.repo_fixed_target_ratio ?? 0;
   $("repoFixedRatioValue").textContent = fmtPct(config.repo_fixed_target_ratio ?? 0);
   $("dipBuyEnabled").checked = Boolean(config.dip_buy_enabled);
+  $("dipBuyDrawdown").value = config.dip_buy_drawdown ?? 0.05;
+  $("dipBuyDrawdownValue").textContent = fmtPct(config.dip_buy_drawdown ?? 0.05);
+  $("dipBuyTotalParts").value = config.dip_buy_total_parts ?? 10;
+  $("dipBuyPartsPerTrigger").value = config.dip_buy_parts_per_trigger ?? 1;
+  $("dipBuyCooldownTradingDays").value = config.dip_buy_cooldown_trading_days ?? 10;
+  $("dipBuyBlackoutEnabled").checked = config.dip_buy_blackout_enabled ?? true;
+  $("dipBuyBlackoutMonths").value = config.dip_buy_blackout_months ?? 1;
   $("repoSymbol").innerHTML = (config.repo_options || []).map((option) => `<option value="${option.symbol}">${option.name}</option>`).join("");
   $("repoSymbol").value = config.repo_symbol;
-  $("repoSymbol").addEventListener("change", updateRepoWeight);
+  $("repoSymbol").addEventListener("change", updateRepoWeight, listenerOptions);
   $("cnCommission").value = config.fees.cn_etf.commission_rate;
   $("ibkrPlan").value = config.fees.ibkr_us_etf.plan;
   $("fxOutBps").value = config.fees.fx.bank_out_spread_bps;
@@ -896,23 +994,24 @@ function renderControls() {
   $("hkPortfolioFee").value = config.fees.hk_connect_etf.portfolio_fee_annual_rate;
   $("usDividendTax").value = config.fees.tax.us_dividend_withholding_rate;
   ["cnCommission", "fxOutBps", "fxInBps", "hkCommission", "hkFxBps", "hkPortfolioFee", "usDividendTax"].forEach((id) => {
-    $(id).addEventListener("input", renderFeeSummary);
+    $(id).addEventListener("input", renderFeeSummary, listenerOptions);
   });
-  $("ibkrPlan").addEventListener("change", renderFeeSummary);
-  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled"].forEach((id) => {
-    $(id).addEventListener(id === "rebalanceFrequency" || id === "repoTargetMode" ? "change" : "input", updateRepoWeight);
+  $("ibkrPlan").addEventListener("change", renderFeeSummary, listenerOptions);
+  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled", "dipBuyDrawdown", "dipBuyTotalParts", "dipBuyPartsPerTrigger", "dipBuyCooldownTradingDays", "dipBuyBlackoutEnabled", "dipBuyBlackoutMonths"].forEach((id) => {
+    $(id).addEventListener(id === "rebalanceFrequency" || id === "repoTargetMode" ? "change" : "input", updateRepoWeight, listenerOptions);
   });
   document.querySelectorAll("[data-repo-mode]").forEach((button) => {
-    button.addEventListener("click", () => selectRepoMode(button.dataset.repoMode));
+    button.addEventListener("click", () => selectRepoMode(button.dataset.repoMode), listenerOptions);
   });
   document.querySelectorAll("[data-date-preset]").forEach((button) => {
-    button.addEventListener("click", () => applyDatePreset(button.dataset.datePreset));
+    button.addEventListener("click", () => applyDatePreset(button.dataset.datePreset), listenerOptions);
   });
   ["startDate", "endDate"].forEach((id) => {
     $(id).addEventListener("input", () => {
       document.querySelectorAll("[data-date-preset]").forEach((button) => button.classList.remove("active"));
-    });
+    }, listenerOptions);
   });
+  $("restoreDefaultAllocation")?.addEventListener("click", restoreDefaultAllocation, listenerOptions);
 
   const host = $("assetControls");
   host.innerHTML = "";
@@ -924,6 +1023,7 @@ function renderControls() {
     row.innerHTML = `
       <input id="enabled_${asset.key}" type="checkbox" aria-label="启用${assetName(asset.symbol)}" ${asset.enabled ? "checked" : ""} />
       <input id="weight_${asset.key}" type="range" min="0" max="0.8" step="0.01" value="${asset.target_weight}" aria-label="${assetName(asset.symbol)}目标权重" />
+      <label class="asset-percent"><input id="weight_percent_${asset.key}" type="number" min="0" max="80" step="1" value="${Number(asset.target_weight || 0) * 100}" /><span>%</span></label>
       <strong id="weight_label_${asset.key}">${fmtPct(asset.target_weight)}</strong>
       <div class="asset-name">
         <span class="asset-title">${assetName(asset.symbol)}</span>
@@ -932,14 +1032,12 @@ function renderControls() {
     `;
     host.appendChild(row);
     row.querySelector(`#enabled_${asset.key}`).addEventListener("change", updateRepoWeight);
-    row.querySelector(`#weight_${asset.key}`).addEventListener("input", (event) => {
-      updateRepoWeight();
-    });
+    bindAssetWeightInputs(row, asset.key);
   }
   $("rebalanceBand").addEventListener("input", () => {
     $("bandValue").textContent = fmtPct($("rebalanceBand").value);
     updateRepoWeight();
-  });
+  }, listenerOptions);
   updateRepoWeight();
   renderFeeSummary();
 }
@@ -955,6 +1053,7 @@ function renderBroadEtfControl(host) {
   row.innerHTML = `
     <input id="enabled_${BROAD_ETF_CONTROL_KEY}" type="checkbox" aria-label="启用宽基ETF" ${enabled ? "checked" : ""} />
     <input id="weight_${BROAD_ETF_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="宽基ETF目标权重" />
+    <label class="asset-percent"><input id="weight_percent_${BROAD_ETF_CONTROL_KEY}" type="number" min="0" max="80" step="1" value="${Number(weight || 0) * 100}" /><span>%</span></label>
     <strong id="weight_label_${BROAD_ETF_CONTROL_KEY}">${fmtPct(weight)}</strong>
     <div class="asset-name">
       <span class="asset-title">宽基 ETF</span>
@@ -970,7 +1069,7 @@ function renderBroadEtfControl(host) {
   `;
   host.appendChild(row);
   row.querySelector(`#enabled_${BROAD_ETF_CONTROL_KEY}`).addEventListener("change", updateRepoWeight);
-  row.querySelector(`#weight_${BROAD_ETF_CONTROL_KEY}`).addEventListener("input", updateRepoWeight);
+  bindAssetWeightInputs(row, BROAD_ETF_CONTROL_KEY);
   row.querySelector("#broadEtfType").addEventListener("change", updateRepoWeight);
   updateBroadEtfRoute();
 }
@@ -986,6 +1085,7 @@ function renderSp500Control(host) {
   row.innerHTML = `
     <input id="enabled_${SP500_CONTROL_KEY}" type="checkbox" aria-label="启用标普500" ${enabled ? "checked" : ""} />
     <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="标普500目标权重" />
+    <label class="asset-percent"><input id="weight_percent_${SP500_CONTROL_KEY}" type="number" min="0" max="80" step="1" value="${Number(weight || 0) * 100}" /><span>%</span></label>
     <strong id="weight_label_${SP500_CONTROL_KEY}">${fmtPct(weight)}</strong>
     <div class="asset-name">
       <span class="asset-title">标普500</span>
@@ -1001,9 +1101,7 @@ function renderSp500Control(host) {
   `;
   host.appendChild(row);
   row.querySelector(`#enabled_${SP500_CONTROL_KEY}`).addEventListener("change", updateRepoWeight);
-  row.querySelector(`#weight_${SP500_CONTROL_KEY}`).addEventListener("input", (event) => {
-    updateRepoWeight();
-  });
+  bindAssetWeightInputs(row, SP500_CONTROL_KEY);
   row.querySelector("#sp500Type").addEventListener("change", updateRepoWeight);
   updateSp500Route();
 }
@@ -1798,13 +1896,15 @@ async function waitForBacktestJob(jobId) {
   }
 }
 
-async function loadBacktestResultSections(runId, onSeries) {
+async function loadBacktestResultSections(runId, onSeries, prefetchedChart = null) {
   setMessage("计算完成，正在生成图表...");
-  const seriesPromise = api(`/api/backtest/${runId}/chart-series`, { attempts: 6, retryDelayMs: 700 });
+  const seriesPromise = prefetchedChart
+    ? Promise.resolve({ chart: prefetchedChart })
+    : api(`/api/backtest/${runId}/chart-series`, { attempts: 6, retryDelayMs: 700 });
   const rebalancePromise = api(`/api/backtest/${runId}/rebalance`, { attempts: 5, retryDelayMs: 700 });
   const tradesPromise = api(`/api/backtest/${runId}/trades`, { attempts: 5, retryDelayMs: 700 });
   const series = computeSeriesMetrics(expandChartSeries(await seriesPromise));
-  onSeries?.(series);
+  await onSeries?.(series);
   setMessage("图表已显示，正在加载调仓与交易记录...");
   const [rebalance, trades] = await Promise.all([rebalancePromise, tradesPromise]);
   return { series, rebalance, trades };
@@ -2178,12 +2278,14 @@ async function deleteHistoryRun(runId) {
 async function replayHistoryRun(runId) {
   setMessage("正在回放已保存的回测结果...");
   try {
+    const chartReady = loadChartLibrary().catch((error) => console.warn(error));
     const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`);
     config = JSON.parse(JSON.stringify(entry.config));
     renderControls();
     currentRunId = entry.run_id;
     renderSummary(entry.summary);
-    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, (series) => {
+    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, async (series) => {
+      await chartReady;
       renderSummary(deriveSummary(entry.summary, series));
       renderCharts(series);
     });
@@ -2208,11 +2310,10 @@ async function runBacktest() {
   button.classList.add("is-running");
   if (buttonLabel) buttonLabel.textContent = "正在回测";
   if (window.matchMedia("(max-width: 900px)").matches) setParameterPanel(false);
-  setMessage("正在检查服务器连接...");
+  setMessage("正在提交回测任务...");
   try {
-    const submittedConfig = readConfig();
-    await ensureApiConnection();
-    setMessage("服务器连接正常，正在提交回测任务...");
+    const submittedConfig = compactConfigForRequest(readConfig());
+    const chartReady = loadChartLibrary().catch((error) => console.warn(error));
     const job = await api("/api/backtest/start", {
       method: "POST",
       body: JSON.stringify({ config: submittedConfig, client_request_id: createClientRequestId() }),
@@ -2226,11 +2327,12 @@ async function runBacktest() {
     if (result.status) renderStatus(result.status);
     renderSummary(result.summary);
     let finalSummary = result.summary;
-    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, (computedSeries) => {
+    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, async (computedSeries) => {
+      await chartReady;
       finalSummary = deriveSummary(result.summary, computedSeries);
       renderSummary(finalSummary);
       renderCharts(computedSeries);
-    });
+    }, result.chart || null);
     renderBacktestRecords(finalSummary, rebalance, trades);
     scheduleArchiveRefresh({ includeLeaderboard: false });
     const analysisPending = Boolean(result.analysis_pending) || ["pending", "running"].includes(result.summary?.analysis_status);
@@ -2354,14 +2456,15 @@ async function init() {
   renderTable("rebalanceTable", [], []);
   renderTable("tradesTable", [], []);
   config = await api("/api/default-config");
+  defaultConfigSnapshot = JSON.parse(JSON.stringify(config));
   renderControls();
   $("runBtn").addEventListener("click", runBacktest);
+  $("runBtn").addEventListener("pointerenter", () => loadChartLibrary().catch(() => {}), { once: true });
   window.addEventListener("resize", queueChartResize);
   window.addEventListener("online", scheduleBackgroundApiRecovery);
   window.addEventListener("pageshow", scheduleBackgroundApiRecovery);
   document.addEventListener("visibilitychange", scheduleBackgroundApiRecovery);
   setMessage("准备就绪，可以运行回测");
-  scheduleArchiveRefresh({ includeLeaderboard: false });
   try {
     await loadStatus();
   } catch (error) {

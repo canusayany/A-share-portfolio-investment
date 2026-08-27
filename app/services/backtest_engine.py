@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 import calendar
@@ -48,12 +48,15 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 29
+BACKTEST_ENGINE_VERSION = 31
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
 RANKING_EXCESS_RETURN_CAP = 0.15
 RANKING_CALMAR_CAP = 1.5
+DIP_BUY_CASH_BUFFER_MONTHS = 24
+DIP_BUY_INSURANCE_MONTHS = 12
+_MONEY_FUND_UNSET = object()
 
 
 @dataclass
@@ -147,14 +150,15 @@ def load_price_map(
         raise ValueError("price field must be open or close")
     result: dict[str, dict[str, float]] = {}
     for symbol in symbols:
+        non_null_price = f" AND prices.{field} IS NOT NULL"
         rows = conn.execute(
             f"""
-            SELECT prices.trade_date, COALESCE(prices.{field}, prices.close) AS price,
+            SELECT prices.trade_date, prices.{field} AS price,
                    adj_factors.adj_factor
             FROM prices
             LEFT JOIN adj_factors
               ON adj_factors.symbol=prices.symbol AND adj_factors.trade_date=prices.trade_date
-            WHERE prices.symbol=? AND prices.trade_date BETWEEN ? AND ?
+            WHERE prices.symbol=? AND prices.trade_date BETWEEN ? AND ?{non_null_price}
             ORDER BY prices.trade_date
             """,
             (symbol, start, end),
@@ -490,43 +494,71 @@ def position_lot_size(position: Position, fees: dict[str, Any]) -> int:
     return 1
 
 
-def active_assets(config: dict[str, Any], day: date, latest_prices: dict[str, float | None]) -> list[dict[str, Any]]:
-    result = []
+def prepare_active_asset_routes(
+    config: dict[str, Any],
+) -> list[tuple[dict[str, Any], list[tuple[date, dict[str, Any]]], dict[str, Any] | None, date | None]]:
+    """Pre-parse stable route dates once instead of rebuilding them every day."""
+    routes = []
     for asset in config["assets"]:
         if not asset.get("enabled", True):
             continue
-        candidates = replacement_assets(asset) + [asset]
-        candidates.sort(
-            key=lambda item: parse_date(
-                item.get("allocation_start_date") or item.get("trade_start_date") or item.get("inception_date") or config["start_date"]
-            ),
-            reverse=True,
-        )
-        selected = next(
+        candidates = [
             (
-                candidate
-                for candidate in candidates
-                if day
-                >= parse_date(
+                parse_date(
                     candidate.get("allocation_start_date")
                     or candidate.get("trade_start_date")
                     or candidate.get("inception_date")
                     or config["start_date"]
-                )
-                and latest_prices.get(candidate["symbol"]) is not None
+                ),
+                candidate,
+            )
+            for candidate in replacement_assets(asset) + [asset]
+        ]
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        proxy = price_proxy_asset(asset)
+        proxy_start = parse_date(proxy.get("inception_date") or config["start_date"]) if proxy else None
+        routes.append((asset, candidates, proxy, proxy_start))
+    return routes
+
+
+def active_assets(
+    config: dict[str, Any],
+    day: date,
+    latest_prices: dict[str, float | None],
+    prepared_routes: list[tuple[dict[str, Any], list[tuple[date, dict[str, Any]]], dict[str, Any] | None, date | None]] | None = None,
+) -> list[dict[str, Any]]:
+    result = []
+    for asset, candidates, proxy, proxy_start in prepared_routes or prepare_active_asset_routes(config):
+        selected = next(
+            (
+                candidate
+                for start_day, candidate in candidates
+                if day >= start_day and latest_prices.get(candidate["symbol"]) is not None
             ),
             None,
         )
         if selected:
             result.append(selected)
             continue
-        proxy = price_proxy_asset(asset)
         if not proxy:
             continue
-        proxy_start = parse_date(proxy.get("inception_date") or config["start_date"])
-        if day >= proxy_start and latest_prices.get(proxy["symbol"]) is not None:
+        if proxy_start is not None and day >= proxy_start and latest_prices.get(proxy["symbol"]) is not None:
             result.append(proxy)
     return result
+
+
+def scheduled_target_price_view(
+    latest_prices: dict[str, float | None],
+    execution_day: date,
+    prepared_routes: list[tuple[dict[str, Any], list[tuple[date, dict[str, Any]]], dict[str, Any] | None, date | None]],
+) -> dict[str, float | None]:
+    """Expose known replacement routes without reading their future open price."""
+    price_view = dict(latest_prices)
+    for _asset, candidates, _proxy, _proxy_start in prepared_routes:
+        for start_day, candidate in candidates:
+            if start_day <= execution_day and candidate.get("replacement_for") and price_view.get(candidate["symbol"]) is None:
+                price_view[candidate["symbol"]] = 1.0
+    return price_view
 
 
 def repo_fixed_target_weight(config: dict[str, Any], total_value_cny: float | None) -> float:
@@ -543,9 +575,12 @@ def effective_weights(
     day: date,
     latest_prices: dict[str, float | None],
     total_value_cny: float | None = None,
+    *,
+    prepared_routes: list[tuple[dict[str, Any], list[tuple[date, dict[str, Any]]], dict[str, Any] | None, date | None]] | None = None,
+    money_fund_asset: dict[str, Any] | None | object = _MONEY_FUND_UNSET,
 ) -> dict[str, float]:
     weights: dict[str, float] = {}
-    assets = active_assets(config, day, latest_prices)
+    assets = active_assets(config, day, latest_prices, prepared_routes)
     if config.get("repo_target_mode", "residual_weight") == "fixed_bucket":
         repo_weight = repo_fixed_target_weight(config, total_value_cny)
         remaining_weight = max(1.0 - repo_weight, 0.0)
@@ -569,7 +604,7 @@ def effective_weights(
             weights[asset["symbol"]] = weight
             total_risk += weight
         weights["REPO"] = max(1.0 - total_risk, 0.0)
-    money_fund = selected_money_fund_asset(config)
+    money_fund = selected_money_fund_asset(config) if money_fund_asset is _MONEY_FUND_UNSET else money_fund_asset
     if money_fund:
         repo_weight = weights.pop("REPO", 0.0)
         fund_symbol = money_fund["symbol"]
@@ -607,14 +642,60 @@ def has_investable_asset_target(targets: dict[str, float]) -> bool:
     return any(key != "REPO" and value > 1e-10 for key, value in targets.items())
 
 
-def dip_buy_assets(config: dict[str, Any], day: date, latest_prices: dict[str, float | None]) -> list[dict[str, Any]]:
-    """Return the tradable broad-index and gold ETF route for this date."""
+def dip_buy_assets(
+    config: dict[str, Any],
+    day: date,
+    latest_prices: dict[str, float | None],
+    prepared_routes: list[tuple[dict[str, Any], list[tuple[date, dict[str, Any]]], dict[str, Any] | None, date | None]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return eligible broad, low-vol dividend, gold, and treasury routes."""
     return [
         asset
-        for asset in active_assets(config, day, latest_prices)
+        for asset in active_assets(config, day, latest_prices, prepared_routes)
         if asset.get("exclusive_group") == "cn_broad_etf"
+        or str(asset.get("key") or "").startswith("cn_dividend_low_vol")
         or str(asset.get("key") or "").startswith("cn_gold_etf")
+        or asset.get("asset_type") == "cn_bond_index"
     ]
+
+
+def elapsed_rebalance_months(rebalance_day: date, day: date) -> int:
+    """Return elapsed calendar months, keeping the rebalance month as month 0."""
+    return max((day.year - rebalance_day.year) * 12 + day.month - rebalance_day.month, 0)
+
+
+def dip_buy_cash_buffer_cny(monthly_spend_cny: float, rebalance_day: date, day: date) -> float:
+    # The engine deducts the current month's living expense before evaluating
+    # dip buys. A fresh 24-month pre-spend reserve is therefore 23 months on
+    # the post-spend ledger, then declines monthly to the 12-month insurance
+    # floor until the next (at most annual) rebalance refreshes the cycle.
+    remaining_months = max(
+        DIP_BUY_CASH_BUFFER_MONTHS - elapsed_rebalance_months(rebalance_day, day) - 1,
+        DIP_BUY_INSURANCE_MONTHS,
+    )
+    return remaining_months * max(float(monthly_spend_cny), 0.0)
+
+
+def is_dip_buy_blackout_month(day: date, annual_rebalance_month: int, blackout_months: int) -> bool:
+    """Return whether *day* is in one of the N calendar months before rebalance."""
+    months_before_rebalance = (int(annual_rebalance_month) - day.month) % 12
+    return 1 <= months_before_rebalance <= max(min(int(blackout_months), 11), 0)
+
+
+def dip_buy_cash_equivalent_value_cny(
+    state: PortfolioState,
+    day: date,
+    latest_prices: dict[str, float | None],
+    fx_rates: dict[str, float],
+    money_fund_symbol: str | None,
+) -> float:
+    value = state.cash_cny + sum(_repo_lot_value(lot, day) for lot in state.repo_lots)
+    if money_fund_symbol:
+        position = state.positions.get(money_fund_symbol)
+        price = latest_prices.get(money_fund_symbol)
+        if position and price is not None:
+            value += position_value_cny(position, float(price), fx_rates)
+    return value
 
 
 def has_deferred_inception_target(config: dict[str, Any], day: date) -> bool:
@@ -1280,9 +1361,20 @@ def repo_tenor_days(config: dict[str, Any]) -> int:
         return 1
 
 
-def _repo_spend_reserve(day: date, tenor_days: int, monthly_spend_days: set[date], monthly_spend_cny: float) -> float:
+def _repo_spend_reserve(
+    day: date,
+    tenor_days: int,
+    monthly_spend_days: set[date],
+    monthly_spend_cny: float,
+    spend_day_ordinals: list[int] | None = None,
+) -> float:
     maturity = add_business_days(day, tenor_days)
-    spend_count = sum(1 for spend_day in monthly_spend_days if day < spend_day < maturity)
+    if spend_day_ordinals is None:
+        spend_count = sum(1 for spend_day in monthly_spend_days if day < spend_day < maturity)
+    else:
+        spend_count = bisect_left(spend_day_ordinals, maturity.toordinal()) - bisect_right(
+            spend_day_ordinals, day.toordinal()
+        )
     return spend_count * monthly_spend_cny
 
 
@@ -1293,6 +1385,7 @@ def _invest_idle_cash_in_repo(
     fees: dict[str, Any],
     tenor_days: int,
     reserve_cny: float = 0.0,
+    repo_fee_config: RepoFeeConfig | None = None,
 ) -> None:
     if repo_rate is None:
         return
@@ -1302,7 +1395,7 @@ def _invest_idle_cash_in_repo(
     if investable >= lot_size:
         actual_days = repo_actual_days(day, tenor_days)
         interest = repo_interest(investable, repo_rate, actual_days)
-        fee = repo_fee(investable, dict_to_dataclass(RepoFeeConfig, fees["repo"]))
+        fee = repo_fee(investable, repo_fee_config or dict_to_dataclass(RepoFeeConfig, fees["repo"]))
         state.cash_cny -= investable
         state.total_fees_cny += fee
         state.repo_lots.append(
@@ -1333,14 +1426,24 @@ def _invest_repo_cash(
     monthly_spend_cny: float,
     rebalance_days_set: set[date] | None = None,
     extra_reserve_cny: float = 0.0,
+    repo_fee_config: RepoFeeConfig | None = None,
+    spend_day_ordinals: list[int] | None = None,
 ) -> None:
-    reserve_cny = _repo_spend_reserve(day, selected_tenor_days, monthly_spend_days, monthly_spend_cny) + max(extra_reserve_cny, 0.0)
+    reserve_cny = _repo_spend_reserve(
+        day,
+        selected_tenor_days,
+        monthly_spend_days,
+        monthly_spend_cny,
+        spend_day_ordinals,
+    ) + max(extra_reserve_cny, 0.0)
     maturity = add_business_days(day, selected_tenor_days)
     crosses_rebalance = any(day < rebalance_day <= maturity for rebalance_day in (rebalance_days_set or set()))
     rate_for_selected_tenor = None if crosses_rebalance else selected_repo_rate
-    _invest_idle_cash_in_repo(state, day, rate_for_selected_tenor, fees, selected_tenor_days, reserve_cny)
+    _invest_idle_cash_in_repo(
+        state, day, rate_for_selected_tenor, fees, selected_tenor_days, reserve_cny, repo_fee_config
+    )
     overnight_reserve_cny = _next_spend_reserve(day, monthly_spend_days, monthly_spend_cny) + max(extra_reserve_cny, 0.0)
-    _invest_idle_cash_in_repo(state, day, one_day_repo_rate, fees, 1, overnight_reserve_cny)
+    _invest_idle_cash_in_repo(state, day, one_day_repo_rate, fees, 1, overnight_reserve_cny, repo_fee_config)
 
 
 def _mature_repo_lots(state: PortfolioState, day: date) -> None:
@@ -1359,25 +1462,54 @@ def _execute_dip_buys(
     fees: dict[str, Any],
     trades: list[dict[str, Any]],
     allow_fractional_us_shares: bool,
+    money_fund_symbol: str | None = None,
+    max_total_budget_cny: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Execute queued orders with cash available at this open only.
+    """Execute queued orders at this open without spending the protected pool.
 
-    Repo lots are not sold here. The caller matures lots before execution, so
-    1-day reverse repo proceeds that mature today are usable while longer lots
-    remain unavailable.
+    A selected money fund is sold at the same open when cash is insufficient.
+    Repo lots are not sold early: the caller matures lots before execution, so
+    only proceeds contractually available at this open can be used.
     """
     executed: list[dict[str, Any]] = []
+    remaining_budget = math.inf if max_total_budget_cny is None else max(float(max_total_budget_cny), 0.0)
     for order in orders:
+        if remaining_budget <= 0:
+            break
         symbol = str(order["symbol"])
         position = state.positions.get(symbol)
         price = open_prices.get(symbol)
-        if not position or price is None or price <= 0 or state.cash_cny <= 0:
+        if not position or price is None or price <= 0:
+            continue
+        requested_budget = min(max(float(order["budget_cny"]), 0.0), remaining_budget)
+        if requested_budget <= 0:
+            continue
+        if state.cash_cny < requested_budget and money_fund_symbol and money_fund_symbol != symbol:
+            money_position = state.positions.get(money_fund_symbol)
+            money_price = open_prices.get(money_fund_symbol)
+            if money_position and money_position.quantity > 0 and money_price is not None and money_price > 0:
+                needed = requested_budget - state.cash_cny
+                lot_size = position_lot_size(money_position, fees)
+                raw_quantity = needed / (float(money_price) * currency_to_cny_rate(money_position.currency, fx_rates))
+                sell_quantity = min(money_position.quantity, math.ceil(raw_quantity / lot_size) * lot_size)
+                _sell_position(
+                    state,
+                    money_position,
+                    day,
+                    sell_quantity,
+                    float(money_price),
+                    fx_rates,
+                    fees,
+                    trades,
+                    "dip_buy_funding",
+                )
+        if state.cash_cny <= 0:
             continue
         spent = _buy_position(
             state,
             position,
             day,
-            min(float(order["budget_cny"]), state.cash_cny),
+            min(requested_budget, state.cash_cny),
             float(price),
             fx_rates,
             fees,
@@ -1387,6 +1519,7 @@ def _execute_dip_buys(
         )
         if spent > 0:
             executed.append({**order, "spent_cny": spent, "execution_date": day.isoformat()})
+            remaining_budget -= spent
     return executed
 
 
@@ -1447,10 +1580,10 @@ def _apply_hk_connect_portfolio_fee(
     fees: dict[str, Any],
     calendar_days: int = 1,
 ) -> None:
-    hk_cfg = dict_to_dataclass(HkConnectEtfFeeConfig, fees["hk_connect_etf"])
     hkd_cny = fx_rates.get("HKD/CNY")
     if hkd_cny is None:
         return
+    hk_cfg = dict_to_dataclass(HkConnectEtfFeeConfig, fees["hk_connect_etf"])
     total_fee_cny = 0.0
     for pos in state.positions.values():
         if pos.quantity <= 0 or not (pos.currency == "HKD" or pos.asset_type == "hk_connect_etf"):
@@ -1531,6 +1664,7 @@ def _simulate_comparison_series(
     config: dict[str, Any],
     days: list[date],
     price_maps: dict[str, dict[str, float]],
+    open_price_maps: dict[str, dict[str, float]],
     fx_maps: dict[str, dict[str, float]],
     repo_map: dict[str, float],
     one_day_repo_map: dict[str, float],
@@ -1541,24 +1675,32 @@ def _simulate_comparison_series(
     should_cancel=None,
 ) -> dict[str, float]:
     assets = comparison_assets(config)
+    comparison_config = {**config, "assets": assets, "repo_symbol": repo_rate_symbol(config)}
     sim_assets = simulation_assets(assets)
     state = _initial_state(float(config["initial_capital_cny"]), sim_assets)
     symbols = [asset["symbol"] for asset in sim_assets]
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols}
+    latest_open_prices: dict[str, float | None] = {symbol: None for symbol in symbols}
     comparison_fx_pairs = required_fx_pairs_for_assets(assets)
     latest_fx_rates: dict[str, float | None] = {pair: None for pair in comparison_fx_pairs}
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
-    tenor_days = repo_tenor_days(config)
+    tenor_days = repo_tenor_days(comparison_config)
+    repo_fee_config = dict_to_dataclass(RepoFeeConfig, config["fees"]["repo"])
+    prepared_routes = prepare_active_asset_routes(comparison_config)
+    monthly_spend_ordinals = sorted(day.toordinal() for day in monthly_spend_days)
     totals: dict[str, float] = {}
     trades: list[dict[str, Any]] = []
     initial_rebalance_done = False
     previous_fee_day: date | None = None
+    pending_rebalance: dict[str, Any] | None = None
 
     for idx, day in enumerate(days):
         if idx % 64 == 0:
             raise_if_cancelled(should_cancel)
         day_str = day.isoformat()
+        for symbol in latest_open_prices:
+            latest_open_prices[symbol] = forward_value(open_price_maps.get(symbol, {}), day, latest_open_prices.get(symbol))
         for symbol in latest_prices:
             latest_prices[symbol] = forward_value(price_maps.get(symbol, {}), day, latest_prices.get(symbol))
         for pair in latest_fx_rates:
@@ -1575,6 +1717,28 @@ def _simulate_comparison_series(
 
         _mature_repo_lots(state, day)
         _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
+        if pending_rebalance and pending_rebalance["execution_date"] == day_str:
+            open_prices = {
+                symbol: latest_open_prices.get(symbol) if latest_open_prices.get(symbol) is not None else latest_prices.get(symbol)
+                for symbol in latest_prices
+            }
+            open_total, open_values = _portfolio_value(state, open_prices, fx_rates, day)
+            open_weights = {key: (value / open_total if open_total else 0.0) for key, value in open_values.items()}
+            if should_rebalance(open_weights, pending_rebalance["targets"], float(config["rebalance_band"])):
+                _rebalance_state_to_band(
+                    state,
+                    sim_assets,
+                    day,
+                    open_prices,
+                    fx_rates,
+                    config["fees"],
+                    trades,
+                    False,
+                    pending_rebalance["targets"],
+                    float(config["rebalance_band"]),
+                    config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                )
+            pending_rebalance = None
         fee_days = max((day - previous_fee_day).days, 1) if previous_fee_day else 1
         _apply_hk_connect_portfolio_fee(state, latest_prices, fx_rates, config["fees"], fee_days)
         previous_fee_day = day
@@ -1588,9 +1752,16 @@ def _simulate_comparison_series(
             state.total_spend_cny += actual_spend
 
         before_total, before_values = _portfolio_value(state, latest_prices, fx_rates, day)
-        targets = effective_weights({**config, "assets": assets}, day, latest_prices, before_total)
+        targets = effective_weights(
+            comparison_config,
+            day,
+            latest_prices,
+            before_total,
+            prepared_routes=prepared_routes,
+            money_fund_asset=None,
+        )
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
-        is_rebalance_day = day in reb_days or not initial_rebalance_done
+        is_rebalance_day = not initial_rebalance_done
         if is_rebalance_day and should_rebalance(current_weights, targets, float(config["rebalance_band"])):
             _rebalance_state_to_band(
                 state,
@@ -1607,7 +1778,7 @@ def _simulate_comparison_series(
             )
         if is_rebalance_day and has_investable_asset_target(targets):
             initial_rebalance_done = True
-        elif is_rebalance_day and not initial_rebalance_done and has_deferred_inception_target({**config, "assets": assets}, day):
+        elif is_rebalance_day and not initial_rebalance_done and has_deferred_inception_target(comparison_config, day):
             initial_rebalance_done = True
 
         _invest_repo_cash(
@@ -1620,8 +1791,26 @@ def _simulate_comparison_series(
             monthly_spend_days,
             float(config["monthly_spend_cny"]),
             reb_days,
+            0.0,
+            repo_fee_config,
+            monthly_spend_ordinals,
         )
         total, _values = _portfolio_value(state, latest_prices, fx_rates, day)
+        next_day = days[idx + 1] if idx + 1 < len(days) else None
+        if next_day is not None and next_day in reb_days and initial_rebalance_done and pending_rebalance is None:
+            next_day_str = next_day.isoformat()
+            scheduled_prices = scheduled_target_price_view(latest_prices, next_day, prepared_routes)
+            pending_rebalance = {
+                "execution_date": next_day_str,
+                "targets": effective_weights(
+                    comparison_config,
+                    next_day,
+                    scheduled_prices,
+                    total,
+                    prepared_routes=prepared_routes,
+                    money_fund_asset=None,
+                ),
+            }
         totals[day_str] = total
     return totals
 
@@ -1642,6 +1831,7 @@ def run_backtest(
     errors = validate_config(config)
     if errors:
         raise BacktestError("; ".join(errors))
+    dip_buy_active = bool(config.get("dip_buy_enabled")) and config.get("rebalance_frequency") == "yearly"
     config_hash = canonical_config_hash(config)
     if persist:
         cached = get_cached_backtest_run(conn, config)
@@ -1743,6 +1933,7 @@ def run_backtest(
     repo_benchmark_values: list[float] = []
 
     monthly_spend_days = first_business_day_by_month(days)
+    monthly_spend_ordinals = sorted(day.toordinal() for day in monthly_spend_days)
     reb_days = rebalance_days(days, config["rebalance_frequency"], int(config["annual_rebalance_month"]))
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
     latest_open_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
@@ -1750,6 +1941,7 @@ def run_backtest(
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
     tenor_days = repo_tenor_days(config)
+    repo_fee_config = dict_to_dataclass(RepoFeeConfig, config["fees"]["repo"])
     period_start_nav = 1.0
     nav_for_period = 1.0
     period_peak_nav = 1.0
@@ -1759,11 +1951,20 @@ def run_backtest(
     period_external_flows: dict[str, float] = {"REPO": 0.0}
     initial_rebalance_done = False
     money_fund = selected_money_fund_asset(config)
+    prepared_routes = prepare_active_asset_routes(config)
     previous_treasury_target = "REPO"
     previous_fee_day: date | None = None
     pending_rebalance: dict[str, Any] | None = None
     pending_dip_buys: list[dict[str, Any]] = []
-    dip_local_peaks: dict[str, float] = {}
+    last_rebalance_day: date | None = None
+    dip_buy_pool_initialized = False
+    dip_buy_pool_cny = 0.0
+    dip_buy_piece_cny = 0.0
+    dip_buy_remaining_parts = 0
+    dip_buy_triggered_symbols: set[str] = set()
+    deferred_dip_rechecks: dict[str, date] = {}
+    dip_buy_last_execution_indices: dict[str, int] = {}
+    dip_buy_last_execution_dates: dict[str, str] = {}
     dip_buy_execution_count = 0
     year_nav = 1.0
     year_peak_nav = 1.0
@@ -1809,6 +2010,17 @@ def run_backtest(
         if latest_repo_rate is not None:
             repo_benchmark_nav *= 1.0 + (latest_repo_rate / 100.0) * repo_actual_days(day, 1) / 365.0
 
+        dip_buy_blackout_today = bool(
+            dip_buy_active
+            and config.get("dip_buy_blackout_enabled", True)
+            and is_dip_buy_blackout_month(
+                day,
+                int(config.get("annual_rebalance_month", 1)),
+                int(config.get("dip_buy_blackout_months", 1)),
+            )
+        )
+
+        rebalance_reset_today = False
         _mature_repo_lots(state, day)
         _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
         open_prices = {
@@ -1867,21 +2079,75 @@ def run_backtest(
             previous_rebalance_values = after_values
             initial_rebalance_done = True
             pending_rebalance = None
+            last_rebalance_day = day
+            dip_buy_pool_initialized = False
+            dip_buy_pool_cny = 0.0
+            dip_buy_piece_cny = 0.0
+            dip_buy_remaining_parts = 0
+            dip_buy_triggered_symbols.clear()
+            deferred_dip_rechecks.clear()
+            dip_buy_last_execution_indices.clear()
+            dip_buy_last_execution_dates.clear()
+            rebalance_reset_today = True
+        if rebalance_reset_today:
+            # The scheduled rebalance at this same open supersedes any order
+            # decided under the preceding cycle's cost basis and cash buffer.
+            pending_dip_buys = []
+        if dip_buy_blackout_today:
+            # Orders decided in the preceding month must not cross into the
+            # configured pre-rebalance quiet period. Deferred repo-maturity
+            # rechecks are also discarded until the new annual cycle begins.
+            pending_dip_buys = []
+            dip_buy_triggered_symbols.clear()
+            deferred_dip_rechecks.clear()
         due_dip_buys = [order for order in pending_dip_buys if order["execution_date"] == day_str]
         pending_dip_buys = [order for order in pending_dip_buys if order["execution_date"] != day_str]
         if due_dip_buys:
-            dip_buy_execution_count += len(
-                _execute_dip_buys(
-                    state,
-                    due_dip_buys,
-                    day,
-                    open_prices,
-                    fx_rates,
-                    config["fees"],
-                    trades,
-                    bool(config.get("allow_fractional_us_shares", True)),
-                )
+            # A dip order is decided from the preceding close and must execute
+            # only against this session's actual opening quote.  Do not forward
+            # an older open or fall back to today's close: either shortcut would
+            # turn a missing quote into a fabricated execution price.
+            dip_execution_open_prices = {
+                symbol: open_price_maps.get(symbol, {}).get(day_str)
+                for symbol in latest_prices
+            }
+            money_fund_symbol = money_fund["symbol"] if money_fund else None
+            execution_buffer_cny = (
+                dip_buy_cash_buffer_cny(float(config["monthly_spend_cny"]), last_rebalance_day, day)
+                if last_rebalance_day
+                else 0.0
             )
+            execution_cash_equivalent_cny = dip_buy_cash_equivalent_value_cny(
+                state,
+                day,
+                dip_execution_open_prices,
+                fx_rates,
+                money_fund_symbol,
+            )
+            execution_excess_cny = max(execution_cash_equivalent_cny - execution_buffer_cny, 0.0)
+            executed_dip_buys = _execute_dip_buys(
+                state,
+                due_dip_buys,
+                day,
+                dip_execution_open_prices,
+                fx_rates,
+                config["fees"],
+                trades,
+                bool(config.get("allow_fractional_us_shares", True)),
+                money_fund_symbol,
+                execution_excess_cny,
+            )
+            executed_symbols = {str(order["symbol"]) for order in executed_dip_buys}
+            for order in due_dip_buys:
+                dip_buy_triggered_symbols.discard(str(order["symbol"]))
+            for symbol in executed_symbols:
+                dip_buy_last_execution_indices[symbol] = idx
+                dip_buy_last_execution_dates[symbol] = day_str
+            dip_buy_remaining_parts = max(
+                dip_buy_remaining_parts - sum(int(order.get("parts", 1)) for order in executed_dip_buys),
+                0,
+            )
+            dip_buy_execution_count += len(executed_dip_buys)
         fee_days = max((day - previous_fee_day).days, 1) if previous_fee_day else 1
         _apply_hk_connect_portfolio_fee(state, latest_prices, fx_rates, config["fees"], fee_days)
         previous_fee_day = day
@@ -1898,13 +2164,21 @@ def run_backtest(
             year_external_flows["REPO"] = year_external_flows.get("REPO", 0.0) - actual_spend
 
         before_total, before_values = _portfolio_value(state, latest_prices, fx_rates, day)
-        targets = effective_weights(config, day, latest_prices, before_total)
+        targets = effective_weights(
+            config,
+            day,
+            latest_prices,
+            before_total,
+            prepared_routes=prepared_routes,
+            money_fund_asset=money_fund,
+        )
         treasury_target = money_fund["symbol"] if money_fund and targets.get(money_fund["symbol"], 0.0) > 0 else "REPO"
         treasury_became_available = bool(money_fund and previous_treasury_target == "REPO" and treasury_target == money_fund["symbol"])
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
         is_rebalance_day = not initial_rebalance_done or treasury_became_available
         should_record_rebalance = is_rebalance_day and has_investable_asset_target(targets)
         if should_record_rebalance:
+            starts_dip_buy_cycle = not initial_rebalance_done
             rebalance_band = float(config["rebalance_band"])
             event_nav = nav_for_period
             if daily_total_assets and daily_total_assets[-1] != 0:
@@ -1975,41 +2249,128 @@ def run_backtest(
             period_peak_nav = event_nav
             period_max_drawdown = 0.0
             initial_rebalance_done = True
+            if starts_dip_buy_cycle:
+                last_rebalance_day = day
+                dip_buy_pool_initialized = False
+                dip_buy_pool_cny = 0.0
+                dip_buy_piece_cny = 0.0
+                dip_buy_remaining_parts = 0
+                dip_buy_triggered_symbols.clear()
+                deferred_dip_rechecks.clear()
+                dip_buy_last_execution_indices.clear()
+                dip_buy_last_execution_dates.clear()
         elif is_rebalance_day and not initial_rebalance_done and has_deferred_inception_target(config, day):
             initial_rebalance_done = True
         previous_treasury_target = treasury_target
 
         next_day = days[idx + 1] if idx + 1 < len(days) else None
+        dip_buy_blackout_next_day = bool(
+            next_day
+            and dip_buy_active
+            and config.get("dip_buy_blackout_enabled", True)
+            and is_dip_buy_blackout_month(
+                next_day,
+                int(config.get("annual_rebalance_month", 1)),
+                int(config.get("dip_buy_blackout_months", 1)),
+            )
+        )
         dip_buy_reserve_cny = 0.0
-        if config.get("dip_buy_enabled") and next_day is not None:
+        if (
+            dip_buy_active
+            and next_day is not None
+            and last_rebalance_day is not None
+            and not dip_buy_blackout_today
+            and not dip_buy_blackout_next_day
+        ):
             drawdown_trigger = float(config.get("dip_buy_drawdown", 0.05))
-            cash_ratio = float(config.get("dip_buy_cash_ratio", 0.05))
-            for asset in dip_buy_assets(config, day, latest_prices):
+            total_parts = int(config.get("dip_buy_total_parts", 10))
+            parts_per_trigger = int(config.get("dip_buy_parts_per_trigger", 1))
+            cooldown_trading_days = int(config.get("dip_buy_cooldown_trading_days", 10))
+            money_fund_symbol = money_fund["symbol"] if money_fund else None
+            cash_equivalent_cny = dip_buy_cash_equivalent_value_cny(
+                state,
+                day,
+                latest_prices,
+                fx_rates,
+                money_fund_symbol,
+            )
+            cash_buffer_cny = dip_buy_cash_buffer_cny(
+                float(config["monthly_spend_cny"]),
+                last_rebalance_day,
+                day,
+            )
+            excess_cash_cny = max(cash_equivalent_cny - cash_buffer_cny, 0.0)
+            if not dip_buy_pool_initialized and excess_cash_cny > 0:
+                dip_buy_pool_initialized = True
+                dip_buy_pool_cny = excess_cash_cny
+                dip_buy_piece_cny = dip_buy_pool_cny / total_parts
+                dip_buy_remaining_parts = total_parts
+            pending_parts = sum(int(order.get("parts", 1)) for order in pending_dip_buys)
+            available_parts = max(dip_buy_remaining_parts - pending_parts, 0)
+            pending_budget_cny = sum(float(order.get("budget_cny", 0.0)) for order in pending_dip_buys)
+            available_excess_cny = max(excess_cash_cny - pending_budget_cny, 0.0)
+            liquid_cash_equivalent_cny = state.cash_cny
+            if money_fund_symbol:
+                money_position = state.positions.get(money_fund_symbol)
+                money_price = latest_prices.get(money_fund_symbol)
+                if money_position and money_price is not None:
+                    liquid_cash_equivalent_cny += position_value_cny(money_position, float(money_price), fx_rates)
+            for asset in dip_buy_assets(config, day, latest_prices, prepared_routes):
                 symbol = asset["symbol"]
                 close = latest_prices.get(symbol)
-                if close is None or close <= 0:
+                position = state.positions.get(symbol)
+                if close is None or close <= 0 or not position or position.quantity <= 0 or position.cost_basis_cny <= 0:
+                    dip_buy_triggered_symbols.discard(symbol)
+                    deferred_dip_rechecks.pop(symbol, None)
                     continue
-                local_peak = max(dip_local_peaks.get(symbol, float(close)), float(close))
-                dip_local_peaks[symbol] = local_peak
-                if state.cash_cny <= 0 or close > local_peak * (1.0 - drawdown_trigger):
+                deferred_until = deferred_dip_rechecks.get(symbol)
+                if deferred_until and day < deferred_until:
                     continue
-                budget_cny = state.cash_cny * cash_ratio
+                if deferred_until:
+                    # A multi-day repo lot matured this morning. Re-evaluate at
+                    # today's close and, if still eligible, trade next open.
+                    deferred_dip_rechecks.pop(symbol, None)
+                average_cost_price = position.cost_basis_cny / position.quantity
+                drawdown_from_cost = float(close) / average_cost_price - 1.0
+                if drawdown_from_cost >= -drawdown_trigger:
+                    dip_buy_triggered_symbols.discard(symbol)
+                    deferred_dip_rechecks.pop(symbol, None)
+                    continue
+                if symbol in dip_buy_triggered_symbols or available_parts <= 0 or available_excess_cny <= 0:
+                    continue
+                last_execution_idx = dip_buy_last_execution_indices.get(symbol)
+                if last_execution_idx is not None and idx - last_execution_idx <= cooldown_trading_days:
+                    continue
+                order_parts = min(parts_per_trigger, available_parts)
+                budget_cny = min(dip_buy_piece_cny * order_parts, available_excess_cny)
                 if budget_cny <= 0:
+                    continue
+                if money_fund_symbol is None and tenor_days > 1 and liquid_cash_equivalent_cny + 1e-9 < budget_cny:
+                    future_maturities = [lot.maturity_date for lot in state.repo_lots if lot.maturity_date > day]
+                    if future_maturities:
+                        deferred_dip_rechecks[symbol] = min(future_maturities)
                     continue
                 pending_dip_buys.append(
                     {
                         "symbol": symbol,
                         "decision_date": day_str,
                         "execution_date": next_day.isoformat(),
-                        "local_peak_price": local_peak,
+                        "average_cost_price": average_cost_price,
                         "trigger_close_price": float(close),
-                        "drawdown": float(close) / local_peak - 1.0,
+                        "drawdown": drawdown_from_cost,
+                        "cash_equivalent_cny": cash_equivalent_cny,
+                        "cash_buffer_cny": cash_buffer_cny,
+                        "excess_cash_cny": excess_cash_cny,
+                        "pool_cny": dip_buy_pool_cny,
+                        "piece_cny": dip_buy_piece_cny,
+                        "parts": order_parts,
                         "budget_cny": budget_cny,
                     }
                 )
-                # One continuous decline creates one order. Another order needs
-                # a new local peak and then another 5% retracement.
-                dip_local_peaks[symbol] = float(close)
+                dip_buy_triggered_symbols.add(symbol)
+                available_parts -= order_parts
+                available_excess_cny -= budget_cny
+                liquid_cash_equivalent_cny = max(liquid_cash_equivalent_cny - budget_cny, 0.0)
                 dip_buy_reserve_cny += budget_cny
 
         _invest_repo_cash(
@@ -2023,6 +2384,8 @@ def run_backtest(
             float(config["monthly_spend_cny"]),
             reb_days,
             dip_buy_reserve_cny,
+            repo_fee_config,
+            monthly_spend_ordinals,
         )
 
         total, values = _portfolio_value(state, latest_prices, fx_rates, day)
@@ -2057,13 +2420,15 @@ def run_backtest(
         if should_schedule_next_open:
             close_weights = {key: (value / total if total else 0.0) for key, value in values.items()}
             rebalance_band = float(config["rebalance_band"])
-            scheduled_price_view = dict(latest_prices)
-            next_day_str = next_day.isoformat()
-            for symbol in scheduled_price_view:
-                next_open = open_price_maps.get(symbol, {}).get(next_day_str)
-                if next_open is not None:
-                    scheduled_price_view[symbol] = next_open
-            scheduled_targets = effective_weights(config, next_day, scheduled_price_view, total)
+            scheduled_prices = scheduled_target_price_view(latest_prices, next_day, prepared_routes)
+            scheduled_targets = effective_weights(
+                config,
+                next_day,
+                scheduled_prices,
+                total,
+                prepared_routes=prepared_routes,
+                money_fund_asset=money_fund,
+            )
             desired_weights = minimal_rebalance_weights(close_weights, scheduled_targets, rebalance_band)
             year_asset_performance = _asset_period_performance(year_start_values, values, performance_symbols, year_external_flows)
             pending_rebalance = {
@@ -2094,28 +2459,60 @@ def run_backtest(
             period_peak_nav = nav_for_period
             period_max_drawdown = 0.0
 
-        unrealized = {
-            symbol: values.get(symbol, 0.0) - pos.cost_basis_cny
-            for symbol, pos in state.positions.items()
-        }
-        payload = {
-            "cash_cny": state.cash_cny,
-            "dividend_receivable_cny": state.dividend_receivable_cny,
-            "treasury_instrument": config.get("repo_symbol", "204001"),
-            "treasury_fallback_active": bool(money_fund and targets.get("REPO", 0.0) > 0),
-            "values": values,
-            "weights": {key: value / total if total else 0.0 for key, value in values.items()},
-            "targets": targets,
-            "unrealized_pnl_cny": unrealized,
-            "benchmark_value": latest_prices.get(benchmark_symbol),
-            "repo_lots": len(state.repo_lots),
-            "dip_buy": {
-                "enabled": bool(config.get("dip_buy_enabled")),
-                "pending_count": len(pending_dip_buys),
-                "execution_count": dip_buy_execution_count,
-            },
-        }
-        daily_payloads.append(payload)
+        if persist:
+            payload_money_fund_symbol = money_fund["symbol"] if money_fund else None
+            payload_cash_equivalent_cny = dip_buy_cash_equivalent_value_cny(
+                state,
+                day,
+                latest_prices,
+                fx_rates,
+                payload_money_fund_symbol,
+            )
+            payload_cash_buffer_cny = (
+                dip_buy_cash_buffer_cny(float(config["monthly_spend_cny"]), last_rebalance_day, day)
+                if last_rebalance_day
+                else 0.0
+            )
+            daily_payloads.append(
+                {
+                    "cash_cny": state.cash_cny,
+                    "dividend_receivable_cny": state.dividend_receivable_cny,
+                    "treasury_instrument": config.get("repo_symbol", "204001"),
+                    "treasury_fallback_active": bool(money_fund and targets.get("REPO", 0.0) > 0),
+                    "values": values,
+                    "weights": {key: value / total if total else 0.0 for key, value in values.items()},
+                    "targets": targets,
+                    "unrealized_pnl_cny": {
+                        symbol: values.get(symbol, 0.0) - pos.cost_basis_cny
+                        for symbol, pos in state.positions.items()
+                    },
+                    "benchmark_value": latest_prices.get(benchmark_symbol),
+                    "repo_lots": len(state.repo_lots),
+                    "dip_buy": {
+                        "enabled": bool(config.get("dip_buy_enabled")),
+                        "active": dip_buy_active,
+                        "blackout": dip_buy_blackout_today,
+                        "blackout_enabled": bool(config.get("dip_buy_blackout_enabled", True)),
+                        "blackout_months": int(config.get("dip_buy_blackout_months", 1)),
+                        "pending_count": len(pending_dip_buys),
+                        "deferred_count": len(deferred_dip_rechecks),
+                        "deferred_recheck_dates": {symbol: recheck.isoformat() for symbol, recheck in deferred_dip_rechecks.items()},
+                        "execution_count": dip_buy_execution_count,
+                        "cash_equivalent_cny": payload_cash_equivalent_cny,
+                        "cash_buffer_cny": payload_cash_buffer_cny,
+                        "excess_cash_cny": max(payload_cash_equivalent_cny - payload_cash_buffer_cny, 0.0),
+                        "pool_cny": dip_buy_pool_cny,
+                        "piece_cny": dip_buy_piece_cny,
+                        "remaining_parts": dip_buy_remaining_parts,
+                        "total_parts": int(config.get("dip_buy_total_parts", 10)),
+                        "parts_per_trigger": int(config.get("dip_buy_parts_per_trigger", 1)),
+                        "cooldown_trading_days": int(config.get("dip_buy_cooldown_trading_days", 10)),
+                        "last_execution_dates": dict(dip_buy_last_execution_dates),
+                        "drawdown": float(config.get("dip_buy_drawdown", 0.05)),
+                        "last_rebalance_date": last_rebalance_day.isoformat() if last_rebalance_day else None,
+                    },
+                }
+            )
         daily_rows.append(
             {
                 "run_id": run_id,
@@ -2138,11 +2535,12 @@ def run_backtest(
     raise_if_cancelled(should_cancel)
     comparison_started_at = time.perf_counter()
     comparison_totals = {}
-    if include_comparison:
+    if include_comparison and persist:
         comparison_totals = _simulate_comparison_series(
             config,
             days,
             price_maps,
+            open_price_maps,
             fx_maps,
             repo_map,
             one_day_repo_map,
@@ -2153,7 +2551,7 @@ def run_backtest(
             should_cancel,
         )
     for row, payload in zip(daily_rows, daily_payloads):
-        if include_comparison:
+        if include_comparison and persist:
             comparison_total = comparison_totals.get(row["trade_date"])
             payload["comparison"] = {
                 "name": "沪深300基金加黄金基金加国债逆回购",
@@ -2174,7 +2572,9 @@ def run_backtest(
     total_return = cumulative_returns[-1]
     years = max((parse_date(daily_rows[-1]["trade_date"]) - parse_date(daily_rows[0]["trade_date"])).days / 365.25, 1 / 365.25)
     annualized = (1.0 + total_return) ** (1.0 / years) - 1.0
-    repo_total_return = repo_benchmark_values[-1] / repo_benchmark_values[0] - 1.0
+    # repo_benchmark_nav starts at 1.0 and is accrued before each daily row is
+    # appended. Dividing by the first already-accrued row dropped day one.
+    repo_total_return = repo_benchmark_values[-1] - 1.0
     repo_annualized_return = (1.0 + repo_total_return) ** (1.0 / years) - 1.0
     trade_dates = [row["trade_date"] for row in daily_rows]
     positive_year_count, complete_year_count = yearly_return_counts(trade_dates, daily_returns)
@@ -2197,7 +2597,15 @@ def run_backtest(
         row["drawdown"] = drawdowns[idx]
         row["benchmark_return"] = bench_returns[idx]
 
-    final_payload = daily_payloads[-1]
+    final_payload = daily_payloads[-1] if daily_payloads else {}
+    final_unrealized_pnl_cny = (
+        sum(final_payload.get("unrealized_pnl_cny", {}).values())
+        if final_payload
+        else sum(
+            last_close_values.get(symbol, 0.0) - position.cost_basis_cny
+            for symbol, position in state.positions.items()
+        )
+    )
     summary = {
         "run_id": run_id,
         "start_date": daily_rows[0]["trade_date"],
@@ -2220,7 +2628,7 @@ def run_backtest(
         "trade_count": len(trades),
         "dip_buy_count": dip_buy_execution_count,
         "rebalance_count": len(rebalance_rows),
-        "final_unrealized_pnl_cny": sum(final_payload.get("unrealized_pnl_cny", {}).values()),
+        "final_unrealized_pnl_cny": final_unrealized_pnl_cny,
         "comparison_final_asset_cny": final_payload.get("comparison", {}).get("total_asset_cny"),
         "rolling_window_years": int(config["rolling_window_years"]),
         "rolling_periods": [],

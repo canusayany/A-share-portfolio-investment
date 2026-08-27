@@ -48,6 +48,15 @@ from app.services.data_sync import (
 from tests.helpers import build_synced_db, fixture_dividends, fixture_fx_rates, fixture_price_series, fixture_repo_rates, temp_db_path
 
 
+def enable_assets(config: dict, *symbols: str) -> None:
+    selected = set(symbols)
+    for asset in config["assets"]:
+        if asset["symbol"] in selected:
+            asset["enabled"] = True
+            if float(asset.get("target_weight", 0.0) or 0.0) <= 0:
+                asset["target_weight"] = 0.10
+
+
 class DbAndSyncTests(unittest.TestCase):
     def test_adjustment_factor_tail_carry_uses_real_price_dates_and_explicit_source(self) -> None:
         db_path = temp_db_path()
@@ -357,6 +366,7 @@ class DbAndSyncTests(unittest.TestCase):
         db_path = temp_db_path()
         init_db(db_path)
         cfg = normalize_config({"start_date": "2020-01-01", "end_date": "2020-01-31"})
+        enable_assets(cfg, "VOO")
         with db_session(db_path) as conn:
             result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], allow_network=False)
             status = data_status(conn)
@@ -394,6 +404,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_required_data_missing_detects_end_date_gaps_without_tolerance(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        enable_assets(cfg, "VOO")
         with db_session(db_path) as conn:
             conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date='2020-02-28'")
             conn.execute("DELETE FROM prices WHERE symbol='000300.SH' AND trade_date='2020-02-28'")
@@ -431,6 +442,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_us_price_for_today_uses_previous_completed_business_day(self) -> None:
         db_path, cfg = build_synced_db("2026-06-15", "2026-06-25")
+        enable_assets(cfg, "VOO")
         original_datetime = data_sync_module.datetime
 
         class FixedDateTime(datetime):
@@ -453,6 +465,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_cn_series_for_today_before_close_use_previous_completed_business_day(self) -> None:
         db_path, cfg = build_synced_db("2026-06-15", "2026-06-25")
+        enable_assets(cfg, "VOO", "510300.SH")
         original_datetime = data_sync_module.datetime
 
         class FixedDateTime(datetime):
@@ -508,6 +521,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_required_data_missing_detects_early_core_series_gap(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        enable_assets(cfg, "VOO")
         cfg["start_date"] = "2005-01-01"
         with db_session(db_path) as conn:
             missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
@@ -563,6 +577,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_dividend_sync_is_independent_from_price_gaps(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        enable_assets(cfg, "VOO")
         original_fetch = data_sync_module.fetch_yahoo_dividends
 
         def fake_fetch_yahoo_dividends(symbol, start, end, currency):
@@ -891,6 +906,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_targeted_dividend_sync_does_not_fetch_missing_prices(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        enable_assets(cfg, "VOO")
         original_fetch_prices = data_sync_module.fetch_yahoo_prices
         original_fetch_dividends = data_sync_module.fetch_yahoo_dividends
 
@@ -928,6 +944,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_cn_dividend_sync_marks_public_empty_coverage(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        enable_assets(cfg, "510300.SH")
         original_fetch_fund_dividends = data_sync_module.fetch_fund_dividends
         original_fetch_eastmoney_dividends = data_sync_module.fetch_eastmoney_fund_dividends
         original_fetch_sina_dividends = data_sync_module.fetch_sina_etf_dividends
@@ -956,6 +973,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_dividend_sync_keeps_gap_when_public_sources_fail(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        enable_assets(cfg, "510300.SH")
         original_fetch_fund_dividends = data_sync_module.fetch_fund_dividends
         original_fetch_eastmoney_dividends = data_sync_module.fetch_eastmoney_fund_dividends
         original_fetch_sina_dividends = data_sync_module.fetch_sina_etf_dividends
@@ -984,6 +1002,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_targeted_price_sync_uses_tail_ranges(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        enable_assets(cfg, "VOO")
         original_fetch_prices = data_sync_module.fetch_yahoo_prices
         requested_ranges: list[tuple[str, str]] = []
 
@@ -1005,6 +1024,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_targeted_cn_price_sync_uses_configured_price_fallback(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        enable_assets(cfg, "510300.SH")
         original_fetch_cn = data_sync_module.fetch_cn_fund_prices
         original_datasrc = data_sync_module.fetch_datasrc_market_prices
         original_sohu = data_sync_module.fetch_sohu_prices
@@ -1312,6 +1332,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_required_data_missing_uses_fallback_price_start_but_not_dividend_start(self) -> None:
         db_path, cfg = build_synced_db("2012-01-01", "2012-01-31")
+        enable_assets(cfg, "510300.SH")
         with db_session(db_path) as conn:
             conn.execute("DELETE FROM prices WHERE symbol='510300.SH' AND trade_date='2012-01-31'")
             missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
@@ -1332,6 +1353,7 @@ class DbAndSyncTests(unittest.TestCase):
 
     def test_targeted_us_price_sync_fills_missing_dates_from_multiple_sources(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        enable_assets(cfg, "VOO")
         original_yahoo = data_sync_module.fetch_yahoo_prices
         original_nasdaq = data_sync_module.fetch_nasdaq_prices
         original_stooq = data_sync_module.fetch_stooq_prices
