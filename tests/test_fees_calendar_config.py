@@ -306,6 +306,7 @@ class CalendarAndConfigTests(unittest.TestCase):
         negative_weight["assets"][0]["target_weight"] = -0.01
         self.assertTrue(any("target_weight" in item for item in validate_config(negative_weight)))
         self.assertTrue(any("rebalance_band" in item for item in validate_config(normalize_config({"rebalance_band": 1.1}))))
+        self.assertTrue(any("rebalance_to_target" in item for item in validate_config(normalize_config({"rebalance_to_target": "yes"}))))
 
     def test_treasury_indices_can_be_combined(self) -> None:
         cfg = normalize_config({})

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260827-audit-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260828-rebalance-target-1" />
   </head>
   <body class="history-collapsed">
     <header class="mobile-app-bar">
@@ -113,6 +113,10 @@
               <small class="field-help">按目标权重的比例计算：目标 10%、容忍带 25%，允许区间为 7.5% 至 12.5%。</small>
             </label>
             <label class="strategy-toggle">
+              <input id="rebalanceToTarget" type="checkbox" />
+              <span><strong>超出容忍带后调回标准权重</strong><small>关闭时只调回容忍带以内以减少买卖；开启后，发生调仓时直接恢复到各标的设置权重。</small></span>
+            </label>
+            <label class="strategy-toggle">
               <input id="dipBuyEnabled" type="checkbox" />
               <span><strong>逢低补仓</strong><small id="dipBuyAvailabilityHint">仅年度再平衡生效。现金等价物超过剩余生活费安全垫后，宽基/低波红利/黄金/国债低于成本价达到阈值时，于下一交易日开盘补仓。</small></span>
             </label>
@@ -146,7 +150,7 @@
                 <input id="dipBuyBlackoutEnabled" type="checkbox" />
                 <span><strong>再平衡前进入静默期</strong><small>年度再平衡前 N 个自然月不再触发补仓，跨入静默期的待成交单会取消。</small></span>
               </label>
-              <small class="field-help">生活费安全垫：每次再平衡按 24 个月预留；当月生活费支付后账面剩余 23 个月，之后逐月降至 12 个月保险金，下一次再平衡刷新。超出部分记为 B。</small>
+              <small class="field-help">每次年度再平衡时，按当时现金等价物减去 24 个月生活费确认 B；B 与每份金额在本年度内固定，不随月份或后续现金变化重算，下一次年度再平衡再刷新。</small>
             </div>
           </section>
 
@@ -295,6 +299,7 @@
             <button id="chartTabAsset" type="button" role="tab" aria-selected="true" aria-controls="assetChartView" data-chart-tab="assetChart">总资产</button>
             <button id="chartTabReturn" type="button" role="tab" aria-selected="false" aria-controls="returnChartView" data-chart-tab="returnChart">收益率</button>
             <button id="chartTabDaily" type="button" role="tab" aria-selected="false" aria-controls="dailyReturnChartView" data-chart-tab="dailyReturnChart">单日收益</button>
+            <button id="chartTabDailyPnl" type="button" role="tab" aria-selected="false" aria-controls="dailyPnlChartView" data-chart-tab="dailyPnlChart">标的盈亏</button>
             <button id="chartTabDrawdown" type="button" role="tab" aria-selected="false" aria-controls="drawdownChartView" data-chart-tab="drawdownChart">回撤</button>
             <button id="chartTabWeight" type="button" role="tab" aria-selected="false" aria-controls="weightChartView" data-chart-tab="weightChart">资产权重</button>
             <button id="chartTabComparison" type="button" role="tab" aria-selected="false" aria-controls="comparisonChartView" data-chart-tab="comparisonChart">总资产对比</button>
@@ -311,6 +316,15 @@
             <div id="assetChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabAsset"><div id="assetChart" class="chart"></div></div>
             <div id="returnChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabReturn" hidden><div id="returnChart" class="chart"></div></div>
             <div id="dailyReturnChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabDaily" hidden><div id="dailyReturnChart" class="chart"></div></div>
+            <div id="dailyPnlChartView" class="chart-view daily-pnl-chart-view" role="tabpanel" aria-labelledby="chartTabDailyPnl" hidden>
+              <div class="daily-pnl-toolbar" role="group" aria-label="标的盈亏比例尺">
+                <span>比例尺</span>
+                <button type="button" data-daily-pnl-scale="amount" aria-pressed="true">金额（元）</button>
+                <button type="button" data-daily-pnl-scale="percent" aria-pressed="false">收益率（%）</button>
+              </div>
+              <div id="dailyPnlChart" class="chart"></div>
+              <div id="dailyPnlEmpty" class="daily-pnl-empty" hidden></div>
+            </div>
             <div id="drawdownChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabDrawdown" hidden><div id="drawdownChart" class="chart"></div></div>
             <div id="weightChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabWeight" hidden><div id="weightChart" class="chart"></div></div>
             <div id="comparisonChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabComparison" hidden><div id="comparisonChart" class="chart"></div></div>
@@ -382,13 +396,22 @@
           </section>
           <section id="leaderboardSection" class="history-section" aria-labelledby="leaderboardTitle" hidden>
             <div class="history-section-heading">
-              <span><strong id="leaderboardTitle">全局榜单</strong><small>前 100 组 · 超额收益、风险效率与稳定性</small></span>
+              <span><strong id="leaderboardTitle">分期策略榜单</strong><small id="leaderboardPeriodMeta">同一时间区间内公平比较</small></span>
+            </div>
+            <div class="leaderboard-period-controls">
+              <label><span>评价区间</span><select id="leaderboardPeriod" aria-label="榜单评价区间"><option value="all">各自完整回测期</option></select></label>
+              <div id="leaderboardCustomPeriod" class="leaderboard-custom-period" hidden>
+                <label><span>开始</span><input id="leaderboardStartDate" type="date" /></label>
+                <label><span>结束</span><input id="leaderboardEndDate" type="date" /></label>
+                <button id="applyLeaderboardPeriod" type="button">应用</button>
+              </div>
+              <p class="leaderboard-method">评分构成：同期现金超额 45% · 风险效率 25% · 回撤 15% · 月度稳定性 15%；短样本会向 50 分收缩。</p>
             </div>
             <div id="leaderboardList" class="history-list leaderboard-list" aria-live="polite"></div>
           </section>
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260827-audit-1"></script>
+  <script src="static/app.js?v=20260828-rebalance-target-1"></script>
   </body>
 </html>

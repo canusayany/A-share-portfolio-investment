@@ -9,6 +9,10 @@ let archiveFilter = "";
 let recentArchiveLoaded = false;
 let leaderboardArchiveLoaded = false;
 let leaderboardArchiveLoading = false;
+let leaderboardPeriodSelection = "";
+let leaderboardPeriodMetadata = null;
+let leaderboardAvailableYears = [];
+let leaderboardRequestVersion = 0;
 let archiveRefreshTimer = null;
 let activeAnalysisWatch = 0;
 const archiveSortModes = { recent: "newest", leaderboard: "score" };
@@ -16,6 +20,11 @@ const tableSortState = {};
 const charts = {};
 let activeChartId = "assetChart";
 const pendingChartOptions = {};
+let dailyPnlData = null;
+let dailyPnlRunId = null;
+let dailyPnlLoadingRunId = null;
+let dailyPnlRequestVersion = 0;
+let dailyPnlScale = "amount";
 const APP_BASE_PATH = (() => {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
   const knownAppPaths = ["/backtest/permanent-investment", "/backtest/cross-market", "/portfolio"];
@@ -582,6 +591,7 @@ function readConfig() {
   next.rolling_window_years = Number($("rollingWindowYears").value);
   next.rebalance_month_analysis_enabled = next.rebalance_frequency === "yearly" && $("rebalanceMonthAnalysisEnabled").checked;
   next.rebalance_band = Number($("rebalanceBand").value);
+  next.rebalance_to_target = $("rebalanceToTarget").checked;
   next.monthly_spend_cny = Number($("monthlySpend").value);
   next.repo_target_mode = $("repoTargetMode").value;
   next.repo_fixed_target_cny = Number($("repoFixedTarget").value);
@@ -763,6 +773,7 @@ function renderControlSummary(plan) {
     ["初始资金", `￥${fmtMoney(initialCapital)}`],
     ["滚动分析", `${rollingYears}年窗口 · 每年滚动`],
     ["容忍带", fmtPct($("rebalanceBand")?.value || config.rebalance_band)],
+    ["超带调仓", $("rebalanceToTarget")?.checked ? "恢复到标准权重" : "仅调回容忍带以内"],
     ["现金方式", selectedTreasuryOption()?.name || assetName(config.repo_symbol)],
     ["现金模式", repoModeLabel(plan.mode)],
     ["逢低补仓", $("dipBuyEnabled")?.checked
@@ -966,6 +977,7 @@ function renderControls() {
   $("rebalanceMonthAnalysisEnabled").checked = Boolean(config.rebalance_month_analysis_enabled);
   $("rebalanceBand").value = config.rebalance_band;
   $("bandValue").textContent = fmtPct(config.rebalance_band);
+  $("rebalanceToTarget").checked = Boolean(config.rebalance_to_target);
   $("monthlySpend").value = config.monthly_spend_cny;
   $("repoTargetMode").value = config.repo_target_mode || "residual_weight";
   $("repoFixedTarget").value = config.repo_fixed_target_cny ?? 360000;
@@ -994,7 +1006,7 @@ function renderControls() {
     $(id).addEventListener("input", renderFeeSummary, listenerOptions);
   });
   $("ibkrPlan").addEventListener("change", renderFeeSummary, listenerOptions);
-  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled", "dipBuyDrawdown", "dipBuyTotalParts", "dipBuyPartsPerTrigger", "dipBuyCooldownTradingDays", "dipBuyBlackoutEnabled", "dipBuyBlackoutMonths"].forEach((id) => {
+  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "rebalanceToTarget", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled", "dipBuyDrawdown", "dipBuyTotalParts", "dipBuyPartsPerTrigger", "dipBuyCooldownTradingDays", "dipBuyBlackoutEnabled", "dipBuyBlackoutMonths"].forEach((id) => {
     $(id).addEventListener(id === "rebalanceFrequency" || id === "repoTargetMode" ? "change" : "input", updateRepoWeight, listenerOptions);
   });
   document.querySelectorAll("[data-repo-mode]").forEach((button) => {
@@ -1426,6 +1438,7 @@ function expandChartSeries(data) {
   if (Array.isArray(data?.series)) return data.series;
   const chart = data?.chart || {};
   const dates = chart.dates || [];
+  const values = chart.values || {};
   const weights = chart.weights || {};
   return dates.map((tradeDate, index) => ({
     trade_date: tradeDate,
@@ -1436,6 +1449,7 @@ function expandChartSeries(data) {
     benchmark_return: chart.benchmark_returns?.[index] ?? 0,
     payload: {
       comparison: { total_asset_cny: chart.comparison_total_assets?.[index] ?? null },
+      values: Object.fromEntries(Object.entries(values).map(([symbol, amounts]) => [symbol, amounts[index] ?? 0])),
       weights: Object.fromEntries(Object.entries(weights).map(([symbol, values]) => [symbol, values[index] ?? 0])),
     },
   }));
@@ -1489,10 +1503,186 @@ function selectChart(chartId) {
   document.querySelectorAll(".chart-view").forEach((view) => {
     view.hidden = view.querySelector(".chart")?.id !== chartId;
   });
+  if (chartId === "dailyPnlChart") loadDailyPnlChart().catch(() => {});
   window.requestAnimationFrame(() => {
     applyChartOption(chartId);
     charts[chartId]?.resize();
   });
+}
+
+function resetDailyPnlChart() {
+  dailyPnlRequestVersion += 1;
+  dailyPnlData = null;
+  dailyPnlRunId = null;
+  dailyPnlLoadingRunId = null;
+  delete pendingChartOptions.dailyPnlChart;
+  charts.dailyPnlChart?.clear();
+  const empty = $("dailyPnlEmpty");
+  if (empty) empty.hidden = true;
+}
+
+function showDailyPnlEmpty(message) {
+  charts.dailyPnlChart?.clear();
+  const empty = $("dailyPnlEmpty");
+  if (!empty) return;
+  empty.textContent = message;
+  empty.hidden = false;
+}
+
+function dailyPnlAxisBounds(seriesArrays) {
+  const finiteValues = seriesArrays.flat().map(Number).filter(Number.isFinite);
+  const maxAbs = Math.max(...finiteValues.map((value) => Math.abs(value)), 0);
+  if (maxAbs <= 1e-12) return { min: -1, max: 1 };
+  const magnitude = 10 ** Math.floor(Math.log10(maxAbs));
+  const bound = Math.ceil((maxAbs * 1.08) / magnitude * 2) / 2 * magnitude;
+  return { min: -bound, max: bound };
+}
+
+function fmtAxisMoney(value) {
+  const absolute = Math.abs(Number(value || 0));
+  if (absolute >= 100_000_000) return `${(Number(value) / 100_000_000).toFixed(1)}亿`;
+  if (absolute >= 10_000) return `${(Number(value) / 10_000).toFixed(1)}万`;
+  return fmtMoney(value);
+}
+
+function fmtSignedMoney(value) {
+  const amount = Number(value || 0);
+  return `${amount > 0 ? "+" : amount < 0 ? "-" : ""}￥${fmtMoney(Math.abs(amount))}`;
+}
+
+function fmtSignedPct(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  const rate = Number(value);
+  return `${rate > 0 ? "+" : ""}${(rate * 100).toFixed(2)}%`;
+}
+
+function dailyPnlTooltip(data, colors) {
+  return (params) => {
+    const points = Array.isArray(params) ? params : [params];
+    const index = points.find((point) => Number.isInteger(point?.dataIndex))?.dataIndex;
+    if (!Number.isInteger(index)) return "";
+    const assetLines = data.symbols.map((symbol, symbolIndex) => (
+      `<div style="display:grid;grid-template-columns:10px minmax(92px,1fr) auto auto;align-items:center;gap:7px 11px">`
+      + `<i style="width:8px;height:8px;border-radius:50%;background:${colors[symbolIndex % colors.length]}"></i>`
+      + `<span>${escapeHtml(data.names[symbol] || symbol)}</span>`
+      + `<strong>${fmtSignedMoney(data.profits[symbol][index])}</strong>`
+      + `<span>${fmtSignedPct(data.returns[symbol][index])}</span></div>`
+    )).join("");
+    return [
+      `<div style="font-weight:700;margin-bottom:7px">${escapeHtml(data.dates[index])}</div>`,
+      assetLines,
+      '<div style="border-top:1px solid rgba(255,255,255,.22);margin:7px 0 5px"></div>',
+      `<div style="display:flex;justify-content:space-between;gap:26px"><span>所选标的合计</span><strong>${fmtSignedMoney(data.combined_profits[index])} · ${fmtSignedPct(data.combined_returns[index])}</strong></div>`,
+      `<div style="display:flex;justify-content:space-between;gap:26px"><span>沪深300等额参考</span><strong>${fmtSignedMoney(data.benchmark_profits[index])} · ${fmtSignedPct(data.benchmark_returns[index])}</strong></div>`,
+    ].join("");
+  };
+}
+
+function renderDailyPnlChart() {
+  const data = dailyPnlData;
+  if (!data?.available) {
+    showDailyPnlEmpty(data?.reason || "运行回测后查看逐标的每日盈亏");
+    return;
+  }
+  const empty = $("dailyPnlEmpty");
+  if (empty) empty.hidden = true;
+  const colors = [CHART_COLORS.accent, CHART_COLORS.amber, CHART_COLORS.violet, "#5c8f99", "#9d6c52", "#7e8d50", "#b35f78"];
+  const amountMode = dailyPnlScale === "amount";
+  const selectedValues = data.symbols.map((symbol) => amountMode ? data.profits[symbol] : data.returns[symbol]);
+  const combinedValues = amountMode ? data.combined_profits : data.combined_returns;
+  const benchmarkValues = amountMode ? data.benchmark_profits : data.benchmark_returns;
+  const bounds = dailyPnlAxisBounds([...selectedValues, combinedValues, benchmarkValues]);
+  if (!window.echarts) {
+    const toPoints = (values) => values.map((value, index) => ({ x: index, y: Number(value ?? 0) }));
+    drawFallbackChart(
+      "dailyPnlChart",
+      `逐日标的盈亏 · ${amountMode ? "金额" : "收益率"}`,
+      [
+        ...data.symbols.map((symbol, index) => ({ name: data.names[symbol] || symbol, color: colors[index % colors.length], points: toPoints(selectedValues[index]) })),
+        { name: "所选标的合计", color: "#172b35", points: toPoints(combinedValues) },
+        { name: "沪深300等额参考", color: CHART_COLORS.blue, points: toPoints(benchmarkValues) },
+      ],
+      !amountMode,
+      bounds.min,
+      bounds.max,
+    );
+    return;
+  }
+  queueChartOption("dailyPnlChart", {
+    ...lineZoomOption(),
+    grid: { left: 72, right: 26, top: 82, bottom: 62 },
+    title: { text: `逐日标的盈亏 · ${amountMode ? "金额" : "收益率"}`, left: 8, top: 4, textStyle: { fontSize: 14 } },
+    tooltip: { trigger: "axis", formatter: dailyPnlTooltip(data, colors) },
+    legend: { type: "scroll", top: 31, left: 8, right: 12, textStyle: { fontSize: 10 } },
+    xAxis: { type: "category", data: data.dates },
+    yAxis: {
+      type: "value",
+      min: bounds.min,
+      max: bounds.max,
+      axisLabel: { formatter: amountMode ? (value) => fmtAxisMoney(value) : (value) => `${(value * 100).toFixed(1)}%` },
+    },
+    series: [
+      ...data.symbols.map((symbol, index) => ({
+        type: "line",
+        name: data.names[symbol] || symbol,
+        data: selectedValues[index],
+        symbol: "none",
+        connectNulls: false,
+        lineStyle: { color: colors[index % colors.length], width: 1.25, opacity: 0.82 },
+        itemStyle: { color: colors[index % colors.length] },
+      })),
+      {
+        type: "line",
+        name: "所选标的合计",
+        data: combinedValues,
+        symbol: "none",
+        lineStyle: { color: "#172b35", width: 2.5 },
+        itemStyle: { color: "#172b35" },
+        markLine: { silent: true, symbol: "none", label: { show: false }, lineStyle: { color: "#9eaaaf", width: 1 }, data: [{ yAxis: 0 }] },
+      },
+      {
+        type: "line",
+        name: "沪深300等额参考",
+        data: benchmarkValues,
+        symbol: "none",
+        lineStyle: { color: CHART_COLORS.blue, width: 1.8, type: "dashed" },
+        itemStyle: { color: CHART_COLORS.blue },
+      },
+    ],
+  });
+  if (activeChartId === "dailyPnlChart") {
+    applyChartOption("dailyPnlChart");
+    charts.dailyPnlChart?.resize();
+  }
+}
+
+async function loadDailyPnlChart() {
+  const runId = currentRunId;
+  if (!runId) {
+    showDailyPnlEmpty("运行回测后查看逐标的每日盈亏");
+    return;
+  }
+  if (dailyPnlRunId === runId && dailyPnlData) {
+    renderDailyPnlChart();
+    return;
+  }
+  if (dailyPnlLoadingRunId === runId) return;
+  const requestVersion = ++dailyPnlRequestVersion;
+  dailyPnlLoadingRunId = runId;
+  showDailyPnlEmpty("正在加载全部交易日的逐标的盈亏…");
+  try {
+    const response = await api(`/api/backtest/${encodeURIComponent(runId)}/daily-pnl`, { attempts: 4, retryDelayMs: 500 });
+    if (requestVersion !== dailyPnlRequestVersion || currentRunId !== runId) return;
+    dailyPnlRunId = runId;
+    dailyPnlData = response.daily_pnl;
+    renderDailyPnlChart();
+  } catch (error) {
+    if (requestVersion === dailyPnlRequestVersion && currentRunId === runId) {
+      showDailyPnlEmpty(`逐日盈亏加载失败：${humanizeError(error.message)}`);
+    }
+  } finally {
+    if (requestVersion === dailyPnlRequestVersion) dailyPnlLoadingRunId = null;
+  }
 }
 
 function selectRecordPanel(panelId) {
@@ -1570,6 +1760,39 @@ function activeWeightSymbols(series) {
     .filter((symbol) => series.some((row) => Math.abs(Number(row.payload?.weights?.[symbol] || 0)) > 1e-8));
 }
 
+function portfolioSnapshotTooltip(series, metrics) {
+  const symbols = activeWeightSymbols(series);
+  return (params) => {
+    const points = Array.isArray(params) ? params : [params];
+    const dataIndex = points.find((point) => Number.isInteger(point?.dataIndex))?.dataIndex;
+    const row = Number.isInteger(dataIndex) ? series[dataIndex] : null;
+    if (!row) return "";
+
+    const metricLines = metrics.map(({ label, field }) => (
+      `<div style="display:flex;justify-content:space-between;gap:24px"><span>${escapeHtml(label)}</span><strong>${fmtPct(row[field])}</strong></div>`
+    )).join("");
+    const holdingLines = symbols
+      .filter((symbol) => {
+        const amount = Number(row.payload?.values?.[symbol] || 0);
+        const weight = Number(row.payload?.weights?.[symbol] || 0);
+        return Math.abs(amount) >= 0.005 || Math.abs(weight) > 1e-8;
+      })
+      .map((symbol) => {
+        const amount = Number(row.payload?.values?.[symbol] || 0);
+        const weight = Number(row.payload?.weights?.[symbol] || 0);
+        return `<div style="display:flex;justify-content:space-between;gap:24px"><span>${escapeHtml(assetName(symbol))}</span><strong>￥${fmtMoney(amount)} · ${fmtPct(weight)}</strong></div>`;
+      }).join("");
+
+    return [
+      `<div style="font-weight:700;margin-bottom:5px">${escapeHtml(row.trade_date)}</div>`,
+      metricLines,
+      `<div style="display:flex;justify-content:space-between;gap:24px"><span>组合总资产</span><strong>￥${fmtMoney(row.total_asset_cny)}</strong></div>`,
+      holdingLines ? '<div style="border-top:1px solid rgba(255,255,255,.22);margin:6px 0 5px;padding-top:5px;color:#d9e5e1">各标的金额 · 组合占比</div>' : "",
+      holdingLines,
+    ].join("");
+  };
+}
+
 function renderCharts(series) {
   if (!series.length) return;
   $("analysisEmpty").hidden = true;
@@ -1609,7 +1832,13 @@ function renderCharts(series) {
   queueChartOption("returnChart", {
     ...lineZoomOption(),
     title: { text: "收益率对比沪深300", left: 8, top: 4, textStyle: { fontSize: 14 } },
-    tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
+    tooltip: {
+      trigger: "axis",
+      formatter: portfolioSnapshotTooltip(series, [
+        { label: "策略累计收益", field: "cumulative_return" },
+        { label: "沪深300累计收益", field: "benchmark_return" },
+      ]),
+    },
     legend: { top: 4, right: 10 },
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", axisLabel: { formatter: (v) => `${(v * 100).toFixed(0)}%` } },
@@ -1629,7 +1858,10 @@ function renderCharts(series) {
   queueChartOption("drawdownChart", {
     ...lineZoomOption(),
     title: { text: "回撤", left: 8, top: 4, textStyle: { fontSize: 14 } },
-    tooltip: { trigger: "axis", valueFormatter: (v) => fmtPct(v) },
+    tooltip: {
+      trigger: "axis",
+      formatter: portfolioSnapshotTooltip(series, [{ label: "组合回撤", field: "drawdown" }]),
+    },
     xAxis: { type: "category", data: dates },
     yAxis: { type: "value", axisLabel: { formatter: (v) => `${(v * 100).toFixed(0)}%` } },
     series: [{ type: "line", areaStyle: { color: "rgba(211, 66, 63, 0.12)" }, name: "回撤", data: series.map((row) => row.drawdown), symbol: "none", lineStyle: { color: CHART_COLORS.danger, width: 1.8 }, itemStyle: { color: CHART_COLORS.danger } }],
@@ -1849,7 +2081,10 @@ function rebalanceDisplayRows(rows) {
       当年手续费: row.payload?.year_fee_cny ?? row.fee_cny,
     };
     for (const symbol of orderedSymbols) {
-      const perf = row.payload?.year_asset_performance?.[symbol] || row.payload?.asset_performance?.[symbol] || {};
+      const periodPerf = row.payload?.asset_performance?.[symbol];
+      const annualPerf = row.payload?.year_asset_performance?.[symbol];
+      const legacyRepo = symbol === "REPO" && Number(row.payload?.asset_performance_version || 1) < 2;
+      const perf = (legacyRepo ? periodPerf || annualPerf : annualPerf || periodPerf) || {};
       item[SHORT_NAMES[symbol] || assetName(symbol)] = {
         kind: "performance",
         profit: perf.profit_cny ?? "",
@@ -2063,9 +2298,10 @@ function archiveEntryMatches(entry) {
 
 function archiveSortValue(entry, mode) {
   const summary = entry.summary || {};
-  if (mode === "annual") return Number(summary.annualized_return || 0);
-  if (mode === "ratio") return annualReturnDrawdownRatio(summary) ?? Number.NEGATIVE_INFINITY;
-  if (mode === "drawdown") return Number(summary.max_drawdown || 0);
+  const metrics = entry.period_metrics || summary;
+  if (mode === "annual") return Number(metrics.annualized_return || 0);
+  if (mode === "ratio") return annualReturnDrawdownRatio(metrics) ?? Number.NEGATIVE_INFINITY;
+  if (mode === "drawdown") return Number(metrics.max_drawdown || 0);
   if (mode === "score") return Number(entry.ranking_score || summary.ranking_score || 0);
   const time = new Date(entryTime(entry)).getTime();
   return Number.isFinite(time) ? time : 0;
@@ -2081,21 +2317,25 @@ function filteredArchiveEntries(entries, mode) {
 
 function renderHistoryComparison() {
   const host = $("historyComparison");
-  const compared = archiveEntries().find((entry) => entryRunId(entry) === comparisonRunId);
-  const current = currentHistoryEntry();
+  const periodComparison = activeArchiveView === "leaderboard" && leaderboardPeriodMetadata?.comparable;
+  const sourceEntries = periodComparison ? leaderboardHistory : archiveEntries();
+  const compared = sourceEntries.find((entry) => entryRunId(entry) === comparisonRunId);
+  const current = periodComparison
+    ? sourceEntries.find((entry) => entryRunId(entry) === currentRunId)
+    : currentHistoryEntry();
   if (!host || !compared || !current || entryRunId(compared) === entryRunId(current)) {
     if (host) host.hidden = true;
     return;
   }
-  const summary = current.summary || {};
-  const baseline = compared.summary || {};
+  const summary = current.period_metrics || current.summary || {};
+  const baseline = compared.period_metrics || compared.summary || {};
   const annualDelta = Number(summary.annualized_return || 0) - Number(baseline.annualized_return || 0);
   const currentRatio = annualReturnDrawdownRatio(summary);
   const baselineRatio = annualReturnDrawdownRatio(baseline);
   const ratioDelta = currentRatio == null || baselineRatio == null ? null : currentRatio - baselineRatio;
   const drawdownDelta = Number(summary.max_drawdown || 0) - Number(baseline.max_drawdown || 0);
   host.hidden = false;
-  host.innerHTML = `<strong>当前结果 vs ${escapeHtml(historyTitle(compared))}</strong><span>年盈利率 ${annualDelta >= 0 ? "+" : ""}${fmtPct(annualDelta)} · 年盈利/回撤比 ${ratioDelta == null ? "—" : `${ratioDelta >= 0 ? "+" : ""}${fmtRatio(ratioDelta)}`} · 回撤 ${drawdownDelta >= 0 ? "+" : ""}${fmtPct(drawdownDelta)}</span>`;
+  host.innerHTML = `<strong>当前结果 vs ${escapeHtml(historyTitle(compared))}</strong><span>${periodComparison ? "同期年化" : "年盈利率"} ${annualDelta >= 0 ? "+" : ""}${fmtPct(annualDelta)} · 年盈利/回撤比 ${ratioDelta == null ? "—" : `${ratioDelta >= 0 ? "+" : ""}${fmtRatio(ratioDelta)}`} · 回撤 ${drawdownDelta >= 0 ? "+" : ""}${fmtPct(drawdownDelta)}</span>`;
 }
 
 function renderRunHistory() {
@@ -2141,20 +2381,29 @@ function renderLeaderboard(records) {
   if (!host) return;
   const displayRecords = filteredArchiveEntries(records, archiveSortModes.leaderboard);
   if (!displayRecords.length) {
-    host.innerHTML = `<div class="history-empty">${records.length ? "没有匹配的榜单记录。" : "完成回测后会自动进入全局榜单。"}</div>`;
+    host.innerHTML = `<div class="history-empty">${records.length ? "没有匹配的榜单记录。" : leaderboardPeriodMetadata?.comparable ? "当前区间没有覆盖完整且可比较的策略，请换一个年份或扩大区间。" : "完成回测后会自动进入全局榜单。"}</div>`;
+    renderHistoryComparison();
     return;
   }
   host.innerHTML = displayRecords.map((entry) => {
     const summary = entry.summary || {};
+    const metrics = entry.period_metrics || summary;
+    const isPeriodRanking = Boolean(entry.period_metrics);
     const runId = entryRunId(entry);
-    const ratio = annualReturnDrawdownRatio(summary);
+    const ratio = annualReturnDrawdownRatio(metrics);
     const isCurrent = runId === currentRunId;
     const compareLabel = runId === comparisonRunId ? "取消对比" : "对比";
+    const metricMarkup = isPeriodRanking
+      ? `<span>区间收益<b class="metric-value is-${annualReturnTone(metrics.total_return)}">${fmtPct(metrics.total_return)}</b></span><span>区间年化<b class="metric-value is-${annualReturnTone(metrics.annualized_return)}">${fmtPct(metrics.annualized_return)}</b></span><span>最大回撤<b class="metric-value is-${drawdownTone(metrics.max_drawdown)}">${fmtPct(metrics.max_drawdown)}</b></span><span>同期现金超额<b>${fmtPct(metrics.excess_annualized_return)}</b></span><span>正收益月份<b>${fmtPct(metrics.positive_month_ratio)}（${Number(metrics.positive_month_count || 0)}/${Number(metrics.month_count || 0)}）</b></span><span>评价区间<b>${escapeHtml(`${metrics.start_date || "-"} 至 ${metrics.end_date || "-"}`)}</b></span>`
+      : `<span>年盈利率<b class="metric-value is-${annualReturnTone(summary.annualized_return)}">${fmtPct(summary.annualized_return)}</b></span><span>年盈利/回撤比<b class="metric-value is-${ratioTone(ratio)}">${fmtRatio(ratio)}</b></span><span>最大回撤<b class="metric-value is-${drawdownTone(summary.max_drawdown)}">${fmtPct(summary.max_drawdown)}</b></span><span>超额年化<b>${fmtPct(summary.excess_annualized_return)}</b></span><span>年度正收益<b>${fmtPct(summary.positive_year_ratio)}（${Number(entry.positive_year_count || summary.positive_year_count || 0)}/${Number(entry.complete_year_count || summary.complete_year_count || 0)}）</b></span><span>回测时间<b>${escapeHtml(`${summary.start_date || entry.config?.start_date || "-"} 至 ${summary.end_date || entry.config?.end_date || "-"}`)}</b></span>`;
+    const scoreMarkup = isPeriodRanking
+      ? `同期相对评分 ${Number(entry.ranking_score || 0).toFixed(2)} / 100 · 现金基准 ${fmtPct(metrics.repo_annualized_return)} · 样本覆盖 ${fmtPct(metrics.coverage_ratio)}`
+      : `综合评分 ${Number(entry.ranking_score || summary.ranking_score || 0).toFixed(2)} / 100 · 逆回购基准 ${fmtPct(summary.repo_annualized_return)}`;
     return `<article class="history-item leaderboard-item${isCurrent ? " is-current" : ""}">
       <div class="history-item-header"><span class="leaderboard-rank">#${Number(entry.rank || 0)}</span><time>${escapeHtml(formatHistoryTime(entryTime(entry)))}</time></div>
       <div class="history-item-params"><strong>${escapeHtml(historyTitle(entry))}</strong><br>${escapeHtml(historyParams(entry))}</div>
-      <div class="leaderboard-metrics"><span>年盈利率<b class="metric-value is-${annualReturnTone(summary.annualized_return)}">${fmtPct(summary.annualized_return)}</b></span><span>年盈利/回撤比<b class="metric-value is-${ratioTone(ratio)}">${fmtRatio(ratio)}</b></span><span>最大回撤<b class="metric-value is-${drawdownTone(summary.max_drawdown)}">${fmtPct(summary.max_drawdown)}</b></span><span>超额年化<b>${fmtPct(summary.excess_annualized_return)}</b></span><span>年度正收益<b>${fmtPct(summary.positive_year_ratio)}（${Number(entry.positive_year_count || summary.positive_year_count || 0)}/${Number(entry.complete_year_count || summary.complete_year_count || 0)}）</b></span><span>回测时间<b>${escapeHtml(`${summary.start_date || entry.config?.start_date || "-"} 至 ${summary.end_date || entry.config?.end_date || "-"}`)}</b></span></div>
-      <div class="leaderboard-score">综合评分 ${Number(entry.ranking_score || summary.ranking_score || 0).toFixed(2)} / 100 · 逆回购基准 ${fmtPct(summary.repo_annualized_return)}</div>
+      <div class="leaderboard-metrics">${metricMarkup}</div>
+      <div class="leaderboard-score">${scoreMarkup}</div>
       <div class="history-item-actions"><button type="button" data-leaderboard-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-leaderboard-replay="${escapeHtml(runId)}">查看结果</button><button type="button" class="danger" data-leaderboard-delete="${escapeHtml(runId)}">删除</button></div>
     </article>`;
   }).join("");
@@ -2171,16 +2420,63 @@ function renderLeaderboard(records) {
   host.querySelectorAll("[data-leaderboard-delete]").forEach((button) => {
     button.addEventListener("click", () => deleteHistoryRun(button.dataset.leaderboardDelete));
   });
+  renderHistoryComparison();
 }
 
 function updateArchiveSortControl() {
   const select = $("historySort");
   if (!select) return;
   const options = activeArchiveView === "leaderboard"
-    ? [["score", "按综合评分"], ["annual", "按年盈利率"], ["ratio", "按盈利回撤比"], ["drawdown", "按最大回撤"]]
+    ? [["score", leaderboardPeriodMetadata?.comparable ? "按同期评分" : "按综合评分"], ["annual", leaderboardPeriodMetadata?.comparable ? "按区间年化" : "按年盈利率"], ["ratio", "按盈利回撤比"], ["drawdown", "按最大回撤"]]
     : [["newest", "按最新时间"], ["annual", "按年盈利率"], ["ratio", "按盈利回撤比"], ["drawdown", "按最大回撤"]];
   select.innerHTML = options.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
   select.value = archiveSortModes[activeArchiveView];
+}
+
+function leaderboardRequestPath() {
+  if (!leaderboardPeriodSelection) return "/api/backtest/leaderboard";
+  if (leaderboardPeriodSelection === "all") return "/api/backtest/leaderboard?period=all";
+  if (leaderboardPeriodSelection.startsWith("year:")) {
+    return `/api/backtest/leaderboard?year=${encodeURIComponent(leaderboardPeriodSelection.slice(5))}`;
+  }
+  if (leaderboardPeriodSelection === "custom") {
+    const startDate = String($("leaderboardStartDate")?.value || "");
+    const endDate = String($("leaderboardEndDate")?.value || "");
+    return `/api/backtest/leaderboard?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`;
+  }
+  return "/api/backtest/leaderboard";
+}
+
+function syncLeaderboardPeriodControls(payload) {
+  leaderboardPeriodMetadata = payload.period || null;
+  leaderboardAvailableYears = (payload.available_years || []).map(Number).filter(Number.isFinite);
+  const select = $("leaderboardPeriod");
+  if (!select) return;
+  const options = [
+    ...leaderboardAvailableYears.map((year, index) => [`year:${year}`, index === 0 ? `${year}年（最新完整年度）` : `${year}年`]),
+    ["all", "各自完整回测期（不可直接横比）"],
+    ["custom", "自定义时间区间"],
+  ];
+  select.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
+  if (leaderboardPeriodMetadata?.mode === "year") {
+    leaderboardPeriodSelection = `year:${String(leaderboardPeriodMetadata.start_date || "").slice(0, 4)}`;
+  } else if (leaderboardPeriodMetadata?.mode === "custom") {
+    leaderboardPeriodSelection = "custom";
+  } else {
+    leaderboardPeriodSelection = "all";
+  }
+  select.value = leaderboardPeriodSelection;
+  const custom = $("leaderboardCustomPeriod");
+  if (custom) custom.hidden = leaderboardPeriodSelection !== "custom";
+  if (leaderboardPeriodMetadata?.mode === "custom") {
+    if ($("leaderboardStartDate")) $("leaderboardStartDate").value = leaderboardPeriodMetadata.start_date || "";
+    if ($("leaderboardEndDate")) $("leaderboardEndDate").value = leaderboardPeriodMetadata.end_date || "";
+  }
+  const meta = $("leaderboardPeriodMeta");
+  if (meta) {
+    const peerText = leaderboardPeriodMetadata?.comparable ? ` · ${Number(leaderboardPeriodMetadata.peer_count || 0)} 组同期可比` : "";
+    meta.textContent = `${leaderboardPeriodMetadata?.label || "榜单"}${peerText} · ${leaderboardPeriodMetadata?.description || ""}`;
+  }
 }
 
 function selectArchiveView(view) {
@@ -2212,15 +2508,20 @@ async function refreshRecentArchive() {
 }
 
 async function refreshLeaderboardArchive() {
+  const requestVersion = ++leaderboardRequestVersion;
   leaderboardArchiveLoading = true;
   if ($("leaderboardTab")) $("leaderboardTab").textContent = "全局榜单 加载中";
   try {
-    const leaderboard = await api("/api/backtest/leaderboard");
+    const leaderboard = await api(leaderboardRequestPath());
+    if (requestVersion !== leaderboardRequestVersion) return;
     leaderboardHistory = (leaderboard.records || []).slice(0, MAX_LEADERBOARD_RUNS);
+    syncLeaderboardPeriodControls(leaderboard);
+    updateArchiveSortControl();
     leaderboardArchiveLoaded = true;
   } finally {
-    leaderboardArchiveLoading = false;
+    if (requestVersion === leaderboardRequestVersion) leaderboardArchiveLoading = false;
   }
+  if (requestVersion !== leaderboardRequestVersion) return;
   if ($("leaderboardTab")) $("leaderboardTab").textContent = `全局榜单 ${leaderboardHistory.length}`;
   renderLeaderboard(leaderboardHistory);
 }
@@ -2260,7 +2561,10 @@ async function deleteHistoryRun(runId) {
   if (!runId || !window.confirm("删除这组回测及其榜单记录？此操作不可恢复。")) return;
   try {
     await api(`/api/backtest/${encodeURIComponent(runId)}`, { method: "DELETE", retry: true });
-    if (currentRunId === runId) currentRunId = null;
+    if (currentRunId === runId) {
+      currentRunId = null;
+      resetDailyPnlChart();
+    }
     if (comparisonRunId === runId) comparisonRunId = null;
     await refreshBacktestArchiveSafely({ includeLeaderboard: true });
     setMessage("回测记录已从数据库删除");
@@ -2276,6 +2580,7 @@ async function replayHistoryRun(runId) {
     const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`);
     config = JSON.parse(JSON.stringify(entry.config));
     renderControls();
+    resetDailyPnlChart();
     currentRunId = entry.run_id;
     renderSummary(entry.summary);
     const { rebalance, trades } = await loadBacktestResultSections(currentRunId, async (series) => {
@@ -2317,6 +2622,7 @@ async function runBacktest() {
     });
     setMessage(job.message || "回测任务已进入队列");
     const result = await waitForBacktestJob(job.job_id);
+    resetDailyPnlChart();
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
     renderSummary(result.summary);
@@ -2418,12 +2724,48 @@ function setupUiInteractions() {
     renderRunHistory();
     renderLeaderboard(leaderboardHistory);
   });
+  $("leaderboardPeriod")?.addEventListener("change", (event) => {
+    leaderboardPeriodSelection = String(event.target.value || "all");
+    const custom = $("leaderboardCustomPeriod");
+    if (custom) custom.hidden = leaderboardPeriodSelection !== "custom";
+    if (leaderboardPeriodSelection === "custom") {
+      if ($("leaderboardStartDate") && !$("leaderboardStartDate").value) $("leaderboardStartDate").value = config?.start_date || "";
+      if ($("leaderboardEndDate") && !$("leaderboardEndDate").value) $("leaderboardEndDate").value = config?.end_date || "";
+      return;
+    }
+    leaderboardArchiveLoaded = false;
+    refreshLeaderboardArchiveSafely();
+  });
+  $("applyLeaderboardPeriod")?.addEventListener("click", () => {
+    const startInput = $("leaderboardStartDate");
+    const endInput = $("leaderboardEndDate");
+    const startDate = String(startInput?.value || "");
+    const endDate = String(endInput?.value || "");
+    const valid = Boolean(startDate && endDate && startDate <= endDate);
+    [startInput, endInput].filter(Boolean).forEach((input) => input.setCustomValidity(valid ? "" : "请选择有效的开始和结束日期"));
+    if (!valid) {
+      (startInput?.value ? endInput : startInput)?.reportValidity();
+      return;
+    }
+    leaderboardPeriodSelection = "custom";
+    leaderboardArchiveLoaded = false;
+    refreshLeaderboardArchiveSafely();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (document.body.classList.contains("parameters-open")) setParameterPanel(false);
     if (document.body.classList.contains("history-open")) setHistoryPanel(false);
   });
   setupTabs("[data-chart-tab]", "chartTab", selectChart);
+  document.querySelectorAll("[data-daily-pnl-scale]").forEach((button) => {
+    button.addEventListener("click", () => {
+      dailyPnlScale = button.dataset.dailyPnlScale === "percent" ? "percent" : "amount";
+      document.querySelectorAll("[data-daily-pnl-scale]").forEach((option) => {
+        option.setAttribute("aria-pressed", option.dataset.dailyPnlScale === dailyPnlScale ? "true" : "false");
+      });
+      renderDailyPnlChart();
+    });
+  });
   setupTabs("[data-record-tab]", "recordTab", selectRecordPanel);
   selectChart(activeChartId);
   selectRecordPanel("statusPanel");

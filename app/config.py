@@ -331,6 +331,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Relative tolerance around each target weight; 25% means a 10% target can
     # drift between 7.5% and 12.5% before a rebalance is needed.
     "rebalance_band": 0.25,
+    # False minimizes turnover by moving only just inside the tolerance band.
+    # True restores every sleeve to its configured target after a breach.
+    "rebalance_to_target": False,
     "monthly_spend_cny": 5_000.0,
     "monthly_spend_day": "first_cn_trade_day",
     "repo_target_mode": "residual_weight",
@@ -655,6 +658,8 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("rolling_window_years must be an integer between 1 and 20")
     if not isinstance(config.get("rebalance_month_analysis_enabled", False), bool):
         errors.append("rebalance_month_analysis_enabled must be boolean")
+    if not isinstance(config.get("rebalance_to_target", False), bool):
+        errors.append("rebalance_to_target must be boolean")
     if not isinstance(config.get("dip_buy_enabled", False), bool):
         errors.append("dip_buy_enabled must be boolean")
     if not isinstance(config.get("dip_buy_blackout_enabled", True), bool):

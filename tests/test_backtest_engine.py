@@ -15,11 +15,14 @@ from app.services.backtest_engine import (
     _asset_period_performance,
     _buy_position,
     _cover_cash_shortfall,
+    _daily_asset_profit_cny,
     _sell_position,
     _invest_idle_cash_in_repo,
     _invest_repo_cash,
     _mature_repo_lots,
     _portfolio_value,
+    _rebalance_state_to_band,
+    _repo_cumulative_profit_cny,
     _repo_spend_reserve,
     benchmark_returns,
     adjusted_price_and_share_scale_series,
@@ -29,6 +32,7 @@ from app.services.backtest_engine import (
     attach_proxy_price_maps,
     comparison_assets,
     compute_metrics,
+    dip_buy_annual_budget,
     dip_buy_assets,
     dip_buy_cash_buffer_cny,
     is_dip_buy_blackout_month,
@@ -53,6 +57,23 @@ from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
 class BacktestEngineTests(unittest.TestCase):
+    def test_daily_asset_profit_excludes_principal_and_attributes_income_and_fees(self) -> None:
+        profit = _daily_asset_profit_cny(
+            {"A": 1_000.0, "B": 0.0, "REPO": 500.0},
+            {"A": 900.0, "B": 200.0, "REPO": 390.0},
+            [
+                {"symbol": "A", "side": "SELL", "payload_json": json.dumps({"cash_cny": 95.0})},
+                {"symbol": "B", "side": "BUY", "payload_json": json.dumps({"spent_cny": 210.0})},
+            ],
+            {"A": 10.0},
+            {"A": 2.0},
+            3.0,
+        )
+
+        self.assertAlmostEqual(profit["A"], 3.0)
+        self.assertAlmostEqual(profit["B"], -10.0)
+        self.assertAlmostEqual(profit["REPO"], 3.0)
+
     def test_dividend_low_vol_proxy_deducts_expenses_without_double_charging_real_etf(self) -> None:
         asset = next(
             item for item in normalize_config({})["assets"] if item["symbol"] == "512890.SH"
@@ -169,6 +190,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertGreater(len(rebalances), 0)
         payload = json.loads(daily[-1]["payload_json"])
         self.assertIn("weights", payload)
+        self.assertIn("asset_daily_profit_cny", payload)
         self.assertIn("unrealized_pnl_cny", payload)
         self.assertIn("comparison", payload)
         self.assertGreater(payload["comparison"]["total_asset_cny"], 0)
@@ -180,7 +202,15 @@ class BacktestEngineTests(unittest.TestCase):
         ) / cfg["initial_capital_cny"]
         self.assertAlmostEqual(daily[0]["daily_return"], first_expected_return)
         self.assertAlmostEqual(daily[-1]["cumulative_return"], result["summary"]["total_return"])
+        previous_total = float(cfg["initial_capital_cny"])
+        for row in daily:
+            daily_payload = json.loads(row["payload_json"])
+            attributed_profit = sum(daily_payload["asset_daily_profit_cny"].values())
+            economic_profit = row["total_asset_cny"] - previous_total - row["flow_cny"]
+            self.assertAlmostEqual(attributed_profit, economic_profit, places=6)
+            previous_total = row["total_asset_cny"]
         rebalance_payload = json.loads(rebalances[0]["payload_json"])
+        self.assertEqual(rebalance_payload["asset_performance_version"], 2)
         self.assertIn("asset_performance", rebalance_payload)
         self.assertIn("REPO", rebalance_payload["asset_performance"])
         self.assertIn("profit_cny", rebalance_payload["asset_performance"]["REPO"])
@@ -293,7 +323,11 @@ class BacktestEngineTests(unittest.TestCase):
         actual_spend = dip_trades[0]["gross_amount"] + dip_trades[0]["fee"]
         self.assertLessEqual(actual_spend, expected_budget)
         self.assertLess(expected_budget - actual_spend, 8.75 * 100 + 1)
-        self.assertEqual(first_payload["dip_buy"]["cash_buffer_cny"], 230_000.0)
+        self.assertEqual(first_payload["dip_buy"]["cash_buffer_cny"], 240_000.0)
+        self.assertAlmostEqual(
+            first_payload["dip_buy"]["pool_cny"],
+            first_payload["dip_buy"]["confirmed_cash_equivalent_cny"] - 240_000.0,
+        )
         self.assertGreater(first_payload["repo_lots"], 0)
 
     def test_dip_buy_waits_when_the_next_session_open_is_missing(self) -> None:
@@ -447,7 +481,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(maturity_dip["pending_count"], 1)
         self.assertEqual(dip_trades, [{"trade_date": "2020-01-09", "price": 8.25}])
 
-    def test_dip_buy_asset_scope_and_declining_monthly_cash_buffer(self) -> None:
+    def test_dip_buy_asset_scope_and_fixed_24_month_cash_buffer(self) -> None:
         cfg = normalize_config({})
         for asset in cfg["assets"]:
             asset["enabled"] = asset["symbol"] in {"VOO", "512890.SH", "510300.SH", "518880.SH", "CBA03101"}
@@ -456,12 +490,44 @@ class BacktestEngineTests(unittest.TestCase):
         symbols = {asset["symbol"] for asset in dip_buy_assets(cfg, date(2020, 1, 15), prices)}
 
         self.assertEqual(symbols, {"512890.SH", "510300.SH", "518880.SH", "CBA03101"})
-        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2020, 1, 31)), 230_000)
-        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2020, 2, 1)), 220_000)
-        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2020, 12, 1)), 120_000)
-        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2020, 1, 15), date(2022, 1, 1)), 120_000)
-        # A new annual rebalance date refreshes the post-spend ledger to 23 months.
-        self.assertEqual(dip_buy_cash_buffer_cny(10_000, date(2021, 1, 15), date(2021, 1, 15)), 230_000)
+        self.assertEqual(dip_buy_cash_buffer_cny(10_000), 240_000)
+        self.assertEqual(dip_buy_cash_buffer_cny(0), 0)
+        self.assertEqual(dip_buy_annual_budget(400_000, 10_000, 10), (240_000, 160_000, 16_000, 10))
+        self.assertEqual(dip_buy_annual_budget(200_000, 10_000, 10), (240_000, 0, 0, 0))
+
+    def test_dip_buy_budget_is_locked_for_each_annual_rebalance_cycle(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2021-01-08")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        cfg["dip_buy_enabled"] = True
+        cfg["monthly_spend_cny"] = 10_000.0
+
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            rows = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date,payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date",
+                    (result["run_id"],),
+                )
+            )
+
+        cycles: dict[str, list[dict]] = {}
+        for row in rows:
+            payload = json.loads(row["payload_json"])["dip_buy"]
+            cycles.setdefault(payload["last_rebalance_date"], []).append(payload)
+
+        self.assertGreaterEqual(len(cycles), 2)
+        first_cycle = cycles[min(cycles)]
+        self.assertGreater(len(first_cycle), 20)
+        self.assertEqual({payload["cash_buffer_cny"] for payload in first_cycle}, {240_000.0})
+        self.assertEqual(len({payload["confirmed_cash_equivalent_cny"] for payload in first_cycle}), 1)
+        self.assertEqual(len({payload["pool_cny"] for payload in first_cycle}), 1)
+        self.assertEqual(len({payload["piece_cny"] for payload in first_cycle}), 1)
+        self.assertGreater(len({round(payload["cash_equivalent_cny"], 2) for payload in first_cycle}), 1)
+        for cycle in cycles.values():
+            confirmed = cycle[0]["confirmed_cash_equivalent_cny"]
+            self.assertAlmostEqual(cycle[0]["pool_cny"], max(confirmed - 240_000.0, 0.0))
 
     def test_dip_buy_blackout_months_wrap_year_and_exclude_rebalance_month(self) -> None:
         self.assertTrue(is_dip_buy_blackout_month(date(2020, 12, 1), 1, 1))
@@ -832,7 +898,9 @@ class BacktestEngineTests(unittest.TestCase):
         mid_value = _portfolio_value(state, {}, {}, mid_day)[0]
         maturity_value = _portfolio_value(state, {}, {}, lot.maturity_date)[0]
         self.assertAlmostEqual(same_day_value, 10000.0 - lot.fee)
+        self.assertAlmostEqual(_repo_cumulative_profit_cny(state, trade_day), -lot.fee)
         self.assertGreater(mid_value, same_day_value)
+        self.assertGreater(_repo_cumulative_profit_cny(state, mid_day), -lot.fee)
         self.assertLess(mid_value, maturity_value)
         self.assertAlmostEqual(maturity_value, 10000.0 + lot.interest - lot.fee)
         self.assertAlmostEqual(state.total_fees_cny, lot.fee)
@@ -840,6 +908,11 @@ class BacktestEngineTests(unittest.TestCase):
         _mature_repo_lots(state, lot.maturity_date)
         self.assertAlmostEqual(state.cash_cny, maturity_value)
         self.assertAlmostEqual(state.total_fees_cny, lot.fee)
+        self.assertAlmostEqual(state.repo_realized_interest_cny, lot.interest)
+        self.assertAlmostEqual(
+            _repo_cumulative_profit_cny(state, lot.maturity_date),
+            lot.interest - lot.fee,
+        )
 
     def test_repo_benchmark_return_includes_first_reference_day(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
@@ -1042,7 +1115,33 @@ class BacktestEngineTests(unittest.TestCase):
             if "year_fee_cny" in payload
         )
         self.assertAlmostEqual(annual_payload["year_fee_cny"], opening_fee)
-        self.assertEqual(annual_payload["year_asset_performance"]["REPO"]["external_flow_cny"], -60_000.0)
+        self.assertEqual(annual_payload["year_asset_performance"]["REPO"]["external_flow_cny"], -55_000.0)
+
+    def test_annual_repo_performance_does_not_treat_initial_allocation_as_a_loss(self) -> None:
+        db_path, cfg = build_synced_db("2024-01-01", "2025-01-10")
+        cfg["initial_capital_cny"] = 2_000_000.0
+        cfg["monthly_spend_cny"] = 10_000.0
+
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            rows = rows_to_dicts(
+                conn.execute(
+                    "SELECT payload_json FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date",
+                    (result["run_id"],),
+                )
+            )
+
+        annual_payload = next(
+            payload
+            for payload in (json.loads(row["payload_json"]) for row in rows)
+            if "year_asset_performance" in payload
+        )
+        annual_repo = annual_payload["year_asset_performance"]["REPO"]
+        period_repo = annual_payload["asset_performance"]["REPO"]
+        self.assertGreater(annual_repo["profit_cny"], 0.0)
+        self.assertGreater(annual_repo["return"], 0.0)
+        self.assertLess(annual_repo["return"], 0.10)
+        self.assertAlmostEqual(annual_repo["profit_cny"], period_repo["profit_cny"], places=6)
 
     def test_ranking_rejects_repo_like_return_and_caps_tiny_drawdown(self) -> None:
         ranking = ranking_metrics(0.031, 0.03, -0.001, 0, 0)
@@ -1059,6 +1158,222 @@ class BacktestEngineTests(unittest.TestCase):
         desired = minimal_rebalance_weights({"A": 0.60, "REPO": 0.40}, {"A": 0.50, "REPO": 0.50}, 0.02)
         self.assertAlmostEqual(desired["A"], 0.51)
         self.assertAlmostEqual(desired["REPO"], 0.49)
+
+    def test_rebalance_can_restore_exact_standard_weights_after_band_breach(self) -> None:
+        cfg = normalize_config({})
+        state = PortfolioState(
+            cash_cny=200_000.0,
+            positions={
+                "A": Position("A", "CN", "CNY", "cn_bond_index", 600_000.0, 600_000.0),
+                "B": Position("B", "CN", "CNY", "cn_bond_index", 200_000.0, 200_000.0),
+            },
+        )
+        trades: list[dict] = []
+        targets = {"A": 0.40, "B": 0.40, "REPO": 0.20}
+
+        _before, _after, turnover, _fee, desired = _rebalance_state_to_band(
+            state,
+            [{"symbol": "A"}, {"symbol": "B"}],
+            date(2020, 1, 2),
+            {"A": 1.0, "B": 1.0},
+            {},
+            cfg["fees"],
+            trades,
+            True,
+            targets,
+            0.10,
+            True,
+        )
+        total, values = _portfolio_value(state, {"A": 1.0, "B": 1.0}, {}, date(2020, 1, 2))
+        weights = {symbol: value / total for symbol, value in values.items()}
+
+        self.assertEqual([(trade["symbol"], trade["side"]) for trade in trades], [("A", "SELL"), ("B", "BUY")])
+        self.assertAlmostEqual(turnover, 400_000.0)
+        for symbol, target in targets.items():
+            self.assertAlmostEqual(desired[symbol], target)
+            self.assertAlmostEqual(weights[symbol], target)
+
+    def test_minimal_rebalance_uses_money_fund_for_residual_before_risk_assets(self) -> None:
+        desired = minimal_rebalance_weights(
+            {"A": 0.60, "B": 0.10, "MONEY": 0.30},
+            {"A": 0.40, "B": 0.30, "MONEY": 0.30},
+            0.10,
+            {"MONEY"},
+        )
+
+        self.assertAlmostEqual(desired["A"], 0.44)
+        self.assertAlmostEqual(desired["B"], 0.27)
+        self.assertAlmostEqual(desired["MONEY"], 0.29)
+
+    def test_minimal_rebalance_trades_each_needed_asset_once_and_keeps_others(self) -> None:
+        cfg = normalize_config({})
+        state = PortfolioState(
+            cash_cny=100_000.0,
+            positions={
+                "A": Position("A", "CN", "CNY", "cn_bond_index", 600_000.0, 600_000.0),
+                "B": Position("B", "CN", "CNY", "cn_bond_index", 200_000.0, 200_000.0),
+                "C": Position("C", "CN", "CNY", "cn_bond_index", 100_000.0, 100_000.0),
+            },
+        )
+        assets = [{"symbol": symbol} for symbol in ("A", "B", "C")]
+        targets = {"A": 0.40, "B": 0.30, "C": 0.10, "REPO": 0.20}
+        trades: list[dict] = []
+
+        _before, _after, turnover, _fee, desired = _rebalance_state_to_band(
+            state,
+            assets,
+            date(2020, 1, 2),
+            {"A": 1.0, "B": 1.0, "C": 1.0},
+            {},
+            cfg["fees"],
+            trades,
+            True,
+            targets,
+            0.10,
+            False,
+        )
+        total, values = _portfolio_value(state, {"A": 1.0, "B": 1.0, "C": 1.0}, {}, date(2020, 1, 2))
+        weights = {symbol: value / total for symbol, value in values.items()}
+
+        self.assertEqual([(trade["symbol"], trade["side"]) for trade in trades], [("A", "SELL"), ("B", "BUY")])
+        self.assertGreater(state.positions["A"].quantity, 0.0)
+        self.assertEqual(state.positions["C"].quantity, 100_000.0)
+        # The extra CNY 20 is the deliberately tiny inside-edge guard: CNY 10
+        # on each side of a CNY 1m portfolio prevents subsequent same-day fees
+        # from putting an exact boundary trade back outside the band.
+        self.assertAlmostEqual(turnover, 230_020.0)
+        self.assertAlmostEqual(desired["REPO"], 0.19)
+        self.assertAlmostEqual(desired["A"], 0.44)
+        self.assertAlmostEqual(desired["B"], 0.27)
+        self.assertAlmostEqual(desired["C"], 0.10)
+        for symbol, target in targets.items():
+            self.assertGreaterEqual(weights[symbol], target * 0.90 - 1e-10)
+            self.assertLessEqual(weights[symbol], target * 1.10 + 1e-10)
+
+    def test_minimal_rebalance_accounts_for_cn_etf_lots_and_fees(self) -> None:
+        state = PortfolioState(
+            cash_cny=101_630.0,
+            positions={
+                "A": Position("A", "CN", "CNY", "cn_etf", 220_000.0, 697_400.0),
+                "B": Position("B", "CN", "CNY", "cn_etf", 87_000.0, 200_970.0),
+            },
+        )
+        assets = [
+            {"symbol": "A", "market": "CN", "currency": "CNY", "asset_type": "cn_etf"},
+            {"symbol": "B", "market": "CN", "currency": "CNY", "asset_type": "cn_etf"},
+        ]
+        targets = {"A": 0.40, "B": 0.40, "REPO": 0.20}
+        prices = {"A": 3.17, "B": 2.31}
+        trades: list[dict] = []
+
+        _rebalance_state_to_band(
+            state,
+            assets,
+            date(2020, 1, 2),
+            prices,
+            {},
+            normalize_config({})["fees"],
+            trades,
+            False,
+            targets,
+            0.10,
+            False,
+        )
+        total, values = _portfolio_value(state, prices, {}, date(2020, 1, 2))
+        weights = {symbol: value / total for symbol, value in values.items()}
+
+        self.assertEqual([(trade["symbol"], trade["side"]) for trade in trades], [("A", "SELL"), ("B", "BUY")])
+        self.assertEqual(trades[0]["quantity"] % 100, 0)
+        self.assertEqual(trades[1]["quantity"] % 100, 0)
+        self.assertGreater(state.positions["A"].quantity, 0.0)
+        self.assertFalse(should_rebalance(weights, targets, 0.10), msg=f"weights={weights}")
+
+    def test_fixed_bucket_later_rebalance_uses_band_edges_without_liquidating(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2021-01-08")
+        cfg["monthly_spend_cny"] = 0.0
+        cfg["repo_target_mode"] = "fixed_bucket"
+        cfg["repo_fixed_target_cny"] = 200_000.0
+        cfg["repo_fixed_target_ratio"] = 0.0
+        cfg["rebalance_band"] = 0.10
+        selected = {"CBA03101", "CBA06501"}
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] in selected
+            asset["target_weight"] = 0.40 if asset["enabled"] else 0.0
+
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM fund_dividends")
+            conn.execute(
+                "UPDATE prices SET open=100,high=100,low=100,close=100,adj_close=100 WHERE symbol IN ('CBA03101','CBA06501') AND trade_date<'2021-01-01'"
+            )
+            conn.execute(
+                "UPDATE prices SET open=200,high=200,low=200,close=200,adj_close=200 WHERE symbol='CBA03101' AND trade_date>='2021-01-01'"
+            )
+            conn.execute(
+                "UPDATE prices SET open=50,high=50,low=50,close=50,adj_close=50 WHERE symbol='CBA06501' AND trade_date>='2021-01-01'"
+            )
+            result = run_backtest(conn, cfg)
+            annual = conn.execute(
+                "SELECT rebalance_date,payload_json FROM rebalance_events WHERE run_id=? AND rebalance_date>='2021-01-01' ORDER BY rebalance_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+            annual_trades = rows_to_dicts(
+                conn.execute(
+                    "SELECT symbol,side,quantity FROM trades WHERE run_id=? AND trade_date=? AND reason='rebalance' ORDER BY side DESC,symbol",
+                    (result["run_id"], annual["rebalance_date"]),
+                )
+            )
+            daily = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date=?",
+                (result["run_id"], annual["rebalance_date"]),
+            ).fetchone()
+
+        payload = json.loads(annual["payload_json"])
+        weights = json.loads(daily["payload_json"])["weights"]
+        self.assertNotAlmostEqual(payload["desired_weights"]["CBA03101"], payload["targets"]["CBA03101"])
+        self.assertNotAlmostEqual(payload["desired_weights"]["CBA06501"], payload["targets"]["CBA06501"])
+        self.assertEqual([(trade["symbol"], trade["side"]) for trade in annual_trades], [("CBA03101", "SELL"), ("CBA06501", "BUY")])
+        self.assertGreater(weights["CBA03101"], 0.0)
+        self.assertFalse(
+            should_rebalance(weights, payload["targets"], cfg["rebalance_band"]),
+            msg=f"weights={weights}, targets={payload['targets']}, desired={payload['desired_weights']}",
+        )
+
+    def test_later_rebalance_uses_standard_targets_when_option_is_enabled(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2021-01-08")
+        cfg["monthly_spend_cny"] = 0.0
+        cfg["rebalance_band"] = 0.10
+        cfg["rebalance_to_target"] = True
+        selected = {"CBA03101", "CBA06501"}
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] in selected
+            asset["target_weight"] = 0.40 if asset["enabled"] else 0.0
+
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM fund_dividends")
+            conn.execute(
+                "UPDATE prices SET open=100,high=100,low=100,close=100,adj_close=100 WHERE symbol IN ('CBA03101','CBA06501') AND trade_date<'2021-01-01'"
+            )
+            conn.execute(
+                "UPDATE prices SET open=200,high=200,low=200,close=200,adj_close=200 WHERE symbol='CBA03101' AND trade_date>='2021-01-01'"
+            )
+            conn.execute(
+                "UPDATE prices SET open=50,high=50,low=50,close=50,adj_close=50 WHERE symbol='CBA06501' AND trade_date>='2021-01-01'"
+            )
+            result = run_backtest(conn, cfg)
+            annual = conn.execute(
+                "SELECT rebalance_date,payload_json FROM rebalance_events WHERE run_id=? AND rebalance_date>='2021-01-01' ORDER BY rebalance_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+            daily = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date=?",
+                (result["run_id"], annual["rebalance_date"]),
+            ).fetchone()
+
+        payload = json.loads(annual["payload_json"])
+        weights = json.loads(daily["payload_json"])["weights"]
+        for symbol, target in payload["targets"].items():
+            self.assertAlmostEqual(payload["desired_weights"][symbol], target)
+            self.assertAlmostEqual(weights[symbol], target, places=4)
 
     def test_relative_rebalance_band_scales_with_target_weight(self) -> None:
         targets = {"BOND": 0.10, "REPO": 0.90}

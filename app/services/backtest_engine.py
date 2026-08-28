@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 import calendar
@@ -49,14 +50,14 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 32
+BACKTEST_ENGINE_VERSION = 37
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
 RANKING_EXCESS_RETURN_CAP = 0.15
 RANKING_CALMAR_CAP = 1.5
 DIP_BUY_CASH_BUFFER_MONTHS = 24
-DIP_BUY_INSURANCE_MONTHS = 12
+REBALANCE_EDGE_GUARD_WEIGHT = 1e-5
 _MONEY_FUND_UNSET = object()
 
 
@@ -92,6 +93,8 @@ class PortfolioState:
     total_spend_cny: float = 0.0
     total_withheld_tax_cny: float = 0.0
     total_dividend_cny: float = 0.0
+    repo_realized_interest_cny: float = 0.0
+    repo_fees_cny: float = 0.0
 
 
 class BacktestError(ValueError):
@@ -660,21 +663,23 @@ def dip_buy_assets(
     ]
 
 
-def elapsed_rebalance_months(rebalance_day: date, day: date) -> int:
-    """Return elapsed calendar months, keeping the rebalance month as month 0."""
-    return max((day.year - rebalance_day.year) * 12 + day.month - rebalance_day.month, 0)
+def dip_buy_cash_buffer_cny(monthly_spend_cny: float) -> float:
+    """Return the fixed 24-month living-expense reserve for an annual cycle."""
+    return DIP_BUY_CASH_BUFFER_MONTHS * max(float(monthly_spend_cny), 0.0)
 
 
-def dip_buy_cash_buffer_cny(monthly_spend_cny: float, rebalance_day: date, day: date) -> float:
-    # The engine deducts the current month's living expense before evaluating
-    # dip buys. A fresh 24-month pre-spend reserve is therefore 23 months on
-    # the post-spend ledger, then declines monthly to the 12-month insurance
-    # floor until the next (at most annual) rebalance refreshes the cycle.
-    remaining_months = max(
-        DIP_BUY_CASH_BUFFER_MONTHS - elapsed_rebalance_months(rebalance_day, day) - 1,
-        DIP_BUY_INSURANCE_MONTHS,
-    )
-    return remaining_months * max(float(monthly_spend_cny), 0.0)
+def dip_buy_annual_budget(
+    cash_equivalent_cny: float,
+    monthly_spend_cny: float,
+    total_parts: int,
+) -> tuple[float, float, float, int]:
+    """Lock the annual reserve, pool B, piece value and usable part count."""
+    part_count = max(int(total_parts), 1)
+    cash_buffer_cny = dip_buy_cash_buffer_cny(monthly_spend_cny)
+    pool_cny = max(float(cash_equivalent_cny) - cash_buffer_cny, 0.0)
+    piece_cny = pool_cny / part_count
+    remaining_parts = part_count if pool_cny > 0 else 0
+    return cash_buffer_cny, pool_cny, piece_cny, remaining_parts
 
 
 def is_dip_buy_blackout_month(day: date, annual_rebalance_month: int, blackout_months: int) -> bool:
@@ -711,11 +716,23 @@ def has_deferred_inception_target(config: dict[str, Any], day: date) -> bool:
     return False
 
 
-def minimal_rebalance_weights(current_weights: dict[str, float], targets: dict[str, float], band: float) -> dict[str, float]:
-    keys = sorted(set(current_weights) | set(targets))
-    if "REPO" in keys:
-        keys.remove("REPO")
-        keys.insert(0, "REPO")
+def minimal_rebalance_weights(
+    current_weights: dict[str, float],
+    targets: dict[str, float],
+    band: float,
+    cash_equivalent_symbols: set[str] | None = None,
+) -> dict[str, float]:
+    """Project current weights onto the target bands with minimum turnover.
+
+    Out-of-band sleeves move only to their nearest boundary.  Any residual is
+    absorbed by the cash-equivalent sleeve first, avoiding unnecessary trades
+    in risk assets that are already inside their permitted ranges.
+    """
+    cash_symbols = {"REPO"} | set(cash_equivalent_symbols or ())
+    keys = sorted(
+        set(current_weights) | set(targets),
+        key=lambda key: (0 if key in cash_symbols else 1, key),
+    )
 
     lower: dict[str, float] = {}
     upper: dict[str, float] = {}
@@ -1236,12 +1253,23 @@ def _portfolio_value(
 
 
 def _repo_lot_value(lot: RepoLot, valuation_day: date | None) -> float:
+    return lot.principal + _repo_lot_accrued_interest(lot, valuation_day) - lot.fee
+
+
+def _repo_lot_accrued_interest(lot: RepoLot, valuation_day: date | None) -> float:
     if lot.start_date is None or valuation_day is None:
-        accrued_interest = lot.interest
-    else:
-        elapsed_days = min(max((valuation_day - lot.start_date).days, 0), max(lot.actual_days, 1))
-        accrued_interest = lot.interest * elapsed_days / max(lot.actual_days, 1)
-    return lot.principal + accrued_interest - lot.fee
+        return lot.interest
+    elapsed_days = min(max((valuation_day - lot.start_date).days, 0), max(lot.actual_days, 1))
+    return lot.interest * elapsed_days / max(lot.actual_days, 1)
+
+
+def _repo_cumulative_profit_cny(state: PortfolioState, valuation_day: date | None) -> float:
+    """Economic repo P&L, independent of cash moved to other asset sleeves."""
+    accrued_interest = sum(
+        _repo_lot_accrued_interest(lot, valuation_day)
+        for lot in state.repo_lots
+    )
+    return state.repo_realized_interest_cny + accrued_interest - state.repo_fees_cny
 
 
 def _cover_cash_shortfall(
@@ -1279,6 +1307,54 @@ def _cover_cash_shortfall(
         _sell_position(state, pos, day, qty, price, fx_rates, fees, trades, "liquidity_shortfall")
 
 
+def _minimum_rebalance_buy_budget_cny(
+    pos: Position,
+    minimum_value_cny: float,
+    price: float,
+    fx_rates: dict[str, float],
+    fees: dict[str, Any],
+    allow_fractional_us_shares: bool,
+) -> float:
+    """Return the cost of the smallest executable buy reaching a band edge."""
+    minimum_value_cny = max(float(minimum_value_cny), 0.0)
+    if minimum_value_cny <= 0 or price <= 0:
+        return 0.0
+    fx = currency_to_cny_rate(pos.currency, fx_rates)
+    minimum_quantity = minimum_value_cny / (price * fx)
+
+    if pos.currency == "USD":
+        quantity = minimum_quantity if allow_fractional_us_shares else math.ceil(max(minimum_quantity - 1e-12, 0.0))
+        gross_usd = quantity * price
+        commission_usd = ibkr_us_etf_fee(
+            quantity,
+            gross_usd,
+            dict_to_dataclass(IbkrFeeConfig, fees["ibkr_us_etf"]),
+        )
+        cost_cny, _ = cny_cost_for_usd(
+            gross_usd + commission_usd,
+            fx,
+            dict_to_dataclass(FxFeeConfig, fees["fx"]),
+        )
+        return cost_cny
+
+    if pos.currency == "HKD" or pos.asset_type == "hk_connect_etf":
+        hk_cfg = dict_to_dataclass(HkConnectEtfFeeConfig, fees["hk_connect_etf"])
+        lot_size = max(int(hk_cfg.lot_size), 1)
+        quantity = math.ceil(max(minimum_quantity / lot_size - 1e-12, 0.0)) * lot_size
+        gross_hkd = quantity * price
+        trade_fee_hkd = hk_connect_etf_trade_fee(gross_hkd, hk_cfg)
+        cost_cny, _ = cny_cost_for_hkd(gross_hkd + trade_fee_hkd, fx, hk_cfg)
+        return cost_cny
+
+    if pos.asset_type == "cn_bond_index":
+        return minimum_value_cny
+
+    lot_size = position_lot_size(pos, fees)
+    quantity = math.ceil(max(minimum_quantity / lot_size - 1e-12, 0.0)) * lot_size
+    gross_cny = quantity * price
+    return gross_cny + cn_etf_fee(gross_cny, dict_to_dataclass(CnEtfFeeConfig, fees["cn_etf"]))
+
+
 def _rebalance_state_to_band(
     state: PortfolioState,
     assets: list[dict[str, Any]],
@@ -1294,56 +1370,127 @@ def _rebalance_state_to_band(
 ) -> tuple[float, float, float, float, dict[str, float]]:
     before_rebalance, values = _portfolio_value(state, latest_prices, fx_rates, day)
     current_weights = {key: (value / before_rebalance if before_rebalance else 0.0) for key, value in values.items()}
-    desired_weights = exact_target_weights(targets) if rebalance_to_target else minimal_rebalance_weights(current_weights, targets, band)
-    turnover = 0.0
+    cash_symbols = {asset["symbol"] for asset in assets if asset.get("asset_type") == "money_fund"}
+    desired_weights = (
+        exact_target_weights(targets)
+        if rebalance_to_target
+        else minimal_rebalance_weights(current_weights, targets, band, cash_symbols)
+    )
     fee_before = state.total_fees_cny
 
+    # Freeze trade direction from the pre-rebalance portfolio.  An asset can
+    # therefore be bought or sold once, never sold and bought back in the same
+    # rebalance merely because fees changed the denominator.
+    sell_symbols: set[str] = set()
+    buy_symbols: set[str] = set()
     for asset in assets:
         symbol = asset["symbol"]
-        pos = state.positions[symbol]
         price = latest_prices.get(symbol)
         if price is None:
             continue
-        desired_weight = desired_weights.get(symbol, 0.0) if symbol in targets else 0.0
-        desired_value = before_rebalance * desired_weight
-        current_value = position_value_cny(pos, price, fx_rates)
-        diff = desired_value - current_value
-        if diff < -1.0:
-            sell_value = -diff
+        current_value = values.get(symbol, 0.0)
+        desired_value = before_rebalance * (desired_weights.get(symbol, 0.0) if symbol in targets else 0.0)
+        if desired_value - current_value < -1.0:
+            sell_symbols.add(symbol)
+        elif desired_value - current_value > 1.0 and targets.get(symbol, 0.0) > 0:
+            buy_symbols.add(symbol)
+
+    def execute_plan(
+        plan_state: PortfolioState,
+        plan_trades: list[dict[str, Any]],
+        final_total_estimate: float,
+    ) -> float:
+        plan_turnover = 0.0
+
+        def executable_target_value(symbol: str, side: str) -> float:
+            desired_weight = desired_weights.get(symbol, 0.0) if symbol in targets else 0.0
+            desired_value = final_total_estimate * desired_weight
+            target_weight = max(float(targets.get(symbol, 0.0)), 0.0)
+            band_width = target_weight * max(float(band), 0.0)
+            if rebalance_to_target or band_width <= 0:
+                return desired_value
+            # The theoretical minimum lies exactly on the band edge. Keep a
+            # tiny interior guard so later same-day fees (for example the repo
+            # commission paid when residual cash is invested) cannot make the
+            # just-completed rebalance immediately appear out of band.
+            guard_weight = min(REBALANCE_EDGE_GUARD_WEIGHT, band_width * 0.1)
+            guard_value = final_total_estimate * guard_weight
+            return max(desired_value - guard_value, 0.0) if side == "SELL" else desired_value + guard_value
+
+        for asset in assets:
+            symbol = asset["symbol"]
+            if symbol not in sell_symbols:
+                continue
+            pos = plan_state.positions[symbol]
+            price = latest_prices.get(symbol)
+            if price is None:
+                continue
+            desired_value = executable_target_value(symbol, "SELL")
+            current_value = position_value_cny(pos, price, fx_rates)
+            sell_value = max(current_value - desired_value, 0.0)
             qty = sell_value / (price * currency_to_cny_rate(pos.currency, fx_rates))
             if pos.currency in {"CNY", "HKD"} and pos.asset_type != "cn_bond_index":
                 lot_size = position_lot_size(pos, fees)
-                qty = math.floor(qty / lot_size) * lot_size
-            prev_cash = state.cash_cny
-            _sell_position(state, pos, day, qty, price, fx_rates, fees, trades, "rebalance")
-            turnover += max(state.cash_cny - prev_cash, 0.0)
+                qty = math.ceil(max(qty / lot_size - 1e-12, 0.0)) * lot_size
+            prev_cash = plan_state.cash_cny
+            _sell_position(plan_state, pos, day, qty, price, fx_rates, fees, plan_trades, "rebalance")
+            plan_turnover += max(plan_state.cash_cny - prev_cash, 0.0)
 
-    for asset in assets:
-        symbol = asset["symbol"]
-        pos = state.positions[symbol]
-        price = latest_prices.get(symbol)
-        if price is None:
-            continue
-        after_sell_total, _ = _portfolio_value(state, latest_prices, fx_rates, day)
-        if symbol not in targets or targets.get(symbol, 0.0) <= 0:
-            continue
-        desired_value = after_sell_total * desired_weights.get(symbol, 0.0)
-        current_value = position_value_cny(pos, price, fx_rates)
-        diff = desired_value - current_value
-        if diff > 1.0:
-            spent = _buy_position(
-                state,
+        for asset in assets:
+            symbol = asset["symbol"]
+            if symbol not in buy_symbols:
+                continue
+            pos = plan_state.positions[symbol]
+            price = latest_prices.get(symbol)
+            if price is None:
+                continue
+            desired_value = executable_target_value(symbol, "BUY")
+            current_value = position_value_cny(pos, price, fx_rates)
+            minimum_value_cny = max(desired_value - current_value, 0.0)
+            budget_cny = _minimum_rebalance_buy_budget_cny(
                 pos,
-                day,
-                diff,
+                minimum_value_cny,
                 price,
                 fx_rates,
                 fees,
-                trades,
+                allow_fractional_us_shares,
+            )
+            spent = _buy_position(
+                plan_state,
+                pos,
+                day,
+                budget_cny,
+                price,
+                fx_rates,
+                fees,
+                plan_trades,
                 allow_fractional_us_shares,
                 "rebalance",
             )
-            turnover += spent
+            plan_turnover += spent
+        return plan_turnover
+
+    # Fees reduce final NAV and therefore slightly move every weight boundary.
+    # Iterate on a copy until the executable quantities and post-fee NAV agree,
+    # then submit each planned symbol only once to the real portfolio.
+    final_total_estimate = before_rebalance
+    previous_signature: tuple[tuple[str, str, float], ...] | None = None
+    for _ in range(8):
+        simulated_state = deepcopy(state)
+        simulated_trades: list[dict[str, Any]] = []
+        execute_plan(simulated_state, simulated_trades, final_total_estimate)
+        simulated_total, _ = _portfolio_value(simulated_state, latest_prices, fx_rates, day)
+        signature = tuple(
+            (str(trade["symbol"]), str(trade["side"]), round(float(trade["quantity"]), 8))
+            for trade in simulated_trades
+        )
+        converged = abs(simulated_total - final_total_estimate) <= 0.01 and signature == previous_signature
+        final_total_estimate = simulated_total
+        previous_signature = signature
+        if converged:
+            break
+
+    turnover = execute_plan(state, trades, final_total_estimate)
 
     after_rebalance, _ = _portfolio_value(state, latest_prices, fx_rates, day)
     return before_rebalance, after_rebalance, turnover, state.total_fees_cny - fee_before, desired_weights
@@ -1426,6 +1573,7 @@ def _invest_idle_cash_in_repo(
         fee = repo_fee(investable, repo_fee_config)
         state.cash_cny -= investable
         state.total_fees_cny += fee
+        state.repo_fees_cny += fee
         state.repo_lots.append(
             RepoLot(
                 principal=investable,
@@ -1498,6 +1646,7 @@ def _mature_repo_lots(state: PortfolioState, day: date) -> None:
     state.repo_lots = [lot for lot in state.repo_lots if lot.maturity_date > day]
     for lot in matured:
         state.cash_cny += lot.principal + lot.interest - lot.fee
+        state.repo_realized_interest_cny += lot.interest
 
 
 def _execute_dip_buys(
@@ -1577,6 +1726,7 @@ def _apply_dividend_events(
     pay_events: dict[str, list[dict[str, Any]]],
     fx_rates: dict[str, float],
     fees: dict[str, Any],
+    dividends_by_symbol: dict[str, float] | None = None,
 ) -> float:
     _ = pay_events  # The receivable schedule is keyed from each ex-date event's own pay date.
     for event in ex_events.get(day_str, []):
@@ -1608,6 +1758,8 @@ def _apply_dividend_events(
         pay_date = str(event.get("pay_date") or day_str)
         state.dividend_receivable_cny += net_dividend_cny
         state.total_dividend_cny += net_dividend_cny
+        if dividends_by_symbol is not None:
+            dividends_by_symbol[event["symbol"]] = dividends_by_symbol.get(event["symbol"], 0.0) + net_dividend_cny
         state.dividend_receivables_by_pay_date[pay_date] = (
             state.dividend_receivables_by_pay_date.get(pay_date, 0.0) + net_dividend_cny
         )
@@ -1626,6 +1778,7 @@ def _apply_hk_connect_portfolio_fee(
     fx_rates: dict[str, float],
     fees: dict[str, Any],
     calendar_days: int = 1,
+    fees_by_symbol: dict[str, float] | None = None,
 ) -> None:
     hkd_cny = fx_rates.get("HKD/CNY")
     if hkd_cny is None:
@@ -1639,7 +1792,10 @@ def _apply_hk_connect_portfolio_fee(
         if price is None:
             continue
         fee_hkd = hk_connect_portfolio_fee(pos.quantity * price, hk_cfg, calendar_days)
-        total_fee_cny += fee_hkd * hkd_cny
+        fee_cny = fee_hkd * hkd_cny
+        total_fee_cny += fee_cny
+        if fees_by_symbol is not None and fee_cny > 0:
+            fees_by_symbol[pos.symbol] = fees_by_symbol.get(pos.symbol, 0.0) + fee_cny
     if total_fee_cny > 0:
         state.cash_cny -= total_fee_cny
         state.total_fees_cny += total_fee_cny
@@ -1657,13 +1813,51 @@ def _initial_state(capital_cny: float, assets: list[dict[str, Any]]) -> Portfoli
     return state
 
 
+def _daily_asset_profit_cny(
+    previous_values: dict[str, float],
+    current_values: dict[str, float],
+    daily_trades: list[dict[str, Any]],
+    dividends_by_symbol: dict[str, float],
+    holding_fees_by_symbol: dict[str, float],
+    repo_profit_change_cny: float,
+) -> dict[str, float]:
+    """Attribute daily mark-to-market P&L without treating traded principal as profit."""
+    symbols = (
+        set(previous_values)
+        | set(current_values)
+        | {str(trade["symbol"]) for trade in daily_trades}
+        | set(dividends_by_symbol)
+        | set(holding_fees_by_symbol)
+    )
+    symbols.discard("REPO")
+    profit = {
+        symbol: float(current_values.get(symbol, 0.0)) - float(previous_values.get(symbol, 0.0))
+        for symbol in symbols
+    }
+    for trade in daily_trades:
+        symbol = str(trade["symbol"])
+        payload = json.loads(trade.get("payload_json") or "{}")
+        if trade.get("side") == "BUY":
+            profit[symbol] = profit.get(symbol, 0.0) - float(payload.get("spent_cny") or 0.0)
+        elif trade.get("side") == "SELL":
+            profit[symbol] = profit.get(symbol, 0.0) + float(payload.get("cash_cny") or 0.0)
+    for symbol, dividend_cny in dividends_by_symbol.items():
+        profit[symbol] = profit.get(symbol, 0.0) + float(dividend_cny)
+    for symbol, fee_cny in holding_fees_by_symbol.items():
+        profit[symbol] = profit.get(symbol, 0.0) - float(fee_cny)
+    profit["REPO"] = float(repo_profit_change_cny)
+    return {symbol: value for symbol, value in profit.items() if abs(value) > 1e-10 or symbol in current_values}
+
+
 def _asset_period_performance(
     previous_values: dict[str, float],
     current_values: dict[str, float],
     ordered_symbols: list[str],
     external_flows: dict[str, float] | None = None,
+    profit_overrides: dict[str, float] | None = None,
 ) -> dict[str, dict[str, float | None]]:
     flows = external_flows or {}
+    overrides = profit_overrides or {}
     result: dict[str, dict[str, float | None]] = {}
     keys = [symbol for symbol in ordered_symbols if symbol in previous_values or symbol in current_values]
     for key in sorted((set(previous_values) | set(current_values)) - set(keys)):
@@ -1672,7 +1866,7 @@ def _asset_period_performance(
         start_value = float(previous_values.get(key, 0.0) or 0.0)
         end_value = float(current_values.get(key, 0.0) or 0.0)
         external_flow = float(flows.get(key, 0.0) or 0.0)
-        profit = end_value - start_value - external_flow
+        profit = float(overrides[key]) if key in overrides else end_value - start_value - external_flow
         result[key] = {
             "start_value_cny": start_value,
             "end_value_cny": end_value,
@@ -1742,6 +1936,7 @@ def _simulate_comparison_series(
     initial_rebalance_done = False
     previous_fee_day: date | None = None
     pending_rebalance: dict[str, Any] | None = None
+    rebalance_to_target = bool(config.get("rebalance_to_target", False))
 
     for idx, day in enumerate(days):
         if idx % 64 == 0:
@@ -1784,7 +1979,7 @@ def _simulate_comparison_series(
                     False,
                     pending_rebalance["targets"],
                     float(config["rebalance_band"]),
-                    config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                    rebalance_to_target,
                 )
             pending_rebalance = None
         fee_days = max((day - previous_fee_day).days, 1) if previous_fee_day else 1
@@ -1822,7 +2017,7 @@ def _simulate_comparison_series(
                 False,
                 targets,
                 float(config["rebalance_band"]),
-                not initial_rebalance_done or config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                not initial_rebalance_done or rebalance_to_target,
             )
         if is_rebalance_day and has_investable_asset_target(targets):
             initial_rebalance_done = True
@@ -1998,17 +2193,20 @@ def run_backtest(
     period_peak_nav = 1.0
     period_max_drawdown = 0.0
     previous_rebalance_values: dict[str, float] = {"REPO": float(config["initial_capital_cny"])}
+    previous_rebalance_repo_profit_cny = 0.0
     performance_symbols = [asset["symbol"] for asset in sim_assets] + ["REPO"]
     period_external_flows: dict[str, float] = {"REPO": 0.0}
     initial_rebalance_done = False
     money_fund = selected_money_fund_asset(config)
     prepared_routes = prepare_active_asset_routes(config)
+    rebalance_to_target = bool(config.get("rebalance_to_target", False))
     previous_treasury_target = "REPO"
     previous_fee_day: date | None = None
     pending_rebalance: dict[str, Any] | None = None
     pending_dip_buys: list[dict[str, Any]] = []
     last_rebalance_day: date | None = None
-    dip_buy_pool_initialized = False
+    dip_buy_confirmed_cash_equivalent_cny = 0.0
+    dip_buy_cash_buffer_locked_cny = 0.0
     dip_buy_pool_cny = 0.0
     dip_buy_piece_cny = 0.0
     dip_buy_remaining_parts = 0
@@ -2022,9 +2220,11 @@ def run_backtest(
     year_max_drawdown = 0.0
     year_fee_start = 0.0
     year_start_values: dict[str, float] = {"REPO": float(config["initial_capital_cny"])}
+    year_start_repo_profit_cny = 0.0
     year_external_flows: dict[str, float] = {"REPO": 0.0}
     current_year: int | None = None
     last_close_values: dict[str, float] = {"REPO": float(config["initial_capital_cny"])}
+    last_close_repo_profit_cny = 0.0
 
     loop_started_at = time.perf_counter()
     for idx, day in enumerate(days):
@@ -2032,6 +2232,9 @@ def run_backtest(
             raise_if_cancelled(should_cancel)
         day_str = day.isoformat()
         flow = 0.0
+        daily_trade_start_index = len(trades)
+        daily_dividends_by_symbol: dict[str, float] = {}
+        daily_holding_fees_by_symbol: dict[str, float] = {}
         for symbol in latest_open_prices:
             latest_open_prices[symbol] = forward_value(open_price_maps.get(symbol, {}), day, latest_open_prices.get(symbol))
         for symbol in latest_prices:
@@ -2057,6 +2260,7 @@ def run_backtest(
             year_max_drawdown = 0.0
             year_fee_start = state.total_fees_cny
             year_start_values = dict(last_close_values)
+            year_start_repo_profit_cny = last_close_repo_profit_cny
             year_external_flows = {"REPO": 0.0}
         if latest_repo_rate is not None:
             repo_benchmark_nav *= 1.0 + (latest_repo_rate / 100.0) * repo_actual_days(day, 1, days) / 365.0
@@ -2073,7 +2277,15 @@ def run_backtest(
 
         rebalance_reset_today = False
         _mature_repo_lots(state, day)
-        _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
+        _apply_dividend_events(
+            state,
+            day_str,
+            ex_events,
+            pay_events,
+            fx_rates,
+            config["fees"],
+            daily_dividends_by_symbol,
+        )
         open_prices = {
             symbol: latest_open_prices.get(symbol) if latest_open_prices.get(symbol) is not None else latest_prices.get(symbol)
             for symbol in latest_prices
@@ -2081,7 +2293,15 @@ def run_backtest(
         if pending_rebalance and pending_rebalance.get("execution_date") == day_str:
             before_open_total, before_open_values = _portfolio_value(state, open_prices, fx_rates, day)
             open_weights = {key: (value / before_open_total if before_open_total else 0.0) for key, value in before_open_values.items()}
-            rebalance_needed = bool(pending_rebalance["rebalance_needed"])
+            # The prior close only schedules the order.  Re-evaluate against
+            # the actual execution open so an overnight gap cannot leave the
+            # portfolio outside its bands without trading (or force a trade
+            # after prices have already moved back inside).
+            rebalance_needed = should_rebalance(
+                open_weights,
+                pending_rebalance["targets"],
+                float(config["rebalance_band"]),
+            )
             if rebalance_needed:
                 before_rebalance, after_rebalance, turnover, fee_cny, desired_weights = _rebalance_state_to_band(
                     state,
@@ -2094,7 +2314,7 @@ def run_backtest(
                     bool(config.get("allow_fractional_us_shares", True)),
                     pending_rebalance["targets"],
                     float(config["rebalance_band"]),
-                    config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                    rebalance_to_target,
                 )
                 _after_total, after_values = _portfolio_value(state, open_prices, fx_rates, day)
                 rebalance_action = "trade"
@@ -2104,7 +2324,12 @@ def run_backtest(
                 after_rebalance = before_open_total
                 turnover = 0.0
                 fee_cny = 0.0
-                desired_weights = minimal_rebalance_weights(open_weights, pending_rebalance["targets"], float(config["rebalance_band"]))
+                desired_weights = minimal_rebalance_weights(
+                    open_weights,
+                    pending_rebalance["targets"],
+                    float(config["rebalance_band"]),
+                    {asset["symbol"] for asset in sim_assets if asset.get("asset_type") == "money_fund"},
+                )
                 after_values = before_open_values
                 rebalance_action = "record_only"
                 rebalance_reason = "within_band"
@@ -2128,13 +2353,34 @@ def run_backtest(
                 }
             )
             previous_rebalance_values = after_values
+            previous_rebalance_repo_profit_cny = _repo_cumulative_profit_cny(state, day)
             initial_rebalance_done = True
             pending_rebalance = None
             last_rebalance_day = day
-            dip_buy_pool_initialized = False
-            dip_buy_pool_cny = 0.0
-            dip_buy_piece_cny = 0.0
-            dip_buy_remaining_parts = 0
+            if dip_buy_active:
+                dip_buy_confirmed_cash_equivalent_cny = dip_buy_cash_equivalent_value_cny(
+                    state,
+                    day,
+                    open_prices,
+                    fx_rates,
+                    money_fund["symbol"] if money_fund else None,
+                )
+                (
+                    dip_buy_cash_buffer_locked_cny,
+                    dip_buy_pool_cny,
+                    dip_buy_piece_cny,
+                    dip_buy_remaining_parts,
+                ) = dip_buy_annual_budget(
+                    dip_buy_confirmed_cash_equivalent_cny,
+                    float(config["monthly_spend_cny"]),
+                    int(config.get("dip_buy_total_parts", 10)),
+                )
+            else:
+                dip_buy_confirmed_cash_equivalent_cny = 0.0
+                dip_buy_cash_buffer_locked_cny = 0.0
+                dip_buy_pool_cny = 0.0
+                dip_buy_piece_cny = 0.0
+                dip_buy_remaining_parts = 0
             dip_buy_triggered_symbols.clear()
             deferred_dip_rechecks.clear()
             dip_buy_last_execution_indices.clear()
@@ -2163,11 +2409,6 @@ def run_backtest(
                 for symbol in latest_prices
             }
             money_fund_symbol = money_fund["symbol"] if money_fund else None
-            execution_buffer_cny = (
-                dip_buy_cash_buffer_cny(float(config["monthly_spend_cny"]), last_rebalance_day, day)
-                if last_rebalance_day
-                else 0.0
-            )
             execution_cash_equivalent_cny = dip_buy_cash_equivalent_value_cny(
                 state,
                 day,
@@ -2175,7 +2416,10 @@ def run_backtest(
                 fx_rates,
                 money_fund_symbol,
             )
-            execution_excess_cny = max(execution_cash_equivalent_cny - execution_buffer_cny, 0.0)
+            execution_available_budget_cny = min(
+                execution_cash_equivalent_cny,
+                max(dip_buy_piece_cny * dip_buy_remaining_parts, 0.0),
+            )
             executed_dip_buys = _execute_dip_buys(
                 state,
                 due_dip_buys,
@@ -2186,7 +2430,7 @@ def run_backtest(
                 trades,
                 bool(config.get("allow_fractional_us_shares", True)),
                 money_fund_symbol,
-                execution_excess_cny,
+                execution_available_budget_cny,
             )
             executed_symbols = {str(order["symbol"]) for order in executed_dip_buys}
             for order in due_dip_buys:
@@ -2200,7 +2444,14 @@ def run_backtest(
             )
             dip_buy_execution_count += len(executed_dip_buys)
         fee_days = max((day - previous_fee_day).days, 1) if previous_fee_day else 1
-        _apply_hk_connect_portfolio_fee(state, latest_prices, fx_rates, config["fees"], fee_days)
+        _apply_hk_connect_portfolio_fee(
+            state,
+            latest_prices,
+            fx_rates,
+            config["fees"],
+            fee_days,
+            daily_holding_fees_by_symbol,
+        )
         previous_fee_day = day
 
         if day in monthly_spend_days:
@@ -2238,7 +2489,14 @@ def run_backtest(
             event_peak_nav = max(period_peak_nav, event_nav)
             event_drawdown = event_nav / event_peak_nav - 1.0 if event_peak_nav else 0.0
             event_max_drawdown = min(period_max_drawdown, event_drawdown)
-            asset_performance = _asset_period_performance(previous_rebalance_values, before_values, performance_symbols, period_external_flows)
+            current_repo_profit_cny = _repo_cumulative_profit_cny(state, day)
+            asset_performance = _asset_period_performance(
+                previous_rebalance_values,
+                before_values,
+                performance_symbols,
+                period_external_flows,
+                {"REPO": current_repo_profit_cny - previous_rebalance_repo_profit_cny},
+            )
             rebalance_needed = should_rebalance(current_weights, targets, rebalance_band)
             if rebalance_needed:
                 before_rebalance, after_rebalance, turnover, fee_cny, desired_weights = _rebalance_state_to_band(
@@ -2252,7 +2510,7 @@ def run_backtest(
                     bool(config.get("allow_fractional_us_shares", True)),
                     targets,
                     rebalance_band,
-                    not initial_rebalance_done or config.get("repo_target_mode", "residual_weight") == "fixed_bucket",
+                    not initial_rebalance_done or rebalance_to_target,
                 )
                 _after_total, after_values = _portfolio_value(state, latest_prices, fx_rates, day)
                 rebalance_action = "trade"
@@ -2262,7 +2520,12 @@ def run_backtest(
                 after_rebalance = before_total
                 turnover = 0.0
                 fee_cny = 0.0
-                desired_weights = minimal_rebalance_weights(current_weights, targets, rebalance_band)
+                desired_weights = minimal_rebalance_weights(
+                    current_weights,
+                    targets,
+                    rebalance_band,
+                    {asset["symbol"] for asset in sim_assets if asset.get("asset_type") == "money_fund"},
+                )
                 after_values = before_values
                 rebalance_action = "record_only"
                 rebalance_reason = "within_band"
@@ -2279,6 +2542,7 @@ def run_backtest(
                     "fee_cny": fee_cny,
                     "payload_json": json_dumps(
                         {
+                            "asset_performance_version": 2,
                             "targets": targets,
                             "desired_weights": desired_weights,
                             "repo_target_mode": config.get("repo_target_mode", "residual_weight"),
@@ -2295,17 +2559,44 @@ def run_backtest(
                 }
             )
             previous_rebalance_values = after_values
+            previous_rebalance_repo_profit_cny = _repo_cumulative_profit_cny(state, day)
             period_external_flows = {"REPO": 0.0}
             period_start_nav = event_nav
             period_peak_nav = event_nav
             period_max_drawdown = 0.0
             initial_rebalance_done = True
             if starts_dip_buy_cycle:
+                # The first allocation is the actual per-asset annual baseline.
+                # Starting REPO at the entire initial capital makes purchases of
+                # the other sleeves look like a cash loss.
+                year_start_values = dict(after_values)
+                year_start_repo_profit_cny = previous_rebalance_repo_profit_cny
+                year_external_flows = {"REPO": 0.0}
                 last_rebalance_day = day
-                dip_buy_pool_initialized = False
-                dip_buy_pool_cny = 0.0
-                dip_buy_piece_cny = 0.0
-                dip_buy_remaining_parts = 0
+                if dip_buy_active:
+                    dip_buy_confirmed_cash_equivalent_cny = dip_buy_cash_equivalent_value_cny(
+                        state,
+                        day,
+                        latest_prices,
+                        fx_rates,
+                        money_fund["symbol"] if money_fund else None,
+                    )
+                    (
+                        dip_buy_cash_buffer_locked_cny,
+                        dip_buy_pool_cny,
+                        dip_buy_piece_cny,
+                        dip_buy_remaining_parts,
+                    ) = dip_buy_annual_budget(
+                        dip_buy_confirmed_cash_equivalent_cny,
+                        float(config["monthly_spend_cny"]),
+                        int(config.get("dip_buy_total_parts", 10)),
+                    )
+                else:
+                    dip_buy_confirmed_cash_equivalent_cny = 0.0
+                    dip_buy_cash_buffer_locked_cny = 0.0
+                    dip_buy_pool_cny = 0.0
+                    dip_buy_piece_cny = 0.0
+                    dip_buy_remaining_parts = 0
                 dip_buy_triggered_symbols.clear()
                 deferred_dip_rechecks.clear()
                 dip_buy_last_execution_indices.clear()
@@ -2345,21 +2636,15 @@ def run_backtest(
                 fx_rates,
                 money_fund_symbol,
             )
-            cash_buffer_cny = dip_buy_cash_buffer_cny(
-                float(config["monthly_spend_cny"]),
-                last_rebalance_day,
-                day,
-            )
-            excess_cash_cny = max(cash_equivalent_cny - cash_buffer_cny, 0.0)
-            if not dip_buy_pool_initialized and excess_cash_cny > 0:
-                dip_buy_pool_initialized = True
-                dip_buy_pool_cny = excess_cash_cny
-                dip_buy_piece_cny = dip_buy_pool_cny / total_parts
-                dip_buy_remaining_parts = total_parts
+            cash_buffer_cny = dip_buy_cash_buffer_locked_cny
             pending_parts = sum(int(order.get("parts", 1)) for order in pending_dip_buys)
             available_parts = max(dip_buy_remaining_parts - pending_parts, 0)
             pending_budget_cny = sum(float(order.get("budget_cny", 0.0)) for order in pending_dip_buys)
-            available_excess_cny = max(excess_cash_cny - pending_budget_cny, 0.0)
+            remaining_budget_cny = max(dip_buy_piece_cny * dip_buy_remaining_parts, 0.0)
+            available_budget_cny = min(
+                max(remaining_budget_cny - pending_budget_cny, 0.0),
+                cash_equivalent_cny,
+            )
             liquid_cash_equivalent_cny = state.cash_cny
             if money_fund_symbol:
                 money_position = state.positions.get(money_fund_symbol)
@@ -2387,13 +2672,13 @@ def run_backtest(
                     dip_buy_triggered_symbols.discard(symbol)
                     deferred_dip_rechecks.pop(symbol, None)
                     continue
-                if symbol in dip_buy_triggered_symbols or available_parts <= 0 or available_excess_cny <= 0:
+                if symbol in dip_buy_triggered_symbols or available_parts <= 0 or available_budget_cny <= 0:
                     continue
                 last_execution_idx = dip_buy_last_execution_indices.get(symbol)
                 if last_execution_idx is not None and idx - last_execution_idx <= cooldown_trading_days:
                     continue
                 order_parts = min(parts_per_trigger, available_parts)
-                budget_cny = min(dip_buy_piece_cny * order_parts, available_excess_cny)
+                budget_cny = min(dip_buy_piece_cny * order_parts, available_budget_cny)
                 if budget_cny <= 0:
                     continue
                 if money_fund_symbol is None and tenor_days > 1 and liquid_cash_equivalent_cny + 1e-9 < budget_cny:
@@ -2411,7 +2696,8 @@ def run_backtest(
                         "drawdown": drawdown_from_cost,
                         "cash_equivalent_cny": cash_equivalent_cny,
                         "cash_buffer_cny": cash_buffer_cny,
-                        "excess_cash_cny": excess_cash_cny,
+                        "confirmed_cash_equivalent_cny": dip_buy_confirmed_cash_equivalent_cny,
+                        "excess_cash_cny": remaining_budget_cny,
                         "pool_cny": dip_buy_pool_cny,
                         "piece_cny": dip_buy_piece_cny,
                         "parts": order_parts,
@@ -2420,7 +2706,7 @@ def run_backtest(
                 )
                 dip_buy_triggered_symbols.add(symbol)
                 available_parts -= order_parts
-                available_excess_cny -= budget_cny
+                available_budget_cny -= budget_cny
                 liquid_cash_equivalent_cny = max(liquid_cash_equivalent_cny - budget_cny, 0.0)
                 dip_buy_reserve_cny += budget_cny
 
@@ -2482,8 +2768,31 @@ def run_backtest(
                 prepared_routes=prepared_routes,
                 money_fund_asset=money_fund,
             )
-            desired_weights = minimal_rebalance_weights(close_weights, scheduled_targets, rebalance_band)
-            year_asset_performance = _asset_period_performance(year_start_values, values, performance_symbols, year_external_flows)
+            desired_weights = (
+                exact_target_weights(scheduled_targets)
+                if rebalance_to_target
+                else minimal_rebalance_weights(
+                    close_weights,
+                    scheduled_targets,
+                    rebalance_band,
+                    {asset["symbol"] for asset in sim_assets if asset.get("asset_type") == "money_fund"},
+                )
+            )
+            current_repo_profit_cny = _repo_cumulative_profit_cny(state, day)
+            year_asset_performance = _asset_period_performance(
+                year_start_values,
+                values,
+                performance_symbols,
+                year_external_flows,
+                {"REPO": current_repo_profit_cny - year_start_repo_profit_cny},
+            )
+            period_asset_performance = _asset_period_performance(
+                previous_rebalance_values,
+                values,
+                performance_symbols,
+                period_external_flows,
+                {"REPO": current_repo_profit_cny - previous_rebalance_repo_profit_cny},
+            )
             pending_rebalance = {
                 "execution_date": next_day.isoformat(),
                 "decision_date": day_str,
@@ -2492,12 +2801,14 @@ def run_backtest(
                 "rebalance_reason": "scheduled_open",
                 "period_return": nav_for_period / period_start_nav - 1.0,
                 "payload": {
+                    "asset_performance_version": 2,
                     "decision_date": day_str,
                     "targets": scheduled_targets,
                     "desired_weights": desired_weights,
+                    "rebalance_to_target": rebalance_to_target,
                     "repo_target_mode": config.get("repo_target_mode", "residual_weight"),
                     "treasury_instrument": config.get("repo_symbol", "204001"),
-                    "asset_performance": _asset_period_performance(previous_rebalance_values, values, performance_symbols, period_external_flows),
+                    "asset_performance": period_asset_performance,
                     "period_max_drawdown": period_max_drawdown,
                     "year_return": year_nav - 1.0,
                     "year_max_drawdown": year_max_drawdown,
@@ -2512,6 +2823,19 @@ def run_backtest(
             period_peak_nav = nav_for_period
             period_max_drawdown = 0.0
 
+        current_close_repo_profit_cny = _repo_cumulative_profit_cny(state, day)
+        daily_asset_profit_cny = (
+            _daily_asset_profit_cny(
+                last_close_values,
+                values,
+                trades[daily_trade_start_index:],
+                daily_dividends_by_symbol,
+                daily_holding_fees_by_symbol,
+                current_close_repo_profit_cny - last_close_repo_profit_cny,
+            )
+            if persist
+            else {}
+        )
         if persist:
             payload_money_fund_symbol = money_fund["symbol"] if money_fund else None
             payload_cash_equivalent_cny = dip_buy_cash_equivalent_value_cny(
@@ -2521,11 +2845,8 @@ def run_backtest(
                 fx_rates,
                 payload_money_fund_symbol,
             )
-            payload_cash_buffer_cny = (
-                dip_buy_cash_buffer_cny(float(config["monthly_spend_cny"]), last_rebalance_day, day)
-                if last_rebalance_day
-                else 0.0
-            )
+            payload_cash_buffer_cny = dip_buy_cash_buffer_locked_cny
+            payload_remaining_budget_cny = max(dip_buy_piece_cny * dip_buy_remaining_parts, 0.0)
             daily_payloads.append(
                 {
                     "cash_cny": state.cash_cny,
@@ -2535,6 +2856,7 @@ def run_backtest(
                     "values": values,
                     "weights": {key: value / total if total else 0.0 for key, value in values.items()},
                     "targets": targets,
+                    "asset_daily_profit_cny": daily_asset_profit_cny,
                     "unrealized_pnl_cny": {
                         symbol: values.get(symbol, 0.0) - pos.cost_basis_cny
                         for symbol, pos in state.positions.items()
@@ -2552,8 +2874,10 @@ def run_backtest(
                         "deferred_recheck_dates": {symbol: recheck.isoformat() for symbol, recheck in deferred_dip_rechecks.items()},
                         "execution_count": dip_buy_execution_count,
                         "cash_equivalent_cny": payload_cash_equivalent_cny,
+                        "confirmed_cash_equivalent_cny": dip_buy_confirmed_cash_equivalent_cny,
                         "cash_buffer_cny": payload_cash_buffer_cny,
-                        "excess_cash_cny": max(payload_cash_equivalent_cny - payload_cash_buffer_cny, 0.0),
+                        "excess_cash_cny": payload_remaining_budget_cny,
+                        "remaining_budget_cny": payload_remaining_budget_cny,
                         "pool_cny": dip_buy_pool_cny,
                         "piece_cny": dip_buy_piece_cny,
                         "remaining_parts": dip_buy_remaining_parts,
@@ -2580,6 +2904,7 @@ def run_backtest(
             }
         )
         last_close_values = dict(values)
+        last_close_repo_profit_cny = current_close_repo_profit_cny
 
     if not daily_rows:
         raise BacktestError("no daily rows created; check data coverage")

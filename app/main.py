@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import gc
 import gzip
 from http import HTTPStatus
@@ -10,6 +10,7 @@ import argparse
 import inspect
 import json
 import logging
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -37,6 +38,8 @@ DEFAULT_ABANDONED_JOB_SECONDS = 120.0
 DEFAULT_JOB_RETENTION_SECONDS = 600.0
 JOB_CLEANUP_INTERVAL_SECONDS = 5.0
 CANCELLED_JOB_MESSAGE = "任务已取消：页面没有继续请求结果"
+TIME_RANKING_VERSION = 1
+TIME_RANKING_MIN_OBSERVATIONS = 5
 
 
 class SingleFileSizeHandler(logging.FileHandler):
@@ -132,13 +135,15 @@ def columnar_chart_payload(rows: list[dict], max_points: int = 1000) -> dict:
         "drawdowns": [],
         "benchmark_returns": [],
         "comparison_total_assets": [],
+        "values": {},
         "weights": {},
     }
     symbols: list[str] = []
     for payload in all_payloads:
-        for symbol in payload.get("weights", {}):
+        for symbol in dict.fromkeys((*payload.get("values", {}), *payload.get("weights", {}))):
             if symbol not in symbols:
                 symbols.append(symbol)
+    chart["values"] = {symbol: [] for symbol in symbols}
     chart["weights"] = {symbol: [] for symbol in symbols}
     for row, payload in zip(sampled_rows, parsed_payloads):
         chart["dates"].append(row["trade_date"])
@@ -148,9 +153,105 @@ def columnar_chart_payload(rows: list[dict], max_points: int = 1000) -> dict:
         chart["drawdowns"].append(row["drawdown"])
         chart["benchmark_returns"].append(row["benchmark_return"])
         chart["comparison_total_assets"].append(payload.get("comparison", {}).get("total_asset_cny"))
+        values = payload.get("values", {})
         weights = payload.get("weights", {})
         for symbol in symbols:
+            chart["values"][symbol].append(values.get(symbol, 0.0))
             chart["weights"][symbol].append(weights.get(symbol, 0.0))
+    return chart
+
+
+def daily_pnl_chart_payload(rows: list[dict], config: dict) -> dict:
+    """Return every selected sleeve's daily P&L plus comparable reference lines."""
+    selected_assets = [
+        asset
+        for asset in config.get("assets", [])
+        if asset.get("enabled", True) and float(asset.get("target_weight", 0.0) or 0.0) > 0
+    ]
+    groups: list[dict] = []
+    for asset in selected_assets:
+        aliases = [str(asset["symbol"])]
+        fallback = asset.get("price_fallback")
+        if isinstance(fallback, dict) and fallback.get("symbol"):
+            aliases.append(str(fallback["symbol"]))
+        aliases.extend(
+            str(replacement["symbol"])
+            for replacement in asset.get("replacement_assets", [])
+            if isinstance(replacement, dict) and replacement.get("symbol")
+        )
+        groups.append(
+            {
+                "symbol": str(asset["symbol"]),
+                "name": str(asset.get("choice_label") or asset.get("name") or asset["symbol"]),
+                "aliases": list(dict.fromkeys(aliases)),
+            }
+        )
+
+    payloads = [json_loads(row.get("payload_json"), {}) for row in rows]
+    if not rows or not groups:
+        return {
+            "available": False,
+            "reason": "当前回测没有已选择且权重大于零的标的",
+            "source_points": len(rows),
+            "dates": [row["trade_date"] for row in rows],
+        }
+    if any("asset_daily_profit_cny" not in payload for payload in payloads):
+        return {
+            "available": False,
+            "reason": "此历史记录缺少逐标的每日盈亏，请使用当前版本重新回测",
+            "source_points": len(rows),
+            "dates": [row["trade_date"] for row in rows],
+        }
+
+    symbols = [group["symbol"] for group in groups]
+    chart = {
+        "available": True,
+        "source_points": len(rows),
+        "dates": [],
+        "symbols": symbols,
+        "names": {group["symbol"]: group["name"] for group in groups},
+        "profits": {symbol: [] for symbol in symbols},
+        "returns": {symbol: [] for symbol in symbols},
+        "combined_profits": [],
+        "combined_returns": [],
+        "benchmark_profits": [],
+        "benchmark_returns": [],
+    }
+    previous_values = {symbol: 0.0 for symbol in symbols}
+    previous_benchmark_cumulative = 0.0
+    for row, payload in zip(rows, payloads):
+        source_profits = payload.get("asset_daily_profit_cny", {})
+        source_values = payload.get("values", {})
+        current_values: dict[str, float] = {}
+        daily_profits: dict[str, float] = {}
+        capital_bases: dict[str, float] = {}
+        chart["dates"].append(row["trade_date"])
+        for group in groups:
+            symbol = group["symbol"]
+            current_value = sum(float(source_values.get(alias, 0.0) or 0.0) for alias in group["aliases"])
+            profit = sum(float(source_profits.get(alias, 0.0) or 0.0) for alias in group["aliases"])
+            capital_base = max(previous_values[symbol], current_value - profit, 0.0)
+            current_values[symbol] = current_value
+            daily_profits[symbol] = profit
+            capital_bases[symbol] = capital_base
+            chart["profits"][symbol].append(profit)
+            chart["returns"][symbol].append(profit / capital_base if capital_base > 1e-9 else None)
+
+        combined_profit = sum(daily_profits.values())
+        combined_base = sum(capital_bases.values())
+        benchmark_cumulative = float(row.get("benchmark_return") or 0.0)
+        benchmark_denominator = 1.0 + previous_benchmark_cumulative
+        benchmark_return = (
+            (1.0 + benchmark_cumulative) / benchmark_denominator - 1.0
+            if benchmark_denominator > 1e-12
+            else 0.0
+        )
+        chart["combined_profits"].append(combined_profit)
+        chart["combined_returns"].append(combined_profit / combined_base if combined_base > 1e-9 else None)
+        chart["benchmark_profits"].append(benchmark_return * combined_base)
+        chart["benchmark_returns"].append(benchmark_return)
+        previous_values = current_values
+        previous_benchmark_cumulative = benchmark_cumulative
     return chart
 
 
@@ -176,6 +277,8 @@ def archive_config_payload(config: dict) -> dict:
         "end_date": config.get("end_date"),
         "rebalance_frequency": config.get("rebalance_frequency"),
         "annual_rebalance_month": config.get("annual_rebalance_month"),
+        "rebalance_band": config.get("rebalance_band"),
+        "rebalance_to_target": config.get("rebalance_to_target", False),
         "assets": [
             {
                 key: asset.get(key)
@@ -321,6 +424,291 @@ def backtest_archive_entries(conn, limit: int, leaderboard: bool = False) -> lis
         for rank, entry in enumerate(entries, start=1):
             entry["rank"] = rank
     return entries
+
+
+def leaderboard_available_years(conn) -> list[int]:
+    """Return calendar-year candidates without scanning the large daily table."""
+    years: set[int] = set()
+    rows = conn.execute(
+        """
+        SELECT COALESCE(json_extract(summary_json, '$.start_date'), json_extract(config_json, '$.start_date')) AS start_date,
+               COALESCE(json_extract(summary_json, '$.end_date'), json_extract(config_json, '$.end_date')) AS end_date
+        FROM backtest_runs
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            first_day = date.fromisoformat(str(row["start_date"] or ""))
+            last_day = date.fromisoformat(str(row["end_date"] or ""))
+        except ValueError:
+            continue
+        for year in range(first_day.year, last_day.year + 1):
+            if first_day <= date(year, 1, 7) and last_day >= date(year, 12, 24):
+                years.add(year)
+    return sorted(years, reverse=True)
+
+
+def _period_repo_annualized_return(conn, start_date: str, end_date: str) -> float:
+    """Use one common one-day repo cash benchmark for every strategy in a cohort."""
+    rows = conn.execute(
+        """
+        SELECT trade_date,close_rate
+        FROM repo_rates
+        WHERE symbol='204001' AND trade_date BETWEEN ? AND ?
+        ORDER BY trade_date
+        """,
+        (start_date, end_date),
+    ).fetchall()
+    if not rows:
+        return 0.0
+    period_end = date.fromisoformat(end_date)
+    benchmark_nav = 1.0
+    for index, row in enumerate(rows):
+        day = date.fromisoformat(row["trade_date"])
+        next_day = date.fromisoformat(rows[index + 1]["trade_date"]) if index + 1 < len(rows) else period_end + timedelta(days=1)
+        accrual_end = min(next_day, period_end + timedelta(days=1))
+        actual_days = max((accrual_end - day).days, 1)
+        benchmark_nav *= 1.0 + float(row["close_rate"] or 0.0) / 100.0 * actual_days / 365.0
+    years = max(((period_end - date.fromisoformat(start_date)).days + 1) / 365.25, 1 / 365.25)
+    return benchmark_nav ** (1.0 / years) - 1.0
+
+
+def _period_performance_metrics(
+    dates: list[str],
+    daily_returns: list[float],
+    repo_annualized_return: float,
+) -> dict:
+    growth = 1.0
+    nav = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+    monthly_growth: dict[str, float] = {}
+    for trade_date, value in zip(dates, daily_returns):
+        daily_return = float(value or 0.0)
+        growth *= 1.0 + daily_return
+        nav *= 1.0 + daily_return
+        peak = max(peak, nav)
+        max_drawdown = min(max_drawdown, nav / peak - 1.0 if peak else 0.0)
+        month = trade_date[:7]
+        monthly_growth[month] = monthly_growth.get(month, 1.0) * (1.0 + daily_return)
+    calendar_days = max((date.fromisoformat(dates[-1]) - date.fromisoformat(dates[0])).days + 1, 1)
+    sample_years = calendar_days / 365.25
+    total_return = growth - 1.0
+    annualized_return = -1.0 if growth <= 0 else growth ** (1.0 / max(sample_years, 1 / 365.25)) - 1.0
+    excess_annualized_return = annualized_return - repo_annualized_return
+    adjusted_calmar = excess_annualized_return / max(abs(max_drawdown), 0.08)
+    positive_month_count = sum(1 for value in monthly_growth.values() if value > 1.0 + 1e-12)
+    month_count = len(monthly_growth)
+    return {
+        "time_ranking_version": TIME_RANKING_VERSION,
+        "start_date": dates[0],
+        "end_date": dates[-1],
+        "observation_count": len(dates),
+        "sample_years": sample_years,
+        "sample_confidence": min(len(dates) / 252.0, 1.0),
+        "total_return": total_return,
+        "annualized_return": annualized_return,
+        "max_drawdown": max_drawdown,
+        "repo_annualized_return": repo_annualized_return,
+        "excess_annualized_return": excess_annualized_return,
+        "adjusted_calmar": adjusted_calmar,
+        "positive_month_count": positive_month_count,
+        "month_count": month_count,
+        "positive_month_ratio": positive_month_count / month_count if month_count else 0.0,
+        "cash_hurdle_passed": excess_annualized_return > 0.0,
+    }
+
+
+def _peer_percentiles(entries: list[dict], metric: str) -> dict[str, float]:
+    """Return average-rank percentiles; one observation or all ties score 50%."""
+    ordered = sorted((float(entry["period_metrics"].get(metric) or 0.0), entry["run_id"]) for entry in entries)
+    count = len(ordered)
+    if count <= 1:
+        return {run_id: 0.5 for _value, run_id in ordered}
+    result: dict[str, float] = {}
+    index = 0
+    while index < count:
+        end = index + 1
+        while end < count and abs(ordered[end][0] - ordered[index][0]) <= 1e-12:
+            end += 1
+        average_rank = (index + end - 1) / 2.0
+        percentile = average_rank / (count - 1)
+        for _value, run_id in ordered[index:end]:
+            result[run_id] = percentile
+        index = end
+    return result
+
+
+def time_aware_backtest_leaderboard(
+    conn,
+    start_date: str,
+    end_date: str,
+    limit: int = 100,
+) -> list[dict]:
+    """Rank strategies only after recomputing all metrics over one shared period."""
+    daily_rows = conn.execute(
+        """
+        SELECT run_id,trade_date,daily_return
+        FROM portfolio_daily
+        WHERE trade_date BETWEEN ? AND ?
+        ORDER BY run_id,trade_date
+        """,
+        (start_date, end_date),
+    ).fetchall()
+    grouped: dict[str, list] = {}
+    for row in daily_rows:
+        grouped.setdefault(row["run_id"], []).append(row)
+    if not grouped:
+        return []
+
+    max_observations = max(len(rows) for rows in grouped.values())
+    if max_observations < TIME_RANKING_MIN_OBSERVATIONS:
+        return []
+    minimum_observations = min(20, max(TIME_RANKING_MIN_OBSERVATIONS, math.ceil(max_observations * 0.8)))
+    span_days = max((date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1, 1)
+    edge_tolerance_days = min(7, max(2, span_days // 50))
+    latest_allowed_start = (date.fromisoformat(start_date) + timedelta(days=edge_tolerance_days)).isoformat()
+    earliest_allowed_end = (date.fromisoformat(end_date) - timedelta(days=edge_tolerance_days)).isoformat()
+    run_rows = {
+        row["run_id"]: row
+        for row in conn.execute("SELECT run_id,created_at,config_json,summary_json FROM backtest_runs").fetchall()
+    }
+    repo_annualized_return = _period_repo_annualized_return(conn, start_date, end_date)
+    entries: list[dict] = []
+    for run_id, rows in grouped.items():
+        run = run_rows.get(run_id)
+        coverage_ratio = len(rows) / max_observations
+        if (
+            not run
+            or len(rows) < minimum_observations
+            or coverage_ratio < 0.95
+            or rows[0]["trade_date"] > latest_allowed_start
+            or rows[-1]["trade_date"] < earliest_allowed_end
+        ):
+            continue
+        summary = json_loads(run["summary_json"], {})
+        metrics = _period_performance_metrics(
+            [row["trade_date"] for row in rows],
+            [float(row["daily_return"] or 0.0) for row in rows],
+            repo_annualized_return,
+        )
+        metrics["coverage_ratio"] = coverage_ratio
+        entries.append(
+            {
+                "run_id": run_id,
+                "created_at": run["created_at"],
+                "config": archive_config_payload(json_loads(run["config_json"], {})),
+                "summary": archive_summary_payload(summary),
+                "positive_year_count": int(summary.get("positive_year_count") or 0),
+                "complete_year_count": int(summary.get("complete_year_count") or 0),
+                "period_metrics": metrics,
+            }
+        )
+    if not entries:
+        return []
+
+    percentile_metrics = {
+        "excess_return": _peer_percentiles(entries, "excess_annualized_return"),
+        "risk_efficiency": _peer_percentiles(entries, "adjusted_calmar"),
+        # max_drawdown is negative, so a larger value means a shallower loss.
+        "drawdown": _peer_percentiles(entries, "max_drawdown"),
+        "stability": _peer_percentiles(entries, "positive_month_ratio"),
+    }
+    peer_count = len(entries)
+    for entry in entries:
+        run_id = entry["run_id"]
+        metrics = entry["period_metrics"]
+        components = {key: values[run_id] for key, values in percentile_metrics.items()}
+        raw_score = (
+            45.0 * components["excess_return"]
+            + 25.0 * components["risk_efficiency"]
+            + 15.0 * components["drawdown"]
+            + 15.0 * components["stability"]
+        )
+        confidence = min(float(metrics["sample_confidence"]), float(metrics["coverage_ratio"]))
+        ranking_score = 50.0 + (raw_score - 50.0) * confidence
+        metrics["peer_count"] = peer_count
+        metrics["peer_percentiles"] = components
+        metrics["ranking_score"] = ranking_score
+        entry["ranking_score"] = ranking_score
+        entry["time_ranking_score"] = ranking_score
+    entries.sort(
+        key=lambda entry: (
+            float(entry["ranking_score"]),
+            float(entry["period_metrics"]["excess_annualized_return"]),
+            float(entry["period_metrics"]["adjusted_calmar"]),
+            entry["created_at"],
+            entry["run_id"],
+        ),
+        reverse=True,
+    )
+    entries = entries[:limit]
+    for rank, entry in enumerate(entries, start=1):
+        entry["rank"] = rank
+    return entries
+
+
+def backtest_leaderboard_payload(conn, query: dict[str, list[str]] | None = None) -> dict:
+    query = query or {}
+    available_years = leaderboard_available_years(conn)
+    mode = (query.get("period") or [""])[0]
+    requested_year = (query.get("year") or [""])[0]
+    requested_start = (query.get("start_date") or [""])[0]
+    requested_end = (query.get("end_date") or [""])[0]
+
+    if mode == "all" or (not available_years and not requested_year and not requested_start and not requested_end):
+        records = backtest_archive_entries(conn, limit=100, leaderboard=True)
+        period = {
+            "mode": "all",
+            "label": "各自完整回测期",
+            "comparable": False,
+            "description": "起止时间不同，仅供查看；请选择同一年或自定义区间进行公平横向比较。",
+        }
+    else:
+        if requested_year:
+            try:
+                year = int(requested_year)
+                start_date = date(year, 1, 1)
+                end_date = date(year, 12, 31)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("year must use YYYY") from exc
+            period_mode = "year"
+            label = f"{year}年"
+        elif requested_start or requested_end:
+            if not requested_start or not requested_end:
+                raise ValueError("start_date and end_date must be provided together")
+            try:
+                start_date = date.fromisoformat(requested_start)
+                end_date = date.fromisoformat(requested_end)
+            except ValueError as exc:
+                raise ValueError("start_date and end_date must use YYYY-MM-DD") from exc
+            if start_date > end_date:
+                raise ValueError("start_date must be before or equal to end_date")
+            period_mode = "custom"
+            label = f"{start_date.isoformat()} 至 {end_date.isoformat()}"
+        else:
+            year = available_years[0]
+            start_date = date(year, 1, 1)
+            end_date = date(year, 12, 31)
+            period_mode = "year"
+            label = f"{year}年"
+        records = time_aware_backtest_leaderboard(conn, start_date.isoformat(), end_date.isoformat(), limit=100)
+        period = {
+            "mode": period_mode,
+            "label": label,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "comparable": True,
+            "peer_count": len(records),
+            "scoring_version": TIME_RANKING_VERSION,
+            "description": "同一区间重算收益、回撤、同期现金超额和正收益月份，再按同期百分位评分。",
+        }
+    return {
+        "records": records,
+        "period": period,
+        "available_years": available_years,
+        "default_year": available_years[0] if available_years else None,
+    }
 
 
 def extended_analysis_required(config: dict) -> bool:
@@ -889,7 +1277,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.OK, {"records": backtest_archive_entries(conn, limit=20)})
             elif path == "/api/backtest/leaderboard":
                 with db_session(self.settings.db_path) as conn:
-                    self.send_json(HTTPStatus.OK, {"records": backtest_archive_entries(conn, limit=100, leaderboard=True)})
+                    try:
+                        payload = backtest_leaderboard_payload(conn, parse_qs(parsed.query))
+                    except ValueError as exc:
+                        self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                        return
+                    self.send_json(HTTPStatus.OK, payload)
             elif path.startswith("/api/backtest/jobs/"):
                 self.handle_backtest_job(path)
             elif path.startswith("/api/backtest/"):
@@ -1058,6 +1451,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                     )
                 )
                 self.send_json(HTTPStatus.OK, {"chart": columnar_chart_payload(rows)})
+            elif section == "daily-pnl":
+                rows = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT trade_date,total_asset_cny,benchmark_return,payload_json
+                        FROM portfolio_daily WHERE run_id=? ORDER BY trade_date
+                        """,
+                        (run_id,),
+                    )
+                )
+                self.send_json(
+                    HTTPStatus.OK,
+                    {"daily_pnl": daily_pnl_chart_payload(rows, json_loads(run["config_json"], {}))},
+                )
             elif section == "rebalance":
                 rows = rows_to_dicts(
                     conn.execute(

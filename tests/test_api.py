@@ -12,6 +12,7 @@ import app.main as main_module
 from app.config import normalize_config
 from app.db import db_session, init_db
 from app.main import create_server
+from app.services.calendar import business_days
 from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
@@ -61,6 +62,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(cfg["annual_rebalance_month"], 1)
         self.assertEqual(cfg["rolling_window_years"], 3)
         self.assertFalse(cfg["rebalance_month_analysis_enabled"])
+        self.assertFalse(cfg["rebalance_to_target"])
         self.assertTrue(status["status"])
 
     def test_data_sync_invalidates_cached_backtests_when_rows_change(self) -> None:
@@ -90,7 +92,9 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(remaining, 0)
 
     def test_run_and_read_backtest_sections(self) -> None:
-        result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        run_config = json.loads(json.dumps(self.config))
+        run_config["rebalance_to_target"] = True
+        result = http_json(f"{self.base_url}/api/backtest/run", {"config": run_config})
         run_id = result["run_id"]
         self.assertFalse(result["cache"]["hit"])
         self.assertGreater(result["summary"]["final_asset_cny"], 0)
@@ -104,10 +108,12 @@ class ApiTests(unittest.TestCase):
         detail = http_json(f"{self.base_url}/api/backtest/{run_id}")
         series = http_json(f"{self.base_url}/api/backtest/{run_id}/series")
         chart_series = http_json(f"{self.base_url}/api/backtest/{run_id}/chart-series")
+        daily_pnl_response = http_json(f"{self.base_url}/api/backtest/{run_id}/daily-pnl")
         rebalance = http_json(f"{self.base_url}/api/backtest/{run_id}/rebalance")
         trades = http_json(f"{self.base_url}/api/backtest/{run_id}/trades")
         positions = http_json(f"{self.base_url}/api/backtest/{run_id}/positions?limit=2")
         self.assertEqual(detail["run_id"], run_id)
+        self.assertTrue(detail["config"]["rebalance_to_target"])
         self.assertGreater(len(series["series"]), 20)
         self.assertIn("daily_return", series["series"][0])
         self.assertIn("cumulative_return", series["series"][0])
@@ -121,12 +127,34 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(chart["display_points"], len(chart["dates"]))
         self.assertEqual(len(chart["total_assets"]), len(series["series"]))
         self.assertEqual(len(chart["comparison_total_assets"]), len(series["series"]))
+        self.assertTrue(chart["values"])
         self.assertTrue(chart["weights"])
+        self.assertEqual(set(chart["values"]), set(chart["weights"]))
+        self.assertAlmostEqual(
+            sum(values[-1] for values in chart["values"].values()),
+            chart["total_assets"][-1],
+            places=6,
+        )
         self.assertNotIn("repo_lots", chart)
+        daily_pnl = daily_pnl_response["daily_pnl"]
+        self.assertTrue(daily_pnl["available"])
+        self.assertEqual(daily_pnl["source_points"], len(series["series"]))
+        self.assertEqual(len(daily_pnl["dates"]), len(series["series"]))
+        self.assertTrue(daily_pnl["symbols"])
+        self.assertEqual(set(daily_pnl["symbols"]), set(daily_pnl["profits"]))
+        self.assertEqual(set(daily_pnl["symbols"]), set(daily_pnl["returns"]))
+        self.assertEqual(len(daily_pnl["benchmark_profits"]), len(series["series"]))
+        self.assertEqual(len(daily_pnl["benchmark_returns"]), len(series["series"]))
+        for index, combined_profit in enumerate(daily_pnl["combined_profits"]):
+            self.assertAlmostEqual(
+                combined_profit,
+                sum(daily_pnl["profits"][symbol][index] for symbol in daily_pnl["symbols"]),
+                places=6,
+            )
         self.assertGreaterEqual(len(rebalance["rebalance"]), 1)
         self.assertGreater(len(trades["trades"]), 0)
         self.assertLessEqual(len(positions["positions"]), 2)
-        cached = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        cached = http_json(f"{self.base_url}/api/backtest/run", {"config": run_config})
         self.assertEqual(cached["run_id"], run_id)
         self.assertTrue(cached["cache"]["hit"])
 
@@ -138,6 +166,8 @@ class ApiTests(unittest.TestCase):
         entry = next(item for item in history["records"] if item["run_id"] == run_id)
         self.assertLessEqual(len(history["records"]), 20)
         self.assertLessEqual(len(leaderboard["records"]), 100)
+        self.assertIn("period", leaderboard)
+        self.assertIn("available_years", leaderboard)
         self.assertNotIn("config_json", entry)
         self.assertNotIn("summary_json", entry)
         self.assertIn("positive_year_count", entry["summary"])
@@ -161,6 +191,7 @@ class ApiTests(unittest.TestCase):
             {"Accept-Encoding": "gzip"},
         )
         self.assertEqual(headers.get("Content-Encoding"), "gzip")
+
         decoded = json.loads(gzip.decompress(body).decode("utf-8"))
         self.assertTrue(decoded["chart"]["dates"])
 
@@ -174,10 +205,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"currentRunId", decoded_app_js)
         self.assertIn(b"ApiNetworkError", decoded_app_js)
         self.assertNotIn(b"weight_label_", decoded_app_js)
+        self.assertIn(b"asset_performance_version", decoded_app_js)
         self.assertIn(b"/api/health", decoded_app_js)
         self.assertIn(b"recoverApiConnection", decoded_app_js)
+        self.assertIn(b"/daily-pnl", decoded_app_js)
+        self.assertIn(b"rebalance_to_target", decoded_app_js)
         self.assertIn(b"Object.keys(row.payload?.weights", decoded_app_js)
-        self.assertNotIn(b"payload?.values", decoded_app_js)
+        self.assertIn(b"payload?.values", decoded_app_js)
+        self.assertIn("各标的金额 · 组合占比".encode("utf-8"), decoded_app_js)
 
         versioned_headers, _versioned_body = http_get_raw(
             f"{self.base_url}/static/app.js?v=20260715-perf-2",
@@ -185,6 +220,73 @@ class ApiTests(unittest.TestCase):
         )
         self.assertIn("immutable", versioned_headers.get("Cache-Control", ""))
         self.assertEqual(versioned_headers.get("CDN-Cache-Control"), versioned_headers.get("Cache-Control"))
+
+    def test_time_aware_leaderboard_recomputes_each_year_and_excludes_partial_coverage(self) -> None:
+        db_path = temp_db_path()
+        init_db(db_path)
+        run_ids = ("strategy_a", "strategy_b", "partial")
+        with db_session(db_path) as conn:
+            for index, run_id in enumerate(run_ids):
+                config = {
+                    "start_date": "2020-01-01",
+                    "end_date": "2021-12-31",
+                    "assets": [{"symbol": run_id, "name": run_id, "enabled": True, "target_weight": 1.0}],
+                }
+                summary = {
+                    "start_date": "2020-01-01",
+                    "end_date": "2021-12-31",
+                    "annualized_return": 0.10,
+                    "max_drawdown": -0.10,
+                    "ranking_eligible": True,
+                    "ranking_score": 50.0,
+                }
+                conn.execute(
+                    "INSERT INTO backtest_runs(run_id,created_at,config_json,summary_json) VALUES(?,?,?,?)",
+                    (run_id, f"2022-01-0{index + 1}T00:00:00+00:00", json.dumps(config), json.dumps(summary)),
+                )
+
+            daily_rows = []
+            for year in (2020, 2021):
+                dates = business_days(f"{year}-01-01", f"{year}-12-31")
+                for run_id in ("strategy_a", "strategy_b"):
+                    stronger = (year == 2020 and run_id == "strategy_a") or (year == 2021 and run_id == "strategy_b")
+                    daily_return = 0.0008 if stronger else 0.0001
+                    total = 1_000_000.0
+                    for day in dates:
+                        total *= 1.0 + daily_return
+                        daily_rows.append(
+                            (run_id, day.isoformat(), total, 0.0, daily_return, 0.0, 0.0, 0.0, "{}")
+                        )
+            partial_dates = business_days("2020-06-01", "2020-12-31")
+            total = 1_000_000.0
+            for day in partial_dates:
+                total *= 1.001
+                daily_rows.append(("partial", day.isoformat(), total, 0.0, 0.001, 0.0, 0.0, 0.0, "{}"))
+            conn.executemany(
+                """
+                INSERT INTO portfolio_daily(
+                  run_id,trade_date,total_asset_cny,flow_cny,daily_return,
+                  cumulative_return,drawdown,benchmark_return,payload_json
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                daily_rows,
+            )
+
+            ranking_2020 = main_module.time_aware_backtest_leaderboard(conn, "2020-01-01", "2020-12-31")
+            ranking_2021 = main_module.time_aware_backtest_leaderboard(conn, "2021-01-01", "2021-12-31")
+            years = main_module.leaderboard_available_years(conn)
+            default_payload = main_module.backtest_leaderboard_payload(conn)
+            year_payload = main_module.backtest_leaderboard_payload(conn, {"year": ["2020"]})
+
+        self.assertEqual([entry["run_id"] for entry in ranking_2020], ["strategy_a", "strategy_b"])
+        self.assertEqual([entry["run_id"] for entry in ranking_2021], ["strategy_b", "strategy_a"])
+        self.assertEqual(years, [2021, 2020])
+        self.assertEqual(ranking_2020[0]["period_metrics"]["peer_count"], 2)
+        self.assertAlmostEqual(ranking_2020[0]["period_metrics"]["coverage_ratio"], 1.0)
+        self.assertGreater(ranking_2020[0]["ranking_score"], ranking_2020[1]["ranking_score"])
+        self.assertEqual(default_payload["period"]["label"], "2021年")
+        self.assertEqual(default_payload["records"][0]["run_id"], "strategy_b")
+        self.assertEqual(year_payload["records"][0]["run_id"], "strategy_a")
 
     def test_chart_payload_downsamples_long_series_and_keeps_endpoints(self) -> None:
         rows = [
@@ -214,13 +316,19 @@ class ApiTests(unittest.TestCase):
                 "cumulative_return": 0.0,
                 "drawdown": -0.5 if index == 501 else 0.0,
                 "benchmark_return": 0.0,
-                "payload_json": json.dumps({"weights": {"BRIEF": 1.0} if index == 501 else {"REPO": 1.0}}),
+                "payload_json": json.dumps({
+                    "values": {"BRIEF": 500.0} if index == 501 else {"REPO": float(index)},
+                    "weights": {"BRIEF": 1.0} if index == 501 else {"REPO": 1.0},
+                }),
             }
             for index in range(2000)
         ]
         chart = main_module.columnar_chart_payload(rows, max_points=100)
 
         self.assertIn("BRIEF", chart["weights"])
+        self.assertIn("BRIEF", chart["values"])
+        brief_index = chart["dates"].index("day-0501")
+        self.assertEqual(chart["values"]["BRIEF"][brief_index], 500.0)
         self.assertIn("day-0501", chart["dates"])
         self.assertIn("payload_json", rows[0])
 
@@ -231,6 +339,9 @@ class ApiTests(unittest.TestCase):
             self.assertIn("s-maxage=300", resp.headers.get("Cache-Control", ""))
         self.assertIn("永久投资策略", html)
         self.assertIn("dailyReturnChart", html)
+        self.assertIn("dailyPnlChart", html)
+        self.assertIn("rebalanceToTarget", html)
+        self.assertIn("data-daily-pnl-scale", html)
         self.assertIn("repoTargetMode", html)
         self.assertIn("assetWeightTitle", html)
         self.assertIn("annualRebalanceMonth", html)
@@ -242,6 +353,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="mobileHistoryToggle"', html)
         self.assertIn('id="historyRecentMeta"', html)
         self.assertIn('id="leaderboardList"', html)
+        self.assertIn('id="leaderboardPeriod"', html)
+        self.assertIn('id="leaderboardCustomPeriod"', html)
         self.assertIn('id="historySearch"', html)
         self.assertIn('id="historySort"', html)
         self.assertIn('data-history-view="leaderboard"', html)
@@ -265,7 +378,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260827-audit-1", detail)
+        self.assertIn("20260828-rebalance-target-1", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")

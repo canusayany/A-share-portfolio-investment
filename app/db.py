@@ -123,6 +123,9 @@ CREATE TABLE IF NOT EXISTS portfolio_daily (
   PRIMARY KEY (run_id, trade_date)
 );
 
+CREATE INDEX IF NOT EXISTS idx_portfolio_daily_trade_date_run_id
+ON portfolio_daily(trade_date, run_id);
+
 CREATE TABLE IF NOT EXISTS trades (
   run_id TEXT NOT NULL,
   trade_date TEXT NOT NULL,
