@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260831-dip-ladder-2" />
+    <link rel="stylesheet" href="static/styles.css?v=20260831-asset-pnl-1" />
   </head>
   <body class="history-collapsed">
     <header class="mobile-app-bar">
@@ -345,10 +345,12 @@
             <div id="returnChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabReturn" hidden><div id="returnChart" class="chart"></div></div>
             <div id="dailyReturnChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabDaily" hidden><div id="dailyReturnChart" class="chart"></div></div>
             <div id="dailyPnlChartView" class="chart-view daily-pnl-chart-view" role="tabpanel" aria-labelledby="chartTabDailyPnl" hidden>
-              <div class="daily-pnl-toolbar" role="group" aria-label="标的盈亏比例尺">
-                <span>比例尺</span>
-                <button type="button" data-daily-pnl-scale="amount" aria-pressed="true">金额（元）</button>
-                <button type="button" data-daily-pnl-scale="percent" aria-pressed="false">收益率（%）</button>
+              <div class="daily-pnl-toolbar" role="group" aria-label="标的盈亏查看口径">
+                <span>查看</span>
+                <button type="button" data-daily-pnl-scale="amount" aria-pressed="true" title="当日市值变化剔除买卖本金，并计入费用和分红">单日金额</button>
+                <button type="button" data-daily-pnl-scale="percent" aria-pressed="false" title="单日盈亏除以当日投入资本">单日收益</button>
+                <button type="button" data-daily-pnl-scale="cumulative" aria-pressed="false" title="把每日收益率连续复利">累计收益</button>
+                <button type="button" data-daily-pnl-scale="drawdown" aria-pressed="false" title="各标的或组合从自身历史峰值到当日的跌幅">回撤</button>
               </div>
               <div id="dailyPnlChart" class="chart"></div>
               <div id="dailyPnlEmpty" class="daily-pnl-empty" hidden></div>
@@ -440,6 +442,6 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260831-dip-ladder-2"></script>
+  <script src="static/app.js?v=20260831-asset-pnl-1"></script>
   </body>
 </html>

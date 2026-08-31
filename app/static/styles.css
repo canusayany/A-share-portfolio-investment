@@ -1889,6 +1889,7 @@ input[type="range"] {
   border-radius: 6px;
   background: transparent;
   font: inherit;
+  white-space: nowrap;
   cursor: pointer;
 }
 

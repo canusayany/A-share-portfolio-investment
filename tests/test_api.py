@@ -65,6 +65,61 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(cfg["rebalance_to_target"])
         self.assertTrue(status["status"])
 
+    def test_daily_pnl_separates_daily_cumulative_and_drawdown_bases(self) -> None:
+        config = {
+            "assets": [
+                {"symbol": "A", "name": "资产A", "enabled": True, "target_weight": 0.5},
+                {"symbol": "B", "name": "资产B", "enabled": True, "target_weight": 0.5},
+            ]
+        }
+        rows = [
+            {
+                "trade_date": "2020-01-02",
+                "total_asset_cny": 200.0,
+                "flow_cny": 0.0,
+                "daily_return": 0.0,
+                "cumulative_return": 0.0,
+                "drawdown": 0.0,
+                "benchmark_return": 0.0,
+                "payload_json": json.dumps(
+                    {"values": {"A": 100.0, "B": 100.0}, "asset_daily_profit_cny": {"A": 0.0, "B": 0.0}}
+                ),
+            },
+            {
+                "trade_date": "2020-01-03",
+                "total_asset_cny": 210.0,
+                "flow_cny": 0.0,
+                "daily_return": 0.05,
+                "cumulative_return": 0.05,
+                "drawdown": 0.0,
+                "benchmark_return": 0.02,
+                "payload_json": json.dumps(
+                    {"values": {"A": 50.0, "B": 160.0}, "asset_daily_profit_cny": {"A": 0.0, "B": 10.0}}
+                ),
+            },
+            {
+                "trade_date": "2020-01-06",
+                "total_asset_cny": 189.0,
+                "flow_cny": 0.0,
+                "daily_return": -0.10,
+                "cumulative_return": -0.055,
+                "drawdown": -0.10,
+                "benchmark_return": -0.01,
+                "payload_json": json.dumps(
+                    {"values": {"A": 45.0, "B": 144.0}, "asset_daily_profit_cny": {"A": -5.0, "B": -16.0}}
+                ),
+            },
+        ]
+
+        chart = main_module.daily_pnl_chart_payload(rows, config)
+
+        self.assertAlmostEqual(chart["combined_returns"][1], 0.05)
+        self.assertAlmostEqual(chart["combined_cumulative_returns"][2], -0.055)
+        self.assertAlmostEqual(chart["combined_drawdowns"][2], -0.10)
+        self.assertEqual(chart["portfolio_profits"], [0.0, 10.0, -21.0])
+        self.assertEqual(chart["portfolio_returns"], [0.0, 0.05, -0.10])
+        self.assertEqual(chart["portfolio_drawdowns"], [0.0, 0.0, -0.10])
+
     def test_data_sync_invalidates_cached_backtests_when_rows_change(self) -> None:
         result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
         with db_session(self.db_path) as conn:
@@ -146,13 +201,34 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(daily_pnl["symbols"])
         self.assertEqual(set(daily_pnl["symbols"]), set(daily_pnl["profits"]))
         self.assertEqual(set(daily_pnl["symbols"]), set(daily_pnl["returns"]))
+        self.assertEqual(set(daily_pnl["symbols"]), set(daily_pnl["cumulative_returns"]))
+        self.assertEqual(set(daily_pnl["symbols"]), set(daily_pnl["drawdowns"]))
         self.assertEqual(len(daily_pnl["benchmark_profits"]), len(series["series"]))
         self.assertEqual(len(daily_pnl["benchmark_returns"]), len(series["series"]))
+        self.assertEqual(len(daily_pnl["portfolio_profits"]), len(series["series"]))
+        self.assertEqual(len(daily_pnl["portfolio_returns"]), len(series["series"]))
+        self.assertEqual(len(daily_pnl["portfolio_cumulative_returns"]), len(series["series"]))
+        self.assertEqual(len(daily_pnl["portfolio_drawdowns"]), len(series["series"]))
         for index, combined_profit in enumerate(daily_pnl["combined_profits"]):
             self.assertAlmostEqual(
                 combined_profit,
                 sum(daily_pnl["profits"][symbol][index] for symbol in daily_pnl["symbols"]),
                 places=6,
+            )
+            self.assertAlmostEqual(
+                daily_pnl["portfolio_profits"][index],
+                sum(series["series"][index]["payload"]["asset_daily_profit_cny"].values()),
+                places=6,
+            )
+            self.assertAlmostEqual(
+                daily_pnl["portfolio_returns"][index],
+                series["series"][index]["daily_return"],
+                places=12,
+            )
+            self.assertAlmostEqual(
+                daily_pnl["portfolio_drawdowns"][index],
+                series["series"][index]["drawdown"],
+                places=12,
             )
         self.assertGreaterEqual(len(rebalance["rebalance"]), 1)
         self.assertGreater(len(trades["trades"]), 0)
@@ -385,7 +461,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260831-dip-ladder-2", detail)
+        self.assertIn("20260831-asset-pnl-1", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")

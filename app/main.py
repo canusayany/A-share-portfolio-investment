@@ -212,19 +212,33 @@ def daily_pnl_chart_payload(rows: list[dict], config: dict) -> dict:
         "names": {group["symbol"]: group["name"] for group in groups},
         "profits": {symbol: [] for symbol in symbols},
         "returns": {symbol: [] for symbol in symbols},
+        "cumulative_returns": {symbol: [] for symbol in symbols},
+        "drawdowns": {symbol: [] for symbol in symbols},
         "combined_profits": [],
         "combined_returns": [],
+        "combined_cumulative_returns": [],
+        "combined_drawdowns": [],
+        "portfolio_profits": [],
+        "portfolio_returns": [],
+        "portfolio_cumulative_returns": [],
+        "portfolio_drawdowns": [],
         "benchmark_profits": [],
         "benchmark_returns": [],
+        "benchmark_cumulative_returns": [],
+        "benchmark_drawdowns": [],
     }
     previous_values = {symbol: 0.0 for symbol in symbols}
+    asset_navs = {symbol: 1.0 for symbol in symbols}
+    asset_peaks = {symbol: 1.0 for symbol in symbols}
+    combined_nav = 1.0
+    combined_peak = 1.0
+    benchmark_peak = 1.0
     previous_benchmark_cumulative = 0.0
     for row, payload in zip(rows, payloads):
         source_profits = payload.get("asset_daily_profit_cny", {})
         source_values = payload.get("values", {})
         current_values: dict[str, float] = {}
         daily_profits: dict[str, float] = {}
-        capital_bases: dict[str, float] = {}
         chart["dates"].append(row["trade_date"])
         for group in groups:
             symbol = group["symbol"]
@@ -233,12 +247,31 @@ def daily_pnl_chart_payload(rows: list[dict], config: dict) -> dict:
             capital_base = max(previous_values[symbol], current_value - profit, 0.0)
             current_values[symbol] = current_value
             daily_profits[symbol] = profit
-            capital_bases[symbol] = capital_base
             chart["profits"][symbol].append(profit)
-            chart["returns"][symbol].append(profit / capital_base if capital_base > 1e-9 else None)
+            daily_return = profit / capital_base if capital_base > 1e-9 else None
+            chart["returns"][symbol].append(daily_return)
+            if daily_return is not None:
+                asset_navs[symbol] = max(asset_navs[symbol] * (1.0 + daily_return), 0.0)
+            asset_peaks[symbol] = max(asset_peaks[symbol], asset_navs[symbol])
+            chart["cumulative_returns"][symbol].append(asset_navs[symbol] - 1.0)
+            chart["drawdowns"][symbol].append(
+                asset_navs[symbol] / asset_peaks[symbol] - 1.0
+                if asset_peaks[symbol] > 1e-12
+                else 0.0
+            )
 
         combined_profit = sum(daily_profits.values())
-        combined_base = sum(capital_bases.values())
+        combined_previous_value = sum(previous_values.values())
+        combined_current_value = sum(current_values.values())
+        combined_base = max(
+            combined_previous_value,
+            combined_current_value - combined_profit,
+            0.0,
+        )
+        combined_return = combined_profit / combined_base if combined_base > 1e-9 else None
+        if combined_return is not None:
+            combined_nav = max(combined_nav * (1.0 + combined_return), 0.0)
+        combined_peak = max(combined_peak, combined_nav)
         benchmark_cumulative = float(row.get("benchmark_return") or 0.0)
         benchmark_denominator = 1.0 + previous_benchmark_cumulative
         benchmark_return = (
@@ -247,9 +280,25 @@ def daily_pnl_chart_payload(rows: list[dict], config: dict) -> dict:
             else 0.0
         )
         chart["combined_profits"].append(combined_profit)
-        chart["combined_returns"].append(combined_profit / combined_base if combined_base > 1e-9 else None)
+        chart["combined_returns"].append(combined_return)
+        chart["combined_cumulative_returns"].append(combined_nav - 1.0)
+        chart["combined_drawdowns"].append(
+            combined_nav / combined_peak - 1.0 if combined_peak > 1e-12 else 0.0
+        )
+        chart["portfolio_profits"].append(
+            sum(float(value or 0.0) for value in source_profits.values())
+        )
+        chart["portfolio_returns"].append(float(row.get("daily_return") or 0.0))
+        chart["portfolio_cumulative_returns"].append(float(row.get("cumulative_return") or 0.0))
+        chart["portfolio_drawdowns"].append(float(row.get("drawdown") or 0.0))
         chart["benchmark_profits"].append(benchmark_return * combined_base)
         chart["benchmark_returns"].append(benchmark_return)
+        chart["benchmark_cumulative_returns"].append(benchmark_cumulative)
+        benchmark_nav = max(1.0 + benchmark_cumulative, 0.0)
+        benchmark_peak = max(benchmark_peak, benchmark_nav)
+        chart["benchmark_drawdowns"].append(
+            benchmark_nav / benchmark_peak - 1.0 if benchmark_peak > 1e-12 else 0.0
+        )
         previous_values = current_values
         previous_benchmark_cumulative = benchmark_cumulative
     return chart
@@ -1464,7 +1513,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 rows = rows_to_dicts(
                     conn.execute(
                         """
-                        SELECT trade_date,total_asset_cny,benchmark_return,payload_json
+                        SELECT trade_date,total_asset_cny,flow_cny,daily_return,
+                               cumulative_return,drawdown,benchmark_return,payload_json
                         FROM portfolio_daily WHERE run_id=? ORDER BY trade_date
                         """,
                         (run_id,),

@@ -1661,24 +1661,72 @@ function fmtSignedPct(value) {
   return `${rate > 0 ? "+" : ""}${(rate * 100).toFixed(2)}%`;
 }
 
-function dailyPnlTooltip(data, colors) {
+const DAILY_PNL_MODES = {
+  amount: {
+    title: "标的单日盈亏 · 金额",
+    assetField: "profits",
+    combinedField: "combined_profits",
+    portfolioField: "portfolio_profits",
+    benchmarkField: "benchmark_profits",
+    amount: true,
+    basis: "当日市值变化剔除买卖本金，并计入交易费、持仓费和分红。",
+  },
+  percent: {
+    title: "标的单日盈亏 · 收益率",
+    assetField: "returns",
+    combinedField: "combined_returns",
+    portfolioField: "portfolio_returns",
+    benchmarkField: "benchmark_returns",
+    amount: false,
+    basis: "单日收益率＝当日盈亏÷当日投入资本；它不是从峰值计算的回撤。",
+  },
+  cumulative: {
+    title: "标的累计收益 · 每日复利",
+    assetField: "cumulative_returns",
+    combinedField: "combined_cumulative_returns",
+    portfolioField: "portfolio_cumulative_returns",
+    benchmarkField: "benchmark_cumulative_returns",
+    amount: false,
+    basis: "标的按每日流量调整收益连续复利；组合总资产使用回测主序列的累计收益。",
+  },
+  drawdown: {
+    title: "标的回撤 · 距各自历史峰值",
+    assetField: "drawdowns",
+    combinedField: "combined_drawdowns",
+    portfolioField: "portfolio_drawdowns",
+    benchmarkField: "benchmark_drawdowns",
+    amount: false,
+    basis: "回撤＝当日净值÷自身历史峰值－1；组合总资产与主回撤图完全同口径。",
+  },
+};
+
+function dailyPnlMetric(value, amountMode) {
+  return amountMode ? fmtSignedMoney(value) : fmtSignedPct(value);
+}
+
+function dailyPnlTooltip(data, colors, mode) {
   return (params) => {
     const points = Array.isArray(params) ? params : [params];
     const index = points.find((point) => Number.isInteger(point?.dataIndex))?.dataIndex;
     if (!Number.isInteger(index)) return "";
+    const assetValues = data[mode.assetField] || {};
+    const combinedValues = data[mode.combinedField] || [];
+    const portfolioValues = data[mode.portfolioField] || [];
+    const benchmarkValues = data[mode.benchmarkField] || [];
     const assetLines = data.symbols.map((symbol, symbolIndex) => (
-      `<div style="display:grid;grid-template-columns:10px minmax(92px,1fr) auto auto;align-items:center;gap:7px 11px">`
+      `<div style="display:grid;grid-template-columns:10px minmax(92px,1fr) auto;align-items:center;gap:7px 11px">`
       + `<i style="width:8px;height:8px;border-radius:50%;background:${colors[symbolIndex % colors.length]}"></i>`
       + `<span>${escapeHtml(data.names[symbol] || symbol)}</span>`
-      + `<strong>${fmtSignedMoney(data.profits[symbol][index])}</strong>`
-      + `<span>${fmtSignedPct(data.returns[symbol][index])}</span></div>`
+      + `<strong>${dailyPnlMetric(assetValues[symbol]?.[index], mode.amount)}</strong></div>`
     )).join("");
     return [
       `<div style="font-weight:700;margin-bottom:7px">${escapeHtml(data.dates[index])}</div>`,
       assetLines,
       '<div style="border-top:1px solid rgba(255,255,255,.22);margin:7px 0 5px"></div>',
-      `<div style="display:flex;justify-content:space-between;gap:26px"><span>所选标的合计</span><strong>${fmtSignedMoney(data.combined_profits[index])} · ${fmtSignedPct(data.combined_returns[index])}</strong></div>`,
-      `<div style="display:flex;justify-content:space-between;gap:26px"><span>沪深300等额参考</span><strong>${fmtSignedMoney(data.benchmark_profits[index])} · ${fmtSignedPct(data.benchmark_returns[index])}</strong></div>`,
+      `<div style="display:flex;justify-content:space-between;gap:26px"><span>所选标的合计</span><strong>${dailyPnlMetric(combinedValues[index], mode.amount)}</strong></div>`,
+      `<div style="display:flex;justify-content:space-between;gap:26px"><span>组合总资产（含现金管理）</span><strong>${dailyPnlMetric(portfolioValues[index], mode.amount)}</strong></div>`,
+      `<div style="display:flex;justify-content:space-between;gap:26px"><span>沪深300等额参考</span><strong>${dailyPnlMetric(benchmarkValues[index], mode.amount)}</strong></div>`,
+      `<div style="max-width:390px;margin-top:7px;padding-top:6px;border-top:1px solid rgba(255,255,255,.16);font-size:11px;opacity:.78">${escapeHtml(mode.basis)}</div>`,
     ].join("");
   };
 }
@@ -1692,22 +1740,25 @@ function renderDailyPnlChart() {
   const empty = $("dailyPnlEmpty");
   if (empty) empty.hidden = true;
   const colors = [CHART_COLORS.accent, CHART_COLORS.amber, CHART_COLORS.violet, "#5c8f99", "#9d6c52", "#7e8d50", "#b35f78"];
-  const amountMode = dailyPnlScale === "amount";
-  const selectedValues = data.symbols.map((symbol) => amountMode ? data.profits[symbol] : data.returns[symbol]);
-  const combinedValues = amountMode ? data.combined_profits : data.combined_returns;
-  const benchmarkValues = amountMode ? data.benchmark_profits : data.benchmark_returns;
-  const bounds = dailyPnlAxisBounds([...selectedValues, combinedValues, benchmarkValues]);
+  const mode = DAILY_PNL_MODES[dailyPnlScale] || DAILY_PNL_MODES.amount;
+  const assetValues = data[mode.assetField] || {};
+  const selectedValues = data.symbols.map((symbol) => assetValues[symbol] || []);
+  const combinedValues = data[mode.combinedField] || [];
+  const portfolioValues = data[mode.portfolioField] || [];
+  const benchmarkValues = data[mode.benchmarkField] || [];
+  const bounds = dailyPnlAxisBounds([...selectedValues, combinedValues, portfolioValues, benchmarkValues]);
   if (!window.echarts) {
     const toPoints = (values) => values.map((value, index) => ({ x: index, y: Number(value ?? 0) }));
     drawFallbackChart(
       "dailyPnlChart",
-      `逐日标的盈亏 · ${amountMode ? "金额" : "收益率"}`,
+      mode.title,
       [
         ...data.symbols.map((symbol, index) => ({ name: data.names[symbol] || symbol, color: colors[index % colors.length], points: toPoints(selectedValues[index]) })),
-        { name: "所选标的合计", color: "#172b35", points: toPoints(combinedValues) },
+        { name: "所选标的合计", color: "#6f7f86", points: toPoints(combinedValues) },
+        { name: "组合总资产（含现金管理）", color: "#172b35", points: toPoints(portfolioValues) },
         { name: "沪深300等额参考", color: CHART_COLORS.blue, points: toPoints(benchmarkValues) },
       ],
-      !amountMode,
+      !mode.amount,
       bounds.min,
       bounds.max,
     );
@@ -1716,15 +1767,15 @@ function renderDailyPnlChart() {
   queueChartOption("dailyPnlChart", {
     ...lineZoomOption(),
     grid: { left: 72, right: 26, top: 82, bottom: 62 },
-    title: { text: `逐日标的盈亏 · ${amountMode ? "金额" : "收益率"}`, left: 8, top: 4, textStyle: { fontSize: 14 } },
-    tooltip: { trigger: "axis", formatter: dailyPnlTooltip(data, colors) },
+    title: { text: mode.title, left: 8, top: 4, textStyle: { fontSize: 14 } },
+    tooltip: { trigger: "axis", formatter: dailyPnlTooltip(data, colors, mode) },
     legend: { type: "scroll", top: 31, left: 8, right: 12, textStyle: { fontSize: 10 } },
     xAxis: { type: "category", data: data.dates },
     yAxis: {
       type: "value",
       min: bounds.min,
       max: bounds.max,
-      axisLabel: { formatter: amountMode ? (value) => fmtAxisMoney(value) : (value) => `${(value * 100).toFixed(1)}%` },
+      axisLabel: { formatter: mode.amount ? (value) => fmtAxisMoney(value) : (value) => `${(value * 100).toFixed(1)}%` },
     },
     series: [
       ...data.symbols.map((symbol, index) => ({
@@ -1741,7 +1792,15 @@ function renderDailyPnlChart() {
         name: "所选标的合计",
         data: combinedValues,
         symbol: "none",
-        lineStyle: { color: "#172b35", width: 2.5 },
+        lineStyle: { color: "#6f7f86", width: 1.8, type: "dashed" },
+        itemStyle: { color: "#6f7f86" },
+      },
+      {
+        type: "line",
+        name: "组合总资产（含现金管理）",
+        data: portfolioValues,
+        symbol: "none",
+        lineStyle: { color: "#172b35", width: 2.6 },
         itemStyle: { color: "#172b35" },
         markLine: { silent: true, symbol: "none", label: { show: false }, lineStyle: { color: "#9eaaaf", width: 1 }, data: [{ yAxis: 0 }] },
       },
@@ -2901,7 +2960,10 @@ function setupUiInteractions() {
   setupTabs("[data-chart-tab]", "chartTab", selectChart);
   document.querySelectorAll("[data-daily-pnl-scale]").forEach((button) => {
     button.addEventListener("click", () => {
-      dailyPnlScale = button.dataset.dailyPnlScale === "percent" ? "percent" : "amount";
+      const requestedScale = button.dataset.dailyPnlScale;
+      dailyPnlScale = Object.prototype.hasOwnProperty.call(DAILY_PNL_MODES, requestedScale)
+        ? requestedScale
+        : "amount";
       document.querySelectorAll("[data-daily-pnl-scale]").forEach((option) => {
         option.setAttribute("aria-pressed", option.dataset.dailyPnlScale === dailyPnlScale ? "true" : "false");
       });
