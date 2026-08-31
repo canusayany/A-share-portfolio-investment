@@ -125,7 +125,8 @@ const STATIC_NAMES = {
   "204182": "182天国债逆回购",
   CBA03101: "中债-5年期国债指数",
   CBA06501: "中债-7-10年期国债指数",
-  CBA21801: "中债-30年期国债指数",
+  CBA21801: "30年国债ETF（上市前指数代理）",
+  "511090.SH": "鹏扬中债-30年期国债ETF（511090）",
   "CN30Y.YIELD-TR": "30年国债收益率曲线代理",
   "511990.SH": "华宝添益货币ETF（511990）",
   "USD/CNY": "美元兑人民币汇率",
@@ -148,6 +149,7 @@ const SHORT_NAMES = {
   CBA03101: "5年国债",
   CBA06501: "7-10年国债",
   CBA21801: "30年国债",
+  "511090.SH": "30年国债ETF",
   "CN30Y.YIELD-TR": "30年国债代理",
   "511990.SH": "货币基金",
   REPO: "逆回购",
@@ -162,7 +164,7 @@ const DATA_KIND_NAMES = {
 };
 
 const SIDE_NAMES = { BUY: "买入", SELL: "卖出" };
-const REASON_NAMES = { rebalance: "再平衡", liquidity_shortfall: "补足现金", dip_buy: "逢低补仓", dip_buy_funding: "补仓资金" };
+const REASON_NAMES = { rebalance: "再平衡", asset_replacement: "指数代理切换ETF", liquidity_shortfall: "补足现金", dip_buy: "逢低补仓", dip_buy_funding: "补仓资金", dip_buy_recovery: "补仓回本卖出" };
 const CURRENCY_NAMES = { CNY: "人民币", USD: "美元", HKD: "港币" };
 const REBALANCE_FREQUENCY_NAMES = {
   daily: "每日",
@@ -309,6 +311,19 @@ function assetName(symbol) {
   const repo = config?.repo_options?.find((option) => option.symbol === symbol);
   if (repo) return repo.name;
   return STATIC_NAMES[symbol] || fallback?.name || configured?.name || symbol;
+}
+
+function tradeAssetName(symbol) {
+  const code = symbol === "REPO" ? config?.repo_symbol : symbol;
+  const name = assetName(code || symbol);
+  if (!code || !name) return name || "-";
+  const normalizedName = String(name).toUpperCase();
+  const normalizedCode = String(code).toUpperCase();
+  const baseCode = normalizedCode.split(".")[0];
+  if (normalizedName.includes(normalizedCode) || (baseCode.length >= 3 && normalizedName.includes(baseCode))) {
+    return name;
+  }
+  return `${name}（${code}）`;
 }
 
 function formatSource(value) {
@@ -533,6 +548,7 @@ function renderFeeSummary() {
   const voo = assetBySymbol("VOO") || {};
   const hk = assetBySymbol("03195.HK") || {};
   const dividendLowVol = assetBySymbol("512890.SH") || {};
+  const treasury30 = assetBySymbol("CBA21801") || {};
   const hkFee = config.fees.hk_connect_etf;
   const ibkr = config.fees.ibkr_us_etf;
   const cnCommission = feeInputNumber("cnCommission", config.fees.cn_etf.commission_rate);
@@ -543,6 +559,7 @@ function renderFeeSummary() {
   const officialHkPerSide = hkFee.trading_fee_rate + hkFee.transaction_levy_rate + hkFee.afrc_transaction_levy_rate;
   const fundGap = Number(hk.expense_ratio || 0) - Number(voo.expense_ratio || 0);
   const dividendLowVolProxyExpense = Number(dividendLowVol.price_fallback?.annual_expense_drag_rate || 0);
+  const treasury30ProxyExpense = Number(treasury30.proxy_annual_expense_drag_rate || 0);
   const rows = [
     ["基金内扣", "03195", fmtRate(hk.expense_ratio, 2), "已在净值/价格中体现"],
     ["基金内扣", "VOO", fmtRate(voo.expense_ratio, 2), "已在净值/价格中体现"],
@@ -558,6 +575,9 @@ function renderFeeSummary() {
     ["VOO 卖出", "FINRA TAF", `$${fmtNum(ibkr.finra_taf_per_share_usd, 6)}/股`, `上限 $${fmtNum(ibkr.finra_taf_cap_usd, 2)}`],
     ["VOO 税务", "分红预扣税", fmtRate(usDividendTax, 0), "最差预期可用 30%"],
     ["红利低波代理", "基金运作费", `${fmtRate(dividendLowVolProxyExpense, 2)}/年`, "管理+托管+历史指数使用费"],
+    ["30年国债代理", "基金运作费估算", `${fmtRate(treasury30ProxyExpense, 2)}/年`, "按511090管理费+托管费逐日扣除"],
+    ["30年国债代理", "模拟交易佣金", `${fmtRate(cnCommission, 3)}/边`, "初始建仓用首个收盘，后续用前一已公布收盘"],
+    ["511090 实盘段", "基金内扣", `${fmtRate(Number(treasury30.replacement_assets?.[0]?.management_fee || 0) + Number(treasury30.replacement_assets?.[0]?.custodian_fee || 0), 2)}/年`, "已反映在真实ETF价格中，不重复扣除"],
     ["境内 ETF", "佣金", `${fmtRate(cnCommission, 3)}/边`, "用户可调"],
   ];
   host.innerHTML = `
@@ -571,7 +591,7 @@ function renderFeeSummary() {
         </div>
       `).join("")}
     </div>
-    <div class="fee-note">真实ETF的内扣费用已反映在价格或净值中；512890上市前的H20269全收益指数代理阶段，按历史合同口径0.63%/年逐日扣除管理费、托管费和指数使用费。</div>
+    <div class="fee-note">真实ETF的内扣费用已反映在价格或净值中，不再额外重复扣费；512890上市前的H20269全收益指数代理阶段按0.63%/年扣除，30年国债指数代理阶段按0.20%/年扣除，并分别计入模拟交易成本。</div>
   `;
 }
 
@@ -600,10 +620,15 @@ function readConfig() {
   next.dip_buy_enabled = $("dipBuyEnabled").checked;
   next.dip_buy_drawdown = Number($("dipBuyDrawdown").value);
   next.dip_buy_total_parts = Number($("dipBuyTotalParts").value);
-  next.dip_buy_parts_per_trigger = Number($("dipBuyPartsPerTrigger").value);
-  next.dip_buy_cooldown_trading_days = Number($("dipBuyCooldownTradingDays").value);
+  next.dip_buy_level_mode = $("dipBuyLevelMode").value;
+  next.dip_buy_cost_basis_mode = $("dipBuyCostBasisMode").value;
+  next.dip_buy_recovery_sell_enabled = $("dipBuyRecoverySellEnabled").checked;
+  next.dip_buy_asset_cap_enabled = $("dipBuyAssetCapEnabled").checked;
+  next.dip_buy_asset_cap_ratio = Number($("dipBuyAssetCapRatio").value);
   next.dip_buy_blackout_enabled = $("dipBuyBlackoutEnabled").checked;
   next.dip_buy_blackout_months = Number($("dipBuyBlackoutMonths").value);
+  delete next.dip_buy_parts_per_trigger;
+  delete next.dip_buy_cooldown_trading_days;
   next.assets = next.assets.map((asset) => {
     if (isSp500Asset(asset)) {
       const selected = asset.key === sp500SelectedKey;
@@ -778,7 +803,7 @@ function renderControlSummary(plan) {
     ["现金模式", repoModeLabel(plan.mode)],
     ["逢低补仓", $("dipBuyEnabled")?.checked
       ? ($("rebalanceFrequency")?.value === "yearly"
-        ? `开启（跌 ${fmtPct(Number($("dipBuyDrawdown")?.value || config.dip_buy_drawdown || 0.05))}，冷却 ${Number($("dipBuyCooldownTradingDays")?.value || 0)} 个交易日${$("dipBuyBlackoutEnabled")?.checked ? `，再平衡前 ${Number($("dipBuyBlackoutMonths")?.value || 0)} 个月静默` : ""}）`
+        ? `开启（每 ${fmtPct(Number($("dipBuyDrawdown")?.value || config.dip_buy_drawdown || 0.05))} 一档，${$("dipBuyLevelMode")?.value === "multiplier" ? "第 N 档补 N 份" : "每档补 1 份"}，${$("dipBuyCostBasisMode")?.value === "initial" ? "最初成本" : "目前持仓成本"}${$("dipBuyAssetCapEnabled")?.checked ? `，单标的上限 ${fmtPct(Number($("dipBuyAssetCapRatio")?.value || 0.5))}` : ""}${$("dipBuyRecoverySellEnabled")?.checked ? "，回本卖出补仓份额" : ""}${$("dipBuyBlackoutEnabled")?.checked ? `，再平衡前 ${Number($("dipBuyBlackoutMonths")?.value || 0)} 个月静默` : ""}）`
         : "不生效（仅年度再平衡）")
       : "关闭"],
     ["月消费", `￥${fmtMoney(monthlySpend)}`],
@@ -826,6 +851,31 @@ function selectRepoMode(mode) {
   updateRepoWeight();
 }
 
+function syncDipBuyModeTabs() {
+  const levelMode = $("dipBuyLevelMode")?.value || "fixed";
+  const costMode = $("dipBuyCostBasisMode")?.value || "current_average";
+  document.querySelectorAll("[data-dip-level-mode]").forEach((button) => {
+    const active = button.dataset.dipLevelMode === levelMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-dip-cost-mode]").forEach((button) => {
+    const active = button.dataset.dipCostMode === costMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function selectDipBuyLevelMode(mode) {
+  $("dipBuyLevelMode").value = mode;
+  updateRepoWeight();
+}
+
+function selectDipBuyCostBasisMode(mode) {
+  $("dipBuyCostBasisMode").value = mode;
+  updateRepoWeight();
+}
+
 function parseInputDate(value) {
   const parts = String(value || "").split("-").map(Number);
   if (parts.length !== 3 || parts.some((item) => !Number.isFinite(item))) return null;
@@ -864,9 +914,15 @@ function updateRepoWeight() {
   if ($("rebalanceMonthAnalysisField")) $("rebalanceMonthAnalysisField").hidden = !yearly;
   if ($("rebalanceMonthAnalysisEnabled")) $("rebalanceMonthAnalysisEnabled").disabled = !yearly;
   if ($("dipBuyEnabled")) $("dipBuyEnabled").disabled = !yearly;
-  ["dipBuyDrawdown", "dipBuyTotalParts", "dipBuyPartsPerTrigger", "dipBuyCooldownTradingDays", "dipBuyBlackoutEnabled"].forEach((id) => {
+  ["dipBuyDrawdown", "dipBuyTotalParts", "dipBuyLevelMode", "dipBuyCostBasisMode", "dipBuyRecoverySellEnabled", "dipBuyAssetCapEnabled", "dipBuyAssetCapRatio", "dipBuyBlackoutEnabled"].forEach((id) => {
     if ($(id)) $(id).disabled = !dipBuyEnabled;
   });
+  document.querySelectorAll("[data-dip-level-mode], [data-dip-cost-mode]").forEach((button) => {
+    button.disabled = !dipBuyEnabled;
+  });
+  const assetCapEnabled = dipBuyEnabled && Boolean($("dipBuyAssetCapEnabled")?.checked);
+  if ($("dipBuyAssetCapRatio")) $("dipBuyAssetCapRatio").disabled = !assetCapEnabled;
+  if ($("dipBuyAssetCapField")) $("dipBuyAssetCapField").setAttribute("aria-disabled", assetCapEnabled ? "false" : "true");
   if ($("dipBuyBlackoutMonths")) $("dipBuyBlackoutMonths").disabled = !dipBuyEnabled || !$("dipBuyBlackoutEnabled")?.checked;
   if ($("dipBuySettings")) $("dipBuySettings").hidden = !dipBuyEnabled;
   if ($("dipBuyAvailabilityHint")) {
@@ -888,9 +944,11 @@ function updateRepoWeight() {
   if (fixedControls) fixedControls.hidden = mode !== "fixed_bucket";
   if ($("repoFixedRatioValue")) $("repoFixedRatioValue").textContent = fmtPct(Number($("repoFixedRatio")?.value || 0));
   if ($("dipBuyDrawdownValue")) $("dipBuyDrawdownValue").textContent = fmtPct(Number($("dipBuyDrawdown")?.value || 0));
+  if ($("dipBuyAssetCapRatioValue")) $("dipBuyAssetCapRatioValue").textContent = fmtPct(Number($("dipBuyAssetCapRatio")?.value || 0));
   const plan = currentRepoPlan(mode, enabledWeight);
   updateTreasuryHint();
   syncRepoModeTabs();
+  syncDipBuyModeTabs();
   renderControlSummary(plan);
   renderAllocationSummary(plan);
   if (mode === "fixed_bucket") {
@@ -987,8 +1045,12 @@ function renderControls() {
   $("dipBuyDrawdown").value = config.dip_buy_drawdown ?? 0.05;
   $("dipBuyDrawdownValue").textContent = fmtPct(config.dip_buy_drawdown ?? 0.05);
   $("dipBuyTotalParts").value = config.dip_buy_total_parts ?? 10;
-  $("dipBuyPartsPerTrigger").value = config.dip_buy_parts_per_trigger ?? 1;
-  $("dipBuyCooldownTradingDays").value = config.dip_buy_cooldown_trading_days ?? 10;
+  $("dipBuyLevelMode").value = config.dip_buy_level_mode ?? "fixed";
+  $("dipBuyCostBasisMode").value = config.dip_buy_cost_basis_mode ?? "current_average";
+  $("dipBuyRecoverySellEnabled").checked = Boolean(config.dip_buy_recovery_sell_enabled);
+  $("dipBuyAssetCapEnabled").checked = Boolean(config.dip_buy_asset_cap_enabled);
+  $("dipBuyAssetCapRatio").value = config.dip_buy_asset_cap_ratio ?? 0.50;
+  $("dipBuyAssetCapRatioValue").textContent = fmtPct(config.dip_buy_asset_cap_ratio ?? 0.50);
   $("dipBuyBlackoutEnabled").checked = config.dip_buy_blackout_enabled ?? true;
   $("dipBuyBlackoutMonths").value = config.dip_buy_blackout_months ?? 1;
   $("repoSymbol").innerHTML = (config.repo_options || []).map((option) => `<option value="${option.symbol}">${option.name}</option>`).join("");
@@ -1006,11 +1068,17 @@ function renderControls() {
     $(id).addEventListener("input", renderFeeSummary, listenerOptions);
   });
   $("ibkrPlan").addEventListener("change", renderFeeSummary, listenerOptions);
-  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "rebalanceToTarget", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled", "dipBuyDrawdown", "dipBuyTotalParts", "dipBuyPartsPerTrigger", "dipBuyCooldownTradingDays", "dipBuyBlackoutEnabled", "dipBuyBlackoutMonths"].forEach((id) => {
-    $(id).addEventListener(id === "rebalanceFrequency" || id === "repoTargetMode" ? "change" : "input", updateRepoWeight, listenerOptions);
+  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "rebalanceToTarget", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled", "dipBuyDrawdown", "dipBuyTotalParts", "dipBuyLevelMode", "dipBuyCostBasisMode", "dipBuyRecoverySellEnabled", "dipBuyAssetCapEnabled", "dipBuyAssetCapRatio", "dipBuyBlackoutEnabled", "dipBuyBlackoutMonths"].forEach((id) => {
+    $(id).addEventListener(["rebalanceFrequency", "repoTargetMode", "dipBuyLevelMode", "dipBuyCostBasisMode"].includes(id) ? "change" : "input", updateRepoWeight, listenerOptions);
   });
   document.querySelectorAll("[data-repo-mode]").forEach((button) => {
     button.addEventListener("click", () => selectRepoMode(button.dataset.repoMode), listenerOptions);
+  });
+  document.querySelectorAll("[data-dip-level-mode]").forEach((button) => {
+    button.addEventListener("click", () => selectDipBuyLevelMode(button.dataset.dipLevelMode), listenerOptions);
+  });
+  document.querySelectorAll("[data-dip-cost-mode]").forEach((button) => {
+    button.addEventListener("click", () => selectDipBuyCostBasisMode(button.dataset.dipCostMode), listenerOptions);
   });
   document.querySelectorAll("[data-date-preset]").forEach((button) => {
     button.addEventListener("click", () => applyDatePreset(button.dataset.datePreset), listenerOptions);
@@ -1152,15 +1220,16 @@ function metricMarkup(item) {
   return `<div class="metric ${item.tone ? `is-${item.tone}` : ""}"><span>${item.label}</span><strong>${item.value}</strong></div>`;
 }
 
-function renderSummaryGroups(primary, secondary, note = null) {
+function renderSummaryGroups(primary, secondary, notes = null) {
+  const noteList = (Array.isArray(notes) ? notes : [notes]).filter(Boolean);
   $("summaryGrid").innerHTML = `
     <div class="metric-group metric-group-primary">${primary.map(metricMarkup).join("")}</div>
     <div class="metric-group metric-group-secondary">${secondary.map(metricMarkup).join("")}</div>
-    ${note ? `<div class="summary-note" role="note">
+    ${noteList.map((note) => `<div class="summary-note" role="note">
       <span class="summary-note-icon" aria-hidden="true">i</span>
       <span>${escapeHtml(note.text)}</span>
-      ${note.href ? `<a href="${escapeHtml(note.href)}" target="_blank" rel="noopener noreferrer">查看上交所年报</a>` : ""}
-    </div>` : ""}
+      ${note.href ? `<a href="${escapeHtml(note.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(note.linkText || "查看依据")}</a>` : ""}
+    </div>`).join("")}
   `;
 }
 
@@ -1244,8 +1313,8 @@ function renderRiskInsights(summary = {}) {
 
 function renderInitialSummary() {
   renderSummaryGroups(
-    ["期末总资产", "累计收益", "年化收益", "最大回撤"].map((label) => ({ label, value: "--" })),
-    ["总手续费", "实际到账现金分红", "总消费", "浮盈浮亏", "对比期末资产", "再平衡次数", "交易次数", "分红预扣税"]
+    ["期末总资产", "累计收益（现金流调整）", "年化收益（现金流调整）", "最大回撤"].map((label) => ({ label, value: "--" })),
+    ["原始本金折算年化", "原始本金累计盈亏", "总手续费", "实际到账现金分红", "总消费", "浮盈浮亏", "对比期末资产", "再平衡次数", "交易次数", "分红预扣税"]
       .map((label) => ({ label, value: "--" })),
   );
   renderRiskInsights();
@@ -1253,16 +1322,30 @@ function renderInitialSummary() {
 
 function renderSummary(summary) {
   const positiveTone = (value) => Number(value || 0) >= 0 ? "positive" : "negative";
+  const optionalPct = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : fmtPct(value);
+  const originalProfitValue = summary.net_profit_cny == null
+    ? "—"
+    : `￥${fmtMoney(summary.net_profit_cny)} / ${optionalPct(summary.original_capital_return)}`;
   const hasDividendLowVol = Boolean(config?.assets?.some(
     (asset) => asset.symbol === "512890.SH" && asset.enabled && Number(asset.target_weight || 0) > 0,
   ));
   const primary = [
     { label: "期末总资产", value: `￥${fmtMoney(summary.final_asset_cny)}` },
-    { label: "累计收益", value: fmtPct(summary.total_return), tone: positiveTone(summary.total_return) },
-    { label: "年化收益", value: fmtPct(summary.annualized_return), tone: positiveTone(summary.annualized_return) },
+    { label: "累计收益（现金流调整）", value: fmtPct(summary.total_return), tone: positiveTone(summary.total_return) },
+    { label: "年化收益（现金流调整）", value: fmtPct(summary.annualized_return), tone: positiveTone(summary.annualized_return) },
     { label: "最大回撤", value: fmtPct(summary.max_drawdown), tone: "negative" },
   ];
   const secondary = [
+    {
+      label: "原始本金折算年化",
+      value: optionalPct(summary.original_capital_annualized_return),
+      tone: summary.original_capital_annualized_return == null ? "" : positiveTone(summary.original_capital_annualized_return),
+    },
+    {
+      label: "原始本金累计盈亏",
+      value: originalProfitValue,
+      tone: summary.net_profit_cny == null ? "" : positiveTone(summary.net_profit_cny),
+    },
     { label: "总手续费", value: `￥${fmtMoney(summary.total_fees_cny)}` },
     { label: "实际到账现金分红", value: `￥${fmtMoney(summary.total_dividend_cny)}` },
     { label: "总消费", value: `￥${fmtMoney(summary.total_spend_cny)}` },
@@ -1275,8 +1358,30 @@ function renderSummary(summary) {
   const dividendNote = hasDividendLowVol ? {
     text: "512890 说明：现金分红只统计 ETF 向持有人实际派发的现金。官方年报确认该 ETF 在 2023—2025 年未实施利润分配；成分股股息留在基金内，并已反映在净值和价格中。007466 等联接基金的分红不属于 512890。",
     href: "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2026-03-31/512890_20260331_5BME.pdf",
+    linkText: "查看上交所年报",
   } : null;
-  renderSummaryGroups(primary, secondary, dividendNote);
+  const returnBasisNote = {
+    text: "收益口径：现金流调整收益先用（当日总资产－昨日总资产－当日外部净流入）÷昨日总资产计算每日收益，再复利与年化；不是始终拿原始本金作分母。原始本金折算口径把消费等外部净流出加回期末资产后，再对原始本金计算，未按每笔现金流发生时间加权。再平衡表的当年盈亏则为当年资产变动剔除外部收支，并同时给出占年初资产、占原始本金的比例。",
+  };
+  const treasuryCoverage = (summary.instrument_coverage || []).find(
+    (item) => item.logical_symbol === "CBA21801",
+  );
+  let treasuryNote = null;
+  if (treasuryCoverage) {
+    const actualRatio = fmtPct(treasuryCoverage.tradable_etf_coverage_ratio || 0);
+    const actualStart = treasuryCoverage.tradable_etf_start_date || treasuryCoverage.configured_etf_trade_start_date || "2023-06-13";
+    const prefix = treasuryCoverage.coverage_mode === "actual_etf_only"
+      ? `30年国债全区间均使用511090真实ETF行情（真实ETF覆盖 ${actualRatio}）。`
+      : treasuryCoverage.coverage_mode === "proxy_only"
+        ? "30年国债本区间尚无511090真实ETF阶段，全部为不可交易指数代理。"
+        : `30年国债在 ${actualStart} 前使用不可交易指数代理，自该日起自动切换511090真实ETF（真实ETF覆盖 ${actualRatio}）。`;
+    treasuryNote = {
+      text: `${prefix}代理期按0.20%/年基金费率及境内ETF佣金估算；初始建仓使用首个可用收盘点位，后续交易只使用前一已公布收盘点位。真实ETF价格已含管理费和托管费，不重复扣除。历史结果只能用于情景与周期检验，不能保证未来趋势。`,
+      href: "https://www.sse.com.cn/disclosure/announcement/listing/c/c_20230612_5722454.shtml",
+      linkText: "查看511090上市依据",
+    };
+  }
+  renderSummaryGroups(primary, secondary, [returnBasisNote, treasuryNote, dividendNote]);
   renderRiskInsights(summary);
 }
 
@@ -2037,6 +2142,17 @@ function formatCell(value) {
   if (value && typeof value === "object" && value.kind === "performance") {
     return formatPerformanceCell(value);
   }
+  if (value && typeof value === "object" && value.kind === "year-profit") {
+    if (value.profit == null || !Number.isFinite(Number(value.profit))) {
+      return `<span class="table-year-profit is-muted">重新回测后显示</span>`;
+    }
+    const profit = Number(value.profit);
+    const tone = profit > 1e-9 ? "positive" : profit < -1e-9 ? "negative" : "flat";
+    const yearStartRate = value.yearStartRate == null ? "—" : fmtPct(value.yearStartRate);
+    const originalRate = value.originalRate == null ? "—" : fmtPct(value.originalRate);
+    const title = `年初资产 ￥${fmtMoney(value.yearStartTotal)}；期间外部净流入 ￥${fmtMoney(value.externalFlow)}`;
+    return `<span class="table-year-profit is-${tone}" title="${escapeHtml(title)}"><strong>${profit >= 0 ? "+" : "−"}￥${fmtMoney(Math.abs(profit))}</strong><small>年初 ${escapeHtml(yearStartRate)} · 本金 ${escapeHtml(originalRate)}</small></span>`;
+  }
   if (typeof value === "number") {
     const formatted = Math.abs(value) < 1 && value !== 0 ? fmtPct(value) : fmtNum(value, 2);
     return value < 0 ? `<span class="negative">${formatted}</span>` : formatted;
@@ -2059,24 +2175,50 @@ function rebalanceActionLabel(payload = {}) {
   return "已记录";
 }
 
+function rebalanceAssetColumnName(symbol) {
+  return SHORT_NAMES[symbol] || assetName(symbol);
+}
+
+function rebalanceCashEquivalentSymbols() {
+  const symbols = new Set(["REPO"]);
+  for (const option of config.repo_options || []) {
+    if (["repo", "money_fund"].includes(option.instrument_type) && option.symbol) {
+      symbols.add(option.symbol);
+    }
+  }
+  if (config.repo_symbol) symbols.add(config.repo_symbol);
+  return symbols;
+}
+
 function rebalanceDisplayRows(rows) {
+  const cashEquivalentSymbols = rebalanceCashEquivalentSymbols();
   const symbols = [];
   for (const row of rows) {
     for (const symbol of Object.keys(row.payload?.asset_performance || {})) {
+      if (cashEquivalentSymbols.has(symbol)) continue;
       if (!symbols.includes(symbol)) symbols.push(symbol);
     }
   }
-  const orderedSymbols = [...config.assets.map((asset) => asset.symbol), "REPO"].filter((symbol) => symbols.includes(symbol));
+  const orderedSymbols = config.assets.map((asset) => asset.symbol).filter((symbol) => symbols.includes(symbol));
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["执行日", "决策日", "当年收益", "当年最大回撤", "当年手续费"];
-  const assetColumns = orderedSymbols.map((symbol) => SHORT_NAMES[symbol] || assetName(symbol));
+  const baseColumns = ["执行日", "决策日", "收益年度", "当年收益（现金流调整）", "当年盈亏", "当年最大回撤", "当年手续费"];
+  const assetColumns = orderedSymbols.map(rebalanceAssetColumnName);
   const displayRows = rows.map((row) => {
     const item = {
       执行日: row.rebalance_date,
       决策日: row.payload?.decision_date || row.rebalance_date,
-      当年收益: row.payload?.year_return ?? row.period_return,
+      收益年度: row.payload?.year_label ? `${row.payload.year_label}年` : `${String(row.payload?.decision_date || row.rebalance_date).slice(0, 4)}年`,
+      "当年收益（现金流调整）": row.payload?.year_return ?? row.period_return,
+      当年盈亏: {
+        kind: "year-profit",
+        profit: row.payload?.year_profit_cny,
+        yearStartRate: row.payload?.year_profit_on_year_start,
+        originalRate: row.payload?.year_profit_on_original_capital,
+        yearStartTotal: row.payload?.year_start_total_cny,
+        externalFlow: row.payload?.year_external_flow_cny,
+      },
       当年最大回撤: row.payload?.year_max_drawdown ?? row.payload?.period_max_drawdown ?? 0,
       当年手续费: row.payload?.year_fee_cny ?? row.fee_cny,
     };
@@ -2085,7 +2227,7 @@ function rebalanceDisplayRows(rows) {
       const annualPerf = row.payload?.year_asset_performance?.[symbol];
       const legacyRepo = symbol === "REPO" && Number(row.payload?.asset_performance_version || 1) < 2;
       const perf = (legacyRepo ? periodPerf || annualPerf : annualPerf || periodPerf) || {};
-      item[SHORT_NAMES[symbol] || assetName(symbol)] = {
+      item[rebalanceAssetColumnName(symbol)] = {
         kind: "performance",
         profit: perf.profit_cny ?? "",
         rate: perf.return ?? "",
@@ -2232,7 +2374,7 @@ function renderBacktestRecords(summary, rebalance, trades) {
     ["交易日期", "标的名称", "方向", "份额", "价格", "成交额", "费用", "币种", "原因"],
     (trades.trades || []).map((row) => ({
       交易日期: row.trade_date,
-      标的名称: assetName(row.symbol),
+      标的名称: tradeAssetName(row.symbol),
       方向: SIDE_NAMES[row.side] || row.side,
       份额: row.quantity,
       价格: row.price,

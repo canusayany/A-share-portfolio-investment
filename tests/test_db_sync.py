@@ -26,6 +26,7 @@ from app.services.data_sync import (
     merge_rows_by_trade_date,
     missing_coverage_ranges,
     missing_date_ranges,
+    missing_edge_date_ranges,
     missing_tail_date_ranges,
     parse_eastmoney_fund_dividends,
     parse_sohu_jsonp,
@@ -35,6 +36,7 @@ from app.services.data_sync import (
     sohu_code_and_referer,
     asset_price_sync_ranges,
     chinabond_price_sync_ranges,
+    legacy_chinabond_modeled_overlap_ranges,
     effective_asset_end,
     effective_price_end_for_asset,
     fetch_chinabond_index_prices,
@@ -121,6 +123,54 @@ class DbAndSyncTests(unittest.TestCase):
             ranges = chinabond_price_sync_ranges(conn, "prices", "symbol", asset["symbol"], "trade_date", "2024-09-30", "2024-10-08")
         self.assertEqual(ranges, [])
 
+    def test_30y_sync_refetches_modeled_rows_that_overlap_official_history(self) -> None:
+        cfg = normalize_config({})
+        asset = next(item for item in cfg["assets"] if item["symbol"] == "CBA21801")
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            insert_many(
+                conn,
+                "prices",
+                [
+                    {
+                        "symbol": "CBA21801",
+                        "trade_date": "2011-01-04",
+                        "open": 99.9,
+                        "high": 99.9,
+                        "low": 99.9,
+                        "close": 99.9,
+                        "adj_close": 99.9,
+                        "volume": 0,
+                        "amount": 0,
+                        "currency": "CNY",
+                        "source": "chinabond:30y_yield_curve:modeled_total_return:splice_scale_0.94",
+                    },
+                    {
+                        "symbol": "CBA21801",
+                        "trade_date": "2011-01-05",
+                        "open": 100.2,
+                        "high": 100.2,
+                        "low": 100.2,
+                        "close": 100.2,
+                        "adj_close": 100.2,
+                        "volume": 0,
+                        "amount": 0,
+                        "currency": "CNY",
+                        "source": "chinabond:index_total_return",
+                    },
+                ],
+            )
+
+            ranges = legacy_chinabond_modeled_overlap_ranges(
+                conn,
+                asset,
+                "2011-01-01",
+                "2011-01-31",
+            )
+
+        self.assertEqual(ranges, [("2011-01-04", "2011-01-04")])
+
     def test_chinabond_total_return_fetch_parses_official_timestamp_series(self) -> None:
         cfg = normalize_config({})
         asset = next(item for item in cfg["assets"] if item["symbol"] == "CBA21801")
@@ -200,8 +250,8 @@ class DbAndSyncTests(unittest.TestCase):
                 result = sync_all(
                     conn,
                     "",
-                    "2024-08-12",
-                    "2024-08-12",
+                    "2023-06-12",
+                    "2023-06-12",
                     [asset],
                     missing_items=["prices:CBA21801"],
                 )
@@ -497,20 +547,20 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertIn("repo_rates:204001", missing_previous_day)
 
     def test_chinabond_current_day_uses_previous_published_day(self) -> None:
-        db_path, cfg = build_synced_db("2026-06-15", "2026-06-25")
+        db_path, cfg = build_synced_db("2023-06-01", "2023-06-12")
         original_datetime = data_sync_module.datetime
 
         class FixedDateTime(datetime):
             @classmethod
             def now(cls, tz=None):
-                return cls(2026, 6, 25, 10, 30, tzinfo=timezone.utc)
+                return cls(2023, 6, 12, 10, 30, tzinfo=timezone.utc)
 
         try:
             data_sync_module.datetime = FixedDateTime
             with db_session(db_path) as conn:
-                conn.execute("DELETE FROM prices WHERE symbol='CBA21801' AND trade_date='2026-06-25'")
+                conn.execute("DELETE FROM prices WHERE symbol='CBA21801' AND trade_date='2023-06-12'")
                 missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
-                conn.execute("DELETE FROM prices WHERE symbol='CBA21801' AND trade_date='2026-06-24'")
+                conn.execute("DELETE FROM prices WHERE symbol='CBA21801' AND trade_date='2023-06-09'")
                 missing_previous_day = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
         finally:
             data_sync_module.datetime = original_datetime
@@ -549,7 +599,7 @@ class DbAndSyncTests(unittest.TestCase):
             missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])
         self.assertIn("prices:000300.SH", missing)
         self.assertIn("fx_rates:USD/CNY", missing)
-        self.assertNotIn("repo_rates:204001", missing)
+        self.assertIn("repo_rates:204001", missing)
 
     def test_required_data_missing_needs_one_day_repo_for_reserved_cash(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
@@ -575,6 +625,40 @@ class DbAndSyncTests(unittest.TestCase):
             tail_gaps = missing_tail_date_ranges(conn, "prices", "symbol", "VOO", "trade_date", "2020-01-01", "2020-01-10")
         self.assertEqual(gaps, [])
         self.assertEqual(tail_gaps, [("2020-01-10", "2020-01-10")])
+
+    def test_missing_edge_date_ranges_returns_prefix_and_tail_only(self) -> None:
+        db_path = temp_db_path()
+        init_db(db_path)
+        with db_session(db_path) as conn:
+            insert_many(
+                conn,
+                "repo_rates",
+                [
+                    {
+                        "symbol": "204014",
+                        "trade_date": trade_date,
+                        "open_rate": 2.0,
+                        "close_rate": 2.0,
+                        "high_rate": 2.0,
+                        "low_rate": 2.0,
+                        "volume": 0.0,
+                        "amount": 0.0,
+                        "source": "fixture:repo",
+                    }
+                    for trade_date in ("2020-01-06", "2020-01-08")
+                ],
+            )
+            ranges = missing_edge_date_ranges(
+                conn,
+                "repo_rates",
+                "symbol",
+                "204014",
+                "trade_date",
+                "2020-01-01",
+                "2020-01-10",
+                start_tolerance_days=0,
+            )
+        self.assertEqual(ranges, [("2020-01-01", "2020-01-05"), ("2020-01-09", "2020-01-10")])
 
     def test_dividend_coverage_ranges_are_merged(self) -> None:
         db_path = temp_db_path()

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260828-rebalance-target-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260831-dip-ladder-1" />
   </head>
   <body class="history-collapsed">
     <header class="mobile-app-bar">
@@ -124,7 +124,7 @@
               <label class="range-field">
                 <span>相对成本价下跌 Q <strong id="dipBuyDrawdownValue"></strong></span>
                 <input id="dipBuyDrawdown" type="range" min="0.01" max="0.30" step="0.01" />
-                <small class="field-help">仅用当日收盘价判断；成交使用下一交易日开盘价，避免未来函数。</small>
+                <small class="field-help">形成 Q、2Q、3Q…分档；每个资产的每一档在本年度周期内最多成交一次，不设冷却期。</small>
               </label>
               <div class="field-row">
                 <label>
@@ -132,25 +132,53 @@
                   <input id="dipBuyTotalParts" type="number" min="1" step="1" inputmode="numeric" />
                 </label>
                 <label>
-                  每次补仓 P 份
-                  <input id="dipBuyPartsPerTrigger" type="number" min="1" step="1" inputmode="numeric" />
-                </label>
-              </div>
-              <div class="field-row">
-                <label>
-                  同一资产冷却期（交易日）
-                  <input id="dipBuyCooldownTradingDays" type="number" min="0" max="252" step="1" inputmode="numeric" />
-                </label>
-                <label>
                   静默期（月）
                   <input id="dipBuyBlackoutMonths" type="number" min="0" max="11" step="1" inputmode="numeric" />
                 </label>
               </div>
+              <div class="dip-buy-mode-grid">
+                <div class="dip-buy-mode-card">
+                  <span class="setting-title">每档补仓份数</span>
+                  <select id="dipBuyLevelMode" class="visually-hidden" aria-label="每档补仓份数策略">
+                    <option value="fixed">每档一份</option>
+                    <option value="multiplier">档位倍数</option>
+                  </select>
+                  <div class="mode-tabs dip-buy-mode-tabs" aria-label="每档补仓份数策略">
+                    <button type="button" data-dip-level-mode="fixed">每档 1 份</button>
+                    <button type="button" data-dip-level-mode="multiplier">第 N 档补 N 份</button>
+                  </div>
+                  <small>倍数模式示例：跌 Q 补 1 份、跌 2Q 补 2 份，直到补仓池用完。</small>
+                </div>
+                <div class="dip-buy-mode-card">
+                  <span class="setting-title">成本价基准</span>
+                  <select id="dipBuyCostBasisMode" class="visually-hidden" aria-label="补仓成本价基准">
+                    <option value="current_average">目前持仓成本</option>
+                    <option value="initial">周期初始成本</option>
+                  </select>
+                  <div class="mode-tabs dip-buy-mode-tabs" aria-label="补仓成本价基准">
+                    <button type="button" data-dip-cost-mode="current_average">目前持仓成本</button>
+                    <button type="button" data-dip-cost-mode="initial">最初成本</button>
+                  </div>
+                  <small>目前持仓成本会在补仓后下降；切换 ETF 时，两种模式都会改用新 ETF 的真实成本。</small>
+                </div>
+              </div>
+              <label class="strategy-toggle strategy-toggle-compact">
+                <input id="dipBuyRecoverySellEnabled" type="checkbox" />
+                <span><strong>回到周期初始成本时卖出补仓份额</strong><small>只卖出逢低补仓实际买到的数量；卖出现金可继续用于逆回购或货币基金。</small></span>
+              </label>
+              <label class="strategy-toggle strategy-toggle-compact">
+                <input id="dipBuyAssetCapEnabled" type="checkbox" />
+                <span><strong>限制单个资产补仓总额</strong><small>以该资产周期初始投入为基数；周期内累计补仓成交额不因回本卖出而恢复额度。</small></span>
+              </label>
+              <label id="dipBuyAssetCapField" class="range-field dip-buy-cap-field">
+                <span>最多为初始投入的 <strong id="dipBuyAssetCapRatioValue"></strong></span>
+                <input id="dipBuyAssetCapRatio" type="range" min="0.10" max="1.00" step="0.05" />
+              </label>
               <label class="strategy-toggle strategy-toggle-compact">
                 <input id="dipBuyBlackoutEnabled" type="checkbox" />
                 <span><strong>再平衡前进入静默期</strong><small>年度再平衡前 N 个自然月不再触发补仓，跨入静默期的待成交单会取消。</small></span>
               </label>
-              <small class="field-help">每次年度再平衡时，按当时现金等价物减去 24 个月生活费确认 B；B 与每份金额在本年度内固定，不随月份或后续现金变化重算，下一次年度再平衡再刷新。</small>
+              <small class="field-help">仅用当日收盘价判断，下一交易日真实开盘价成交。每次年度再平衡按现金等价物减去 24 个月生活费确认 B；B 与每份金额在本周期内固定。</small>
             </div>
           </section>
 
@@ -412,6 +440,6 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260828-rebalance-target-1"></script>
+  <script src="static/app.js?v=20260831-dip-ladder-1"></script>
   </body>
 </html>

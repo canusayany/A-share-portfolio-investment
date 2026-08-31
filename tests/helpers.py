@@ -129,6 +129,7 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
         "CBA03101": 100.0,
         "CBA06501": 100.0,
         "CBA21801": 100.0,
+        "511090.SH": 100.0,
         "511990.SH": 100.0,
         "000300.SH": 3500.0,
     }

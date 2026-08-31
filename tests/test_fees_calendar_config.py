@@ -169,8 +169,11 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertFalse(cfg["rebalance_month_analysis_enabled"])
         self.assertEqual(cfg["dip_buy_drawdown"], 0.05)
         self.assertEqual(cfg["dip_buy_total_parts"], 10)
-        self.assertEqual(cfg["dip_buy_parts_per_trigger"], 1)
-        self.assertEqual(cfg["dip_buy_cooldown_trading_days"], 10)
+        self.assertEqual(cfg["dip_buy_level_mode"], "fixed")
+        self.assertEqual(cfg["dip_buy_cost_basis_mode"], "current_average")
+        self.assertFalse(cfg["dip_buy_recovery_sell_enabled"])
+        self.assertFalse(cfg["dip_buy_asset_cap_enabled"])
+        self.assertEqual(cfg["dip_buy_asset_cap_ratio"], 0.50)
         self.assertTrue(cfg["dip_buy_blackout_enabled"])
         self.assertEqual(cfg["dip_buy_blackout_months"], 1)
         enabled_allocations = {
@@ -207,26 +210,26 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertTrue(any("dip_buy_total_parts" in item for item in validate_config(normalize_config({"dip_buy_total_parts": 0}))))
         self.assertTrue(
             any(
-                "dip_buy_parts_per_trigger" in item
-                for item in validate_config(normalize_config({"dip_buy_parts_per_trigger": 0}))
-            )
-        )
-        self.assertTrue(
-            any(
-                "dip_buy_parts_per_trigger" in item
-                for item in validate_config(normalize_config({"dip_buy_total_parts": 2, "dip_buy_parts_per_trigger": 3}))
-            )
-        )
-        self.assertTrue(
-            any(
-                "dip buy part parameters" in item
+                "dip_buy_total_parts" in item
                 for item in validate_config(normalize_config({"dip_buy_total_parts": "ten"}))
             )
         )
         self.assertTrue(
             any(
-                "dip_buy_cooldown_trading_days" in item
-                for item in validate_config(normalize_config({"dip_buy_cooldown_trading_days": -1}))
+                "dip_buy_level_mode" in item
+                for item in validate_config(normalize_config({"dip_buy_level_mode": "unknown"}))
+            )
+        )
+        self.assertTrue(
+            any(
+                "dip_buy_cost_basis_mode" in item
+                for item in validate_config(normalize_config({"dip_buy_cost_basis_mode": "unknown"}))
+            )
+        )
+        self.assertTrue(
+            any(
+                "dip_buy_asset_cap_ratio" in item
+                for item in validate_config(normalize_config({"dip_buy_asset_cap_ratio": 0}))
             )
         )
         self.assertTrue(
@@ -317,6 +320,13 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertEqual(thirty_year["price_fallback"]["kind"], "chinabond_30y_yield_total_return")
         self.assertEqual(thirty_year["price_fallback"]["symbol"], "CN30Y.YIELD-TR")
         self.assertEqual(thirty_year["price_fallback"]["start_date"], "2006-03-01")
+        self.assertFalse(thirty_year["tradable"])
+        self.assertTrue(thirty_year["estimated_transaction_fees"])
+        self.assertEqual(thirty_year["proxy_annual_expense_drag_rate"], 0.002)
+        replacement = thirty_year["replacement_assets"][0]
+        self.assertEqual(replacement["symbol"], "511090.SH")
+        self.assertEqual(replacement["trade_start_date"], "2023-06-13")
+        self.assertTrue(replacement["auto_switch_on_trade_start"])
         for asset in treasuries:
             asset["enabled"] = True
             asset["target_weight"] = 0.1
@@ -328,6 +338,15 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertIn("518850.SH", assets)
         self.assertEqual(assets["518850.SH"]["replacement_for"], "518880.SH")
         self.assertEqual(assets["518850.SH"]["allocation_start_date"], "2021-01-01")
+
+    def test_backtest_assets_include_tradable_30y_treasury_etf(self) -> None:
+        cfg = normalize_config({})
+        assets = {asset["symbol"]: asset for asset in backtest_assets(cfg)}
+
+        self.assertIn("511090.SH", assets)
+        self.assertEqual(assets["511090.SH"]["replacement_for"], "CBA21801")
+        self.assertEqual(assets["511090.SH"]["allocation_start_date"], "2023-06-13")
+        self.assertEqual(assets["511090.SH"]["asset_type"], "cn_etf")
 
     def test_default_end_date_uses_current_day(self) -> None:
         self.assertEqual(default_config()["end_date"], date.today().isoformat())

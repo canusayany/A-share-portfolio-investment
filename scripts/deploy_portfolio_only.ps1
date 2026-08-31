@@ -190,10 +190,11 @@ try {
         'run_sudo systemctl is-active lucygetup-portfolio.service',
         'curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/health"',
         'curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/default-config" | grep -q ''"rebalance_to_target":false''',
-        'grep -q ''BACKTEST_ENGINE_VERSION = 37'' "$TARGET/app/services/backtest_engine.py"',
+        'curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/default-config" | grep -q ''"symbol":"511090.SH"''',
+        'grep -q ''BACKTEST_ENGINE_VERSION = 43'' "$TARGET/app/services/backtest_engine.py"',
         'after_db_identity="$(run_sudo stat -c ''%d:%i'' "$TARGET/data/backtest.sqlite3")"',
         '[ "$before_db_identity" = "$after_db_identity" ]',
-        'printf ''\nengine_version=37 database_file_preserved=true backup=%s\n'' "$backup_path"'
+        'printf ''\nengine_version=43 database_file_preserved=true backup=%s\n'' "$backup_path"'
     )
     [System.IO.File]::WriteAllText($remoteScript, ($remoteLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
     $remoteScriptPath = "$remoteStage/deploy_remote.sh"

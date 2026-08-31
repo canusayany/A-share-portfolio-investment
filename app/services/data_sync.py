@@ -358,6 +358,49 @@ def missing_tail_date_ranges(
     return missing_date_ranges(conn, table, code_col, code, date_col, tail_start.isoformat(), end)
 
 
+def missing_edge_date_ranges(
+    conn,
+    table: str,
+    code_col: str,
+    code: str,
+    date_col: str,
+    start: str,
+    end: str,
+    *,
+    start_tolerance_days: int = 7,
+) -> list[tuple[str, str]]:
+    """Return uncovered prefix and suffix ranges without refetching holiday gaps."""
+    requested_start = parse_date(start)
+    requested_end = parse_date(end)
+    if requested_start > requested_end:
+        return []
+    row = conn.execute(
+        f"""
+        SELECT MIN({date_col}) AS first_date, MAX({date_col}) AS last_date
+        FROM {table}
+        WHERE {code_col}=?
+          AND {date_col} BETWEEN ? AND ?
+          AND source NOT LIKE 'generated:%'
+        """,
+        (code, start, end),
+    ).fetchone()
+    if not row or not row["first_date"] or not row["last_date"]:
+        return [(start, end)]
+
+    expected_days = business_days(start, end)
+    if not expected_days:
+        return []
+    required_start = expected_days[0]
+    first_date = parse_date(row["first_date"])
+    last_date = parse_date(row["last_date"])
+    ranges: list[tuple[str, str]] = []
+    if first_date > required_start + timedelta(days=start_tolerance_days):
+        ranges.append((requested_start.isoformat(), (first_date - timedelta(days=1)).isoformat()))
+    if last_date < requested_end:
+        ranges.append(((last_date + timedelta(days=1)).isoformat(), requested_end.isoformat()))
+    return ranges
+
+
 def missing_coverage_ranges(conn, kind: str, symbol: str, start: str, end: str) -> list[tuple[str, str]]:
     requested_start = parse_date(start)
     requested_end = parse_date(end)
@@ -632,7 +675,7 @@ def required_data_missing(
             missing.add(f"fx_rates:{pair}")
     repo_symbols = sorted({"204001", repo_symbol})
     for current_repo_symbol in repo_symbols:
-        if parse_date(start) <= cn_data_end and _coverage_gap(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, cn_data_end_text, end_tolerance_days=0):
+        if parse_date(start) <= cn_data_end and _coverage_gap(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, cn_data_end_text, require_start=True, end_tolerance_days=0):
             missing.add(f"repo_rates:{current_repo_symbol}")
 
     generated_checks = [
@@ -865,6 +908,34 @@ def chinabond_price_sync_ranges(
     therefore the only meaningful incremental coverage check.
     """
     return missing_tail_date_ranges(conn, "prices", "symbol", code, "trade_date", start, end)
+
+
+def legacy_chinabond_modeled_overlap_ranges(
+    conn,
+    asset: dict[str, Any],
+    start: str,
+    end: str,
+) -> list[tuple[str, str]]:
+    """Find modeled 30Y rows that incorrectly overlap the official index era."""
+    fallback = asset.get("price_fallback")
+    if not isinstance(fallback, dict) or fallback.get("kind") != "chinabond_30y_yield_total_return":
+        return []
+    official_start = max(parse_date(start), parse_date(asset_trade_start_date(asset, start)))
+    requested_end = parse_date(end)
+    if official_start > requested_end:
+        return []
+    row = conn.execute(
+        """
+        SELECT MIN(trade_date) AS first_date, MAX(trade_date) AS last_date
+        FROM prices
+        WHERE symbol=? AND trade_date BETWEEN ? AND ?
+          AND source LIKE 'chinabond:30y_yield_curve:%modeled_total_return%'
+        """,
+        (asset["symbol"], official_start.isoformat(), requested_end.isoformat()),
+    ).fetchone()
+    if not row or not row["first_date"]:
+        return []
+    return [(str(row["first_date"]), str(row["last_date"]))]
 
 
 def _row_close(row: dict[str, Any]) -> float | None:
@@ -3042,6 +3113,7 @@ def sync_all(
 
     inserted = {"prices": 0, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "fx_rates": 0}
     price_range_func = missing_date_ranges if plan["full"] else missing_tail_date_ranges
+    rate_range_func = missing_date_ranges if plan["full"] else missing_edge_date_ranges
     cn_data_end = effective_price_end_for_market("CN", end)
     cn_data_end_text = cn_data_end.isoformat()
     asset_price_ranges: dict[str, list[tuple[str, str]]] = {}
@@ -3074,6 +3146,12 @@ def sync_all(
                     legacy_unscaled_index_proxy_price_ranges(conn, symbol, price_fetch_start, price_end.isoformat())
                     if asset.get("market") == "CN"
                     else []
+                )
+                + legacy_chinabond_modeled_overlap_ranges(
+                    conn,
+                    asset,
+                    price_fetch_start,
+                    price_end.isoformat(),
                 )
             )
         asset_dividend_ranges[symbol] = (
@@ -3535,7 +3613,7 @@ def sync_all(
     repo_started_at = time.perf_counter()
     repo_range_map = {
         current_repo_symbol: (
-            price_range_func(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, cn_data_end_text)
+            rate_range_func(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, cn_data_end_text)
             if parse_date(start) <= cn_data_end
             else []
         )
@@ -3564,7 +3642,7 @@ def sync_all(
     fx_started_at = time.perf_counter()
     fx_range_map = {
         pair: (
-            price_range_func(conn, "fx_rates", "pair", pair, "trade_date", start, cn_data_end_text)
+            rate_range_func(conn, "fx_rates", "pair", pair, "trade_date", start, cn_data_end_text)
             if parse_date(start) <= cn_data_end
             else []
         )

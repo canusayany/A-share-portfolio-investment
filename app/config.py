@@ -225,12 +225,22 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
     {
         "key": "cn_treasury_30y_index",
         "symbol": "CBA21801",
-        "name": "中债-30年期国债指数",
+        "name": "30年国债ETF（上市前使用中债指数代理）",
         "target_weight": 0.25,
         "enabled": True,
         "currency": "CNY",
         "market": "CN",
         "asset_type": "cn_bond_index",
+        # CBA21801 is a total-return index rather than an exchange-traded
+        # security.  Before 511090 became tradable it is retained only as a
+        # long-cycle return proxy.  The proxy is charged the configured CN ETF
+        # commission on modeled trades and the ETF's 0.20% annual operating
+        # expense, while still allowing fractional proxy units because an
+        # exchange board lot did not exist during this period.
+        "tradable": False,
+        "estimated_transaction_fees": True,
+        "proxy_annual_expense_drag_rate": 0.002,
+        "methodology_disclosure": True,
         "inception_date": "2011-01-04",
         "index_id": "8a8b2cef77b239980177b485d20a6379",
         "price_fallback": {
@@ -240,6 +250,24 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
             "start_date": "2006-03-01",
             "asset_type": "cn_bond_index",
         },
+        "replacement_assets": [
+            {
+                "key": "cn_treasury_30y_etf_511090",
+                "symbol": "511090.SH",
+                "name": "鹏扬中债-30年期国债ETF（511090）",
+                "currency": "CNY",
+                "market": "CN",
+                "asset_type": "cn_etf",
+                "inception_date": "2023-05-19",
+                "trade_start_date": "2023-06-13",
+                "allocation_start_date": "2023-06-13",
+                "management_fee": 0.0015,
+                "custodian_fee": 0.0005,
+                "tradable": True,
+                "auto_switch_on_trade_start": True,
+                "estimated_transaction_fees": False,
+            }
+        ],
     },
     {
         "key": "cn_gold_etf",
@@ -343,8 +371,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dip_buy_enabled": False,
     "dip_buy_drawdown": 0.05,
     "dip_buy_total_parts": 10,
-    "dip_buy_parts_per_trigger": 1,
-    "dip_buy_cooldown_trading_days": 10,
+    "dip_buy_level_mode": "fixed",
+    "dip_buy_cost_basis_mode": "current_average",
+    "dip_buy_recovery_sell_enabled": False,
+    "dip_buy_asset_cap_enabled": False,
+    "dip_buy_asset_cap_ratio": 0.50,
     "dip_buy_blackout_enabled": True,
     "dip_buy_blackout_months": 1,
     "repo_options": REPO_OPTIONS,
@@ -662,8 +693,16 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("rebalance_to_target must be boolean")
     if not isinstance(config.get("dip_buy_enabled", False), bool):
         errors.append("dip_buy_enabled must be boolean")
+    if not isinstance(config.get("dip_buy_recovery_sell_enabled", False), bool):
+        errors.append("dip_buy_recovery_sell_enabled must be boolean")
+    if not isinstance(config.get("dip_buy_asset_cap_enabled", False), bool):
+        errors.append("dip_buy_asset_cap_enabled must be boolean")
     if not isinstance(config.get("dip_buy_blackout_enabled", True), bool):
         errors.append("dip_buy_blackout_enabled must be boolean")
+    if config.get("dip_buy_level_mode", "fixed") not in {"fixed", "multiplier"}:
+        errors.append("dip_buy_level_mode must be fixed or multiplier")
+    if config.get("dip_buy_cost_basis_mode", "current_average") not in {"initial", "current_average"}:
+        errors.append("dip_buy_cost_basis_mode must be initial or current_average")
     if repo_target_mode not in {"residual_weight", "fixed_bucket"}:
         errors.append("repo_target_mode must be residual_weight or fixed_bucket")
     try:
@@ -686,9 +725,7 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append("dip_buy_drawdown must be numeric")
     try:
         total_parts_value = config.get("dip_buy_total_parts", 10)
-        parts_per_trigger_value = config.get("dip_buy_parts_per_trigger", 1)
         total_parts = float(total_parts_value)
-        parts_per_trigger = float(parts_per_trigger_value)
         if (
             isinstance(total_parts_value, bool)
             or not math.isfinite(total_parts)
@@ -696,19 +733,15 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             or total_parts < 1
         ):
             errors.append("dip_buy_total_parts must be a positive integer")
-        if (
-            isinstance(parts_per_trigger_value, bool)
-            or not math.isfinite(parts_per_trigger)
-            or not parts_per_trigger.is_integer()
-            or parts_per_trigger < 1
-        ):
-            errors.append("dip_buy_parts_per_trigger must be a positive integer")
-        elif math.isfinite(total_parts) and total_parts.is_integer() and total_parts >= 1 and parts_per_trigger > total_parts:
-            errors.append("dip_buy_parts_per_trigger cannot exceed dip_buy_total_parts")
     except (TypeError, ValueError):
-        errors.append("dip buy part parameters must be integers")
+        errors.append("dip_buy_total_parts must be a positive integer")
+    try:
+        dip_buy_asset_cap_ratio = float(config.get("dip_buy_asset_cap_ratio", 0.50))
+        if not math.isfinite(dip_buy_asset_cap_ratio) or not 0 < dip_buy_asset_cap_ratio <= 1:
+            errors.append("dip_buy_asset_cap_ratio must be between 0 and 1")
+    except (TypeError, ValueError):
+        errors.append("dip_buy_asset_cap_ratio must be numeric")
     for key, default, minimum, maximum in (
-        ("dip_buy_cooldown_trading_days", 10, 0, 252),
         ("dip_buy_blackout_months", 1, 0, 11),
     ):
         try:

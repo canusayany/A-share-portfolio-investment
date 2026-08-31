@@ -260,9 +260,18 @@ def rebalance_display_payload(payload: dict) -> dict:
         key: payload.get(key)
         for key in (
             "decision_date",
+            "year_label",
+            "year_start_date",
             "year_return",
             "year_max_drawdown",
             "year_fee_cny",
+            "year_start_total_cny",
+            "year_external_flow_cny",
+            "year_profit_cny",
+            "year_profit_on_year_start",
+            "year_profit_on_original_capital",
+            "year_return_basis",
+            "year_profit_basis",
             "year_asset_performance",
             "asset_performance",
             "period_max_drawdown",
