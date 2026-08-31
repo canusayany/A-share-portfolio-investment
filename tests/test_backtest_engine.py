@@ -504,7 +504,7 @@ class BacktestEngineTests(unittest.TestCase):
                 (result["run_id"],),
             ).fetchone()
 
-        self.assertEqual(len(funding_trades), 2)
+        self.assertEqual(len(funding_trades), 1)
         self.assertEqual({trade["symbol"] for trade in funding_trades}, {"511990.SH"})
         self.assertEqual({trade["side"] for trade in funding_trades}, {"SELL"})
         self.assertEqual({trade["trade_date"] for trade in funding_trades}, {"2020-01-03"})
@@ -691,7 +691,7 @@ class BacktestEngineTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(dip_trades), 2)
+        self.assertEqual(len(dip_trades), 1)
         self.assertEqual({trade["trade_date"] for trade in dip_trades}, {"2020-01-03"})
 
     def test_dip_buy_cost_basis_switch_uses_reduced_average_or_initial_cost(self) -> None:
@@ -757,7 +757,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(dip_buy_parts_for_level(1, "multiplier"), 1)
         self.assertEqual(dip_buy_parts_for_level(3, "multiplier"), 3)
         self.assertEqual(dip_buy_parts_for_level(3, "fixed"), 1)
-        self.assertEqual(result["summary"]["dip_buy_count"], 3)
+        self.assertEqual(result["summary"]["dip_buy_count"], 1)
         self.assertEqual(payload["triggered_levels"]["510500.SH"], [1, 2, 3])
         self.assertEqual(payload["remaining_parts"], 0)
 
@@ -828,6 +828,57 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(recovery_sell["price"], 10.2)
         self.assertAlmostEqual(recovery_sell["quantity"], dip_buy["quantity"])
         self.assertEqual(result["summary"]["dip_buy_recovery_sell_count"], 1)
+
+    def test_recovery_sell_reopens_level_parts_and_asset_cap_for_next_decline(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        for asset in cfg["assets"]:
+            asset["enabled"] = asset["symbol"] == "510500.SH"
+            asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
+        cfg.update(
+            {
+                "dip_buy_enabled": True,
+                "dip_buy_recovery_sell_enabled": True,
+                "dip_buy_total_parts": 10,
+                "dip_buy_asset_cap_enabled": True,
+                "dip_buy_asset_cap_ratio": 0.10,
+                "monthly_spend_cny": 0.0,
+            }
+        )
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE prices SET open=10,high=10,low=10,close=10 WHERE symbol='510500.SH'")
+            conn.execute("UPDATE prices SET close=9.4,low=9.4 WHERE symbol='510500.SH' AND trade_date='2020-01-02'")
+            conn.execute("UPDATE prices SET open=9.0,high=9.4,low=9.0,close=9.4 WHERE symbol='510500.SH' AND trade_date='2020-01-03'")
+            conn.execute("UPDATE prices SET open=9.4,high=10.1,low=9.4,close=10.1 WHERE symbol='510500.SH' AND trade_date='2020-01-06'")
+            conn.execute("UPDATE prices SET open=10.2,high=10.2,low=9.4,close=9.4 WHERE symbol='510500.SH' AND trade_date='2020-01-07'")
+            conn.execute("UPDATE prices SET open=9.0,high=9.4,low=9.0,close=9.4 WHERE symbol='510500.SH' AND trade_date>='2020-01-08'")
+            result = run_backtest(conn, cfg)
+            dip_buys = rows_to_dicts(
+                conn.execute(
+                    "SELECT trade_date,quantity,gross_amount,fee FROM trades WHERE run_id=? AND reason='dip_buy' ORDER BY trade_date",
+                    (result["run_id"],),
+                )
+            )
+            recovery_sell = conn.execute(
+                "SELECT trade_date,quantity FROM trades WHERE run_id=? AND reason='dip_buy_recovery'",
+                (result["run_id"],),
+            ).fetchone()
+            final_daily = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date DESC LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+
+        payload = json.loads(final_daily["payload_json"])["dip_buy"]
+        self.assertEqual([trade["trade_date"] for trade in dip_buys], ["2020-01-03", "2020-01-08"])
+        self.assertEqual(recovery_sell["trade_date"], "2020-01-07")
+        self.assertAlmostEqual(recovery_sell["quantity"], dip_buys[0]["quantity"])
+        self.assertEqual(result["summary"]["dip_buy_count"], 2)
+        self.assertEqual(result["summary"]["dip_buy_recovery_sell_count"], 1)
+        self.assertEqual(payload["triggered_levels"]["510500.SH"], [1])
+        self.assertEqual(payload["remaining_parts"], 9)
+        self.assertAlmostEqual(
+            payload["cumulative_spend_cny"]["510500.SH"],
+            dip_buys[1]["gross_amount"] + dip_buys[1]["fee"],
+        )
 
     def test_proxy_to_etf_switch_uses_new_asset_price_and_new_cost_basis(self) -> None:
         cfg = normalize_config({})

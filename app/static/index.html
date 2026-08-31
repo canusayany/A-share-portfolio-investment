@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260831-dip-ladder-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260831-dip-ladder-2" />
   </head>
   <body class="history-collapsed">
     <header class="mobile-app-bar">
@@ -164,11 +164,11 @@
               </div>
               <label class="strategy-toggle strategy-toggle-compact">
                 <input id="dipBuyRecoverySellEnabled" type="checkbox" />
-                <span><strong>回到周期初始成本时卖出补仓份额</strong><small>只卖出逢低补仓实际买到的数量；卖出现金可继续用于逆回购或货币基金。</small></span>
+                <span><strong>回到周期初始成本时卖出补仓份额</strong><small>只卖出逢低补仓实际买到的数量；卖出后恢复对应档位、份数和额度，再次下跌可以重新补仓。</small></span>
               </label>
               <label class="strategy-toggle strategy-toggle-compact">
                 <input id="dipBuyAssetCapEnabled" type="checkbox" />
-                <span><strong>限制单个资产补仓总额</strong><small>以该资产周期初始投入为基数；周期内累计补仓成交额不因回本卖出而恢复额度。</small></span>
+                <span><strong>限制单个资产补仓总额</strong><small>以该资产周期初始投入为基数；回本卖出的补仓份额会释放相应额度。</small></span>
               </label>
               <label id="dipBuyAssetCapField" class="range-field dip-buy-cap-field">
                 <span>最多为初始投入的 <strong id="dipBuyAssetCapRatioValue"></strong></span>
@@ -440,6 +440,6 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260831-dip-ladder-1"></script>
+  <script src="static/app.js?v=20260831-dip-ladder-2"></script>
   </body>
 </html>

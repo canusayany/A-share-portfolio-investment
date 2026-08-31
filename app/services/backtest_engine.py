@@ -50,7 +50,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 43
+BACKTEST_ENGINE_VERSION = 44
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -1887,9 +1887,31 @@ def _execute_dip_buys(
             "dip_buy",
         )
         if spent > 0:
+            executed_order = dict(order)
+            level_orders = list(order.get("level_orders", []))
+            if level_orders:
+                funded_level_orders: list[dict[str, Any]] = []
+                cumulative_budget_cny = 0.0
+                for level_order in level_orders:
+                    if spent > cumulative_budget_cny + 1e-8:
+                        funded_level_orders.append(level_order)
+                    cumulative_budget_cny += max(float(level_order.get("budget_cny", 0.0)), 0.0)
+                if funded_level_orders:
+                    funded_levels = [int(item["level"]) for item in funded_level_orders]
+                    executed_order["levels"] = funded_levels
+                    executed_order["level"] = max(funded_levels)
+                    executed_order["requested_parts"] = sum(
+                        int(item.get("requested_parts", 1)) for item in funded_level_orders
+                    )
+                    executed_order["parts"] = sum(
+                        int(item.get("parts", 1)) for item in funded_level_orders
+                    )
+                    executed_order["budget_cny"] = sum(
+                        float(item.get("budget_cny", 0.0)) for item in funded_level_orders
+                    )
             executed.append(
                 {
-                    **order,
+                    **executed_order,
                     "spent_cny": spent,
                     "bought_quantity": max(position.quantity - quantity_before, 0.0),
                     "execution_date": day.isoformat(),
@@ -2877,14 +2899,44 @@ def run_backtest(
             for order in due_recovery_sells:
                 symbol = str(order["symbol"])
                 lot_id = str(order["lot_id"])
+                completed_lot: dict[str, Any] | None = None
                 for lot in dip_buy_recovery_lots.get(symbol, []):
                     if str(lot["lot_id"]) != lot_id:
                         continue
                     executed_order = executed_by_lot.get(lot_id)
                     sold_quantity = float(executed_order.get("sold_quantity", 0.0)) if executed_order else 0.0
-                    lot["quantity_remaining"] = max(float(lot["quantity_remaining"]) - sold_quantity, 0.0)
+                    quantity_before = max(float(lot.get("quantity_remaining", 0.0)), 0.0)
+                    spent_before = max(float(lot.get("spent_cny", 0.0)), 0.0)
+                    sold_fraction = (
+                        min(sold_quantity / quantity_before, 1.0)
+                        if quantity_before > 1e-10
+                        else 0.0
+                    )
+                    released_spend_cny = spent_before * sold_fraction
+                    lot["quantity_remaining"] = max(quantity_before - sold_quantity, 0.0)
+                    lot["spent_cny"] = max(spent_before - released_spend_cny, 0.0)
                     lot["pending"] = False
+                    if released_spend_cny > 0:
+                        dip_buy_cumulative_spend_cny[symbol] = max(
+                            dip_buy_cumulative_spend_cny.get(symbol, 0.0) - released_spend_cny,
+                            0.0,
+                        )
+                    if lot["quantity_remaining"] <= 1e-10 and sold_quantity > 0:
+                        completed_lot = lot
                     break
+                if completed_lot is not None:
+                    # A fully recovered lot no longer consumes a ladder slot,
+                    # pool part, or per-asset cap.  If the price later falls
+                    # through the same level again, that level can buy again.
+                    completed_levels = [
+                        int(level)
+                        for level in completed_lot.get("levels", [completed_lot["level"]])
+                    ]
+                    dip_buy_triggered_levels.setdefault(symbol, set()).difference_update(completed_levels)
+                    dip_buy_remaining_parts = min(
+                        dip_buy_remaining_parts + int(completed_lot.get("parts", 1)),
+                        int(config.get("dip_buy_total_parts", 10)),
+                    )
                 dip_buy_recovery_lots[symbol] = [
                     lot for lot in dip_buy_recovery_lots.get(symbol, [])
                     if float(lot.get("quantity_remaining", 0.0)) > 1e-10
@@ -2928,8 +2980,12 @@ def run_backtest(
             )
             for order in executed_dip_buys:
                 symbol = str(order["symbol"])
-                level = int(order["level"])
-                dip_buy_triggered_levels.setdefault(symbol, set()).add(level)
+                levels = [
+                    int(level)
+                    for level in order.get("levels", [order["level"]])
+                ]
+                level = max(levels)
+                dip_buy_triggered_levels.setdefault(symbol, set()).update(levels)
                 dip_buy_cumulative_spend_cny[symbol] = (
                     dip_buy_cumulative_spend_cny.get(symbol, 0.0) + float(order.get("spent_cny", 0.0))
                 )
@@ -2943,9 +2999,10 @@ def run_backtest(
                 ):
                     dip_buy_recovery_lots.setdefault(symbol, []).append(
                         {
-                            "lot_id": f"{day_str}:{symbol}:{level}",
+                            "lot_id": f"{day_str}:{symbol}:{'-'.join(str(item) for item in levels)}",
                             "symbol": symbol,
                             "level": level,
+                            "levels": levels,
                             "parts": int(order.get("parts", 1)),
                             "buy_date": day_str,
                             "quantity_remaining": bought_quantity,
@@ -3211,6 +3268,10 @@ def run_backtest(
                             "lot_id": lot_id,
                             "symbol": symbol,
                             "level": int(lot["level"]),
+                            "levels": [
+                                int(level)
+                                for level in lot.get("levels", [lot["level"]])
+                            ],
                             "decision_date": day_str,
                             "execution_date": next_day.isoformat(),
                             "quantity": float(lot["quantity_remaining"]),
@@ -3296,9 +3357,10 @@ def run_backtest(
                 if available_parts <= 0 or available_budget_cny <= 0:
                     continue
                 pending_levels = {
-                    int(order["level"])
+                    int(level)
                     for order in pending_dip_buys
                     if str(order["symbol"]) == symbol
+                    for level in order.get("levels", [order["level"]])
                 }
                 used_levels = dip_buy_triggered_levels.setdefault(symbol, set()) | pending_levels
                 pending_symbol_budget_cny = sum(
@@ -3317,6 +3379,7 @@ def run_backtest(
                     - pending_symbol_budget_cny,
                     0.0,
                 )
+                new_level_orders: list[dict[str, Any]] = []
                 for level in range(1, reached_level + 1):
                     if level in used_levels or available_parts <= 0 or available_budget_cny <= 0:
                         continue
@@ -3334,7 +3397,7 @@ def run_backtest(
                         if future_maturities:
                             deferred_dip_rechecks[symbol] = min(future_maturities)
                         break
-                    pending_dip_buys.append(
+                    new_level_orders.append(
                         {
                             "symbol": symbol,
                             "level": level,
@@ -3365,6 +3428,31 @@ def run_backtest(
                     asset_cap_remaining_cny = max(asset_cap_remaining_cny - budget_cny, 0.0)
                     liquid_cash_equivalent_cny = max(liquid_cash_equivalent_cny - budget_cny, 0.0)
                     dip_buy_reserve_cny += budget_cny
+                if new_level_orders:
+                    # A close can cross several previously unused levels at
+                    # once.  Execute those levels as one market order for this
+                    # asset instead of emitting duplicate-looking trades at
+                    # the same next-session open.
+                    combined_order = dict(new_level_orders[0])
+                    combined_order["level_orders"] = [
+                        {
+                            "level": int(order["level"]),
+                            "requested_parts": int(order.get("requested_parts", 1)),
+                            "parts": int(order.get("parts", 1)),
+                            "budget_cny": float(order.get("budget_cny", 0.0)),
+                        }
+                        for order in new_level_orders
+                    ]
+                    combined_order["levels"] = [int(order["level"]) for order in new_level_orders]
+                    combined_order["level"] = max(combined_order["levels"])
+                    combined_order["requested_parts"] = sum(
+                        int(order.get("requested_parts", 1)) for order in new_level_orders
+                    )
+                    combined_order["parts"] = sum(int(order.get("parts", 1)) for order in new_level_orders)
+                    combined_order["budget_cny"] = sum(
+                        float(order.get("budget_cny", 0.0)) for order in new_level_orders
+                    )
+                    pending_dip_buys.append(combined_order)
 
         _invest_repo_cash(
             state,
