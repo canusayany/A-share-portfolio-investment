@@ -111,8 +111,10 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
 }
 
+const MOBILE_LAYOUT_QUERY = "(max-width: 1100px)";
+
 function isMobileLayout() {
-  return window.matchMedia("(max-width: 900px)").matches;
+  return window.matchMedia(MOBILE_LAYOUT_QUERY).matches;
 }
 
 const STATIC_NAMES = {
@@ -2434,6 +2436,7 @@ function polishChart(chart) {
 }
 
 function queueChartOption(id, option) {
+  if (option?.tooltip) option.tooltip = { confine: true, ...option.tooltip };
   pendingChartOptions[id] = option;
 }
 
@@ -3341,7 +3344,7 @@ async function runBacktest() {
   button.disabled = true;
   button.classList.add("is-running");
   if (buttonLabel) buttonLabel.textContent = "正在回测";
-  if (window.matchMedia("(max-width: 900px)").matches) setParameterPanel(false);
+  if (isMobileLayout()) setParameterPanel(false);
   setMessage("正在提交回测任务...");
   try {
     const submittedConfig = compactConfigForRequest(readConfig());

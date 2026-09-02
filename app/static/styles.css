@@ -22,6 +22,7 @@
   --radius-lg: 14px;
   --sidebar-width: 348px;
   --history-width: 368px;
+  --touch-target: 44px;
 }
 
 * {
@@ -29,11 +30,18 @@
 }
 
 html {
+  max-width: 100%;
+  overflow-x: hidden;
+  overflow-x: clip;
   color-scheme: light;
 }
 
 body {
+  min-width: 0;
+  max-width: 100%;
   margin: 0;
+  overflow-x: hidden;
+  overflow-x: clip;
   background: var(--canvas);
   color: var(--ink);
   font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", Arial, sans-serif;
@@ -50,6 +58,7 @@ select {
 
 button {
   cursor: pointer;
+  touch-action: manipulation;
 }
 
 button:disabled {
@@ -185,6 +194,8 @@ body.identity-locked {
 .app-shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--history-width);
+  width: 100%;
+  min-width: 0;
   min-height: 100vh;
 }
 
@@ -1139,12 +1150,12 @@ input[type="range"] {
 }
 
 .asset-type {
-  grid-column: 2 / 5;
+  grid-column: 2 / 4;
   margin: 0;
 }
 
 .asset-route {
-  grid-column: 2 / 5;
+  grid-column: 2 / 4;
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -1337,7 +1348,9 @@ input[type="range"] {
 }
 
 .workspace {
+  width: 100%;
   min-width: 0;
+  max-width: 100%;
   height: 100vh;
   overflow-y: auto;
   padding: 24px 28px 32px;
@@ -2732,7 +2745,10 @@ input[type="range"] {
 
 .table-scroll {
   width: 100%;
+  max-width: 100%;
   overflow: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
 }
@@ -2917,7 +2933,7 @@ tbody tr:hover td {
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   body.parameters-open,
   body.history-open {
     overflow: hidden;
@@ -2961,7 +2977,7 @@ tbody tr:hover td {
 
   .asset-comovement-toolbar select {
     flex: 0 0 124px;
-    min-height: 38px;
+    min-height: var(--touch-target);
   }
 
   .asset-comovement-summary {
@@ -2986,8 +3002,8 @@ tbody tr:hover td {
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    min-height: 62px;
-    padding: 10px 16px;
+    min-height: 64px;
+    padding: max(10px, env(safe-area-inset-top)) 16px 10px;
     background: rgb(255 255 255 / 96%);
     border-bottom: 1px solid var(--line);
     backdrop-filter: blur(10px);
@@ -2995,6 +3011,15 @@ tbody tr:hover td {
 
   .mobile-app-bar > div {
     display: grid;
+  }
+
+  .mobile-app-bar > div:first-child {
+    min-width: 0;
+  }
+
+  .mobile-app-bar > .mobile-app-actions {
+    display: flex;
+    flex: 0 0 auto;
   }
 
   .mobile-app-bar strong {
@@ -3007,7 +3032,7 @@ tbody tr:hover td {
   }
 
   .mobile-app-bar .button {
-    min-height: 36px;
+    min-height: var(--touch-target);
     padding: 7px 13px;
     font-size: 12px;
   }
@@ -3018,7 +3043,7 @@ tbody tr:hover td {
 
   .app-shell {
     display: block;
-    min-height: calc(100vh - 62px);
+    min-height: calc(100dvh - 64px);
   }
 
   .controls {
@@ -3028,6 +3053,8 @@ tbody tr:hover td {
     width: min(390px, 92vw);
     max-width: 100%;
     height: 100dvh;
+    visibility: hidden;
+    pointer-events: none;
     box-shadow: var(--shadow-md);
     transform: translateX(-102%);
     transition: transform 220ms ease;
@@ -3058,18 +3085,17 @@ tbody tr:hover td {
   }
 
   body.history-collapsed .history-panel-header > div,
-  body.history-collapsed .history-comparison,
   body.history-collapsed .history-toolbar,
   body.history-collapsed .history-sections {
-    display: flex;
-  }
-
-  body.history-collapsed .history-toolbar {
     display: grid;
   }
 
-  body.history-collapsed .history-sections {
-    display: grid;
+  body.history-collapsed .history-comparison {
+    display: block;
+  }
+
+  body.history-collapsed .history-panel-header > div {
+    gap: 2px;
   }
 
   .history-panel-header {
@@ -3094,12 +3120,14 @@ tbody tr:hover td {
   }
 
   .history-item-actions button {
-    min-height: 42px;
+    min-height: var(--touch-target);
     font-size: 12px;
   }
 
   body.parameters-open .controls {
     transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .close-parameters,
@@ -3155,7 +3183,7 @@ tbody tr:hover td {
 
   .workspace {
     height: auto;
-    min-height: calc(100vh - 62px);
+    min-height: calc(100dvh - 64px);
     overflow: visible;
     padding: 18px 16px 28px;
   }
@@ -3172,16 +3200,75 @@ tbody tr:hover td {
     display: none;
   }
 
-  #parameterToggle {
-    display: none;
-  }
-
-  #historyToggle {
+  .workspace-actions {
     display: none;
   }
 
   .control-summary-key {
-    grid-template-columns: repeat(2, minmax(130px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .controls input:not([type="checkbox"]):not([type="range"]),
+  .controls select,
+  .preset-row button,
+  .mode-tabs button,
+  .default-allocation-preset button,
+  .history-view-tabs button,
+  .history-filters input,
+  .history-filters select,
+  .leaderboard-period-controls select,
+  .leaderboard-period-controls input,
+  .leaderboard-period-controls button,
+  .table-more,
+  .strategy-diagnostics-actions select,
+  .csv-export-button,
+  .csv-export-footer button {
+    min-height: var(--touch-target);
+  }
+
+  .csv-export-dialog input {
+    min-height: var(--touch-target);
+  }
+
+  input[type="checkbox"] {
+    width: 24px;
+    height: 24px;
+    min-height: 24px;
+  }
+
+  input[type="range"] {
+    min-height: 32px;
+  }
+
+  .asset-control {
+    grid-template-columns: 24px minmax(80px, 1fr) 72px;
+  }
+
+  .asset-percent {
+    min-height: var(--touch-target);
+  }
+
+  .tab-strip {
+    scroll-padding-inline: 14px;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tab-strip button {
+    min-width: var(--touch-target);
+    min-height: var(--touch-target);
+  }
+
+  .control-summary-more summary {
+    min-height: var(--touch-target);
+  }
+
+  .run-dock {
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+
+  .history-list {
+    padding-bottom: max(18px, env(safe-area-inset-bottom));
   }
 
   .metric-group-primary {
@@ -3222,7 +3309,7 @@ tbody tr:hover td {
 
   .strategy-diagnostics-actions select,
   .csv-export-button {
-    min-height: 42px;
+    min-height: var(--touch-target);
   }
 
   .csv-export-dates,
@@ -3230,8 +3317,29 @@ tbody tr:hover td {
     grid-template-columns: 1fr;
   }
 
+  .csv-export-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+    border-radius: 12px;
+  }
+
   .csv-export-dialog form {
     padding: 16px;
+  }
+
+  .csv-export-footer {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .csv-export-footer button {
+    width: 100%;
+  }
+
+  .csv-export-heading > button {
+    width: var(--touch-target);
+    height: var(--touch-target);
   }
 
   .strategy-card-heading {
@@ -3245,7 +3353,7 @@ tbody tr:hover td {
 
   .identity-gate {
     align-items: end;
-    padding: 12px;
+    padding: 12px 12px max(12px, env(safe-area-inset-bottom));
   }
 
   .identity-dialog {
@@ -3275,12 +3383,24 @@ tbody tr:hover td {
   }
 
   .mobile-app-bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     padding-right: 12px;
     padding-left: 12px;
+    gap: 8px;
   }
 
-  .mobile-app-bar {
+  .mobile-app-bar > div:first-child {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
     gap: 8px;
+  }
+
+  .mobile-app-bar > .mobile-app-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+    gap: 6px;
   }
 
   .mobile-app-bar strong {
@@ -3288,9 +3408,14 @@ tbody tr:hover td {
   }
 
   .mobile-app-actions .button {
-    min-height: 40px;
+    min-width: 0;
+    min-height: var(--touch-target);
     padding: 6px 8px;
     font-size: 11px;
+  }
+
+  .controls {
+    width: 100vw;
   }
 
   .history-sidebar {
@@ -3317,7 +3442,7 @@ tbody tr:hover td {
   .history-view-tabs button,
   .history-filters input,
   .history-filters select {
-    min-height: 42px;
+    min-height: var(--touch-target);
   }
 
   .history-filters {
@@ -3351,7 +3476,7 @@ tbody tr:hover td {
 
   .leaderboard-custom-period button {
     grid-column: 1 / -1;
-    min-height: 42px;
+    min-height: var(--touch-target);
   }
 
   .workspace {
@@ -3469,6 +3594,8 @@ tbody tr:hover td {
 
   .risk-insights-heading {
     align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .risk-insights-heading p {
@@ -3507,8 +3634,8 @@ tbody tr:hover td {
   }
 
   .daily-pnl-chart-view {
-    height: 380px;
-    padding-top: 50px;
+    height: 430px;
+    padding-top: 100px;
   }
 
   .daily-pnl-chart-view .chart {
@@ -3516,7 +3643,26 @@ tbody tr:hover td {
   }
 
   .daily-pnl-toolbar {
+    left: 10px;
     right: 10px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .daily-pnl-toolbar span {
+    grid-column: 1 / -1;
+    padding: 1px 4px;
+  }
+
+  .daily-pnl-toolbar button {
+    min-width: 0;
+    min-height: var(--touch-target);
+    padding: 5px 3px;
+  }
+
+  .daily-pnl-empty {
+    inset: 100px 0 0;
   }
 
   .empty-state {
@@ -3576,6 +3722,30 @@ tbody tr:hover td {
 
   .control-section:not(:last-of-type)::after {
     left: 32px;
+  }
+}
+
+@media (max-height: 600px) and (max-width: 1100px) {
+  .mobile-app-bar {
+    min-height: 56px;
+    padding-top: max(6px, env(safe-area-inset-top));
+    padding-bottom: 6px;
+  }
+
+  .app-shell,
+  .workspace {
+    min-height: calc(100dvh - 56px);
+  }
+
+  .control-panel-header,
+  .history-panel-header {
+    padding-top: max(10px, env(safe-area-inset-top));
+    padding-bottom: 10px;
+  }
+
+  .run-dock {
+    padding-top: 8px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
   }
 }
 
