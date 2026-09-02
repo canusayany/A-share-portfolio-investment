@@ -15,6 +15,9 @@ let leaderboardAvailableYears = [];
 let leaderboardRequestVersion = 0;
 let archiveRefreshTimer = null;
 let activeAnalysisWatch = 0;
+let identityState = null;
+let identityGateRequired = false;
+let identityGateResolver = null;
 const archiveSortModes = { recent: "newest", leaderboard: "score" };
 const tableSortState = {};
 const charts = {};
@@ -490,6 +493,101 @@ async function api(path, options = {}) {
     );
   }
   throw lastError;
+}
+
+function updateIdentityButtons() {
+  const hint = identityState?.key_hint || "";
+  [$('identityKeyButton'), $('mobileIdentityKeyButton')].filter(Boolean).forEach((button) => {
+    button.title = hint ? `身份 Key 已设置（指纹 ${hint}）` : "设置身份 Key";
+  });
+}
+
+function resetLeaderboardForIdentity() {
+  leaderboardRequestVersion += 1;
+  leaderboardHistory = [];
+  leaderboardArchiveLoaded = false;
+  leaderboardArchiveLoading = false;
+  leaderboardAvailableYears = [];
+  leaderboardPeriodMetadata = null;
+  leaderboardPeriodSelection = "";
+  if ($("leaderboardTab")) $("leaderboardTab").textContent = "全局榜单";
+  renderLeaderboard([]);
+  if (activeArchiveView === "leaderboard") refreshLeaderboardArchiveSafely();
+}
+
+function closeIdentityGate() {
+  const gate = $("identityGate");
+  if (gate) gate.hidden = true;
+  document.body.classList.remove("identity-locked");
+  const resolve = identityGateResolver;
+  identityGateResolver = null;
+  identityGateRequired = false;
+  if (resolve) resolve();
+}
+
+function showIdentityGate(required = false) {
+  identityGateRequired = required;
+  const gate = $("identityGate");
+  const form = $("identityForm");
+  const input = $("identityKeyInput");
+  const error = $("identityError");
+  if (form) form.reset();
+  if (error) {
+    error.hidden = true;
+    error.textContent = "";
+  }
+  if ($("identityCancel")) $("identityCancel").hidden = required;
+  if (gate) gate.hidden = false;
+  document.body.classList.add("identity-locked");
+  window.requestAnimationFrame(() => input?.focus());
+  return new Promise((resolve) => {
+    identityGateResolver = resolve;
+  });
+}
+
+async function saveIdentityKey(event) {
+  event.preventDefault();
+  const input = $("identityKeyInput");
+  const error = $("identityError");
+  const submit = $("identitySubmit");
+  const key = String(input?.value ?? "");
+  if (!key.length) {
+    input?.setCustomValidity("请输入至少 1 个字符");
+    input?.reportValidity();
+    return;
+  }
+  input?.setCustomValidity("");
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = "正在保存";
+  }
+  try {
+    const hadIdentity = Boolean(identityState?.configured);
+    identityState = await api("/api/identity", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    });
+    updateIdentityButtons();
+    closeIdentityGate();
+    if (hadIdentity) resetLeaderboardForIdentity();
+  } catch (saveError) {
+    if (error) {
+      error.textContent = humanizeError(saveError.message);
+      error.hidden = false;
+    }
+    input?.focus();
+  } finally {
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = "保存并进入";
+    }
+  }
+}
+
+async function ensureIdentity() {
+  identityState = await api("/api/identity");
+  updateIdentityButtons();
+  if (!identityState.configured) await showIdentityGate(true);
 }
 
 function isNetworkError(error) {
@@ -1361,7 +1459,7 @@ function renderSummary(summary) {
     linkText: "查看上交所年报",
   } : null;
   const returnBasisNote = {
-    text: "收益口径：现金流调整收益先用（当日总资产－昨日总资产－当日外部净流入）÷昨日总资产计算每日收益，再复利与年化；不是始终拿原始本金作分母。原始本金折算口径把消费等外部净流出加回期末资产后，再对原始本金计算，未按每笔现金流发生时间加权。再平衡表的当年盈亏则为当年资产变动剔除外部收支，并同时给出占年初资产、占原始本金的比例。",
+    text: "收益口径：现金流调整收益先用（当日总资产－昨日总资产－当日外部净流入）÷昨日总资产计算每日收益，再复利与年化；不是始终拿原始本金作分母。原始本金折算口径把消费等外部净流出加回期末资产后，再对原始本金计算，未按每笔现金流发生时间加权。再平衡表的当年总资产取收益年度决策日总资产；当年盈亏为当年资产变动剔除外部收支，并分别用上年度总资产和原始资金作分母展示当年收益。",
   };
   const treasuryCoverage = (summary.instrument_coverage || []).find(
     (item) => item.logical_symbol === "CBA21801",
@@ -2207,10 +2305,8 @@ function formatCell(value) {
     }
     const profit = Number(value.profit);
     const tone = profit > 1e-9 ? "positive" : profit < -1e-9 ? "negative" : "flat";
-    const yearStartRate = value.yearStartRate == null ? "—" : fmtPct(value.yearStartRate);
-    const originalRate = value.originalRate == null ? "—" : fmtPct(value.originalRate);
     const title = `年初资产 ￥${fmtMoney(value.yearStartTotal)}；期间外部净流入 ￥${fmtMoney(value.externalFlow)}`;
-    return `<span class="table-year-profit is-${tone}" title="${escapeHtml(title)}"><strong>${profit >= 0 ? "+" : "−"}￥${fmtMoney(Math.abs(profit))}</strong><small>年初 ${escapeHtml(yearStartRate)} · 本金 ${escapeHtml(originalRate)}</small></span>`;
+    return `<span class="table-year-profit is-${tone}" title="${escapeHtml(title)}"><strong>${profit >= 0 ? "+" : "−"}￥${fmtMoney(Math.abs(profit))}</strong></span>`;
   }
   if (typeof value === "number") {
     const formatted = Math.abs(value) < 1 && value !== 0 ? fmtPct(value) : fmtNum(value, 2);
@@ -2262,19 +2358,20 @@ function rebalanceDisplayRows(rows) {
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["执行日", "决策日", "收益年度", "当年收益（现金流调整）", "当年盈亏", "当年最大回撤", "当年手续费"];
+  const baseColumns = ["执行日", "决策日", "收益年度", "当年总资产", "当年收益（按上年度总资产）", "当年收益（按原始资金）", "当年盈亏", "当年最大回撤", "当年手续费"];
   const assetColumns = orderedSymbols.map(rebalanceAssetColumnName);
   const displayRows = rows.map((row) => {
+    const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
     const item = {
       执行日: row.rebalance_date,
       决策日: row.payload?.decision_date || row.rebalance_date,
       收益年度: row.payload?.year_label ? `${row.payload.year_label}年` : `${String(row.payload?.decision_date || row.rebalance_date).slice(0, 4)}年`,
-      "当年收益（现金流调整）": row.payload?.year_return ?? row.period_return,
+      当年总资产: annualTotal == null ? "—" : `￥${fmtMoney(annualTotal)}`,
+      "当年收益（按上年度总资产）": row.payload?.year_profit_on_year_start ?? "—",
+      "当年收益（按原始资金）": row.payload?.year_profit_on_original_capital ?? "—",
       当年盈亏: {
         kind: "year-profit",
         profit: row.payload?.year_profit_cny,
-        yearStartRate: row.payload?.year_profit_on_year_start,
-        originalRate: row.payload?.year_profit_on_original_capital,
         yearStartTotal: row.payload?.year_start_total_cny,
         externalFlow: row.payload?.year_external_flow_cny,
       },
@@ -2903,6 +3000,13 @@ function setupTabs(selector, dataKey, selectPanel) {
 }
 
 function setupUiInteractions() {
+  $("identityForm")?.addEventListener("submit", saveIdentityKey);
+  [$('identityKeyButton'), $('mobileIdentityKeyButton')].filter(Boolean).forEach((button) => {
+    button.addEventListener("click", () => showIdentityGate(false));
+  });
+  $("identityCancel")?.addEventListener("click", () => {
+    if (!identityGateRequired) closeIdentityGate();
+  });
   [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => {
     button.addEventListener("click", () => setParameterPanel(true));
   });
@@ -2954,6 +3058,10 @@ function setupUiInteractions() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (!$("identityGate")?.hidden) {
+      if (!identityGateRequired) closeIdentityGate();
+      return;
+    }
     if (document.body.classList.contains("parameters-open")) setParameterPanel(false);
     if (document.body.classList.contains("history-open")) setHistoryPanel(false);
   });
@@ -2989,6 +3097,7 @@ function scheduleBackgroundApiRecovery() {
 
 async function init() {
   setupUiInteractions();
+  await ensureIdentity();
   renderRunHistory();
   renderInitialSummary();
   renderTable("rollingTable", [], []);

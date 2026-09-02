@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import gzip
 import json
+import sqlite3
 import time
 from threading import Thread
 import unittest
@@ -10,19 +11,36 @@ from urllib import request
 
 import app.main as main_module
 from app.config import normalize_config
-from app.db import db_session, init_db
-from app.main import create_server
+from app.db import add_leaderboard_membership, db_session, init_db
+from app.identity import (
+    DEFAULT_LEADERBOARD_KEY_ID,
+    IDENTITY_COOKIE_MAX_AGE_SECONDS,
+    IDENTITY_COOKIE_NAME,
+    leaderboard_key_id,
+)
+from app.main import create_server, rebalance_display_payload
 from app.services.calendar import business_days
 from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
-def http_json(url: str, payload: dict | None = None, method: str | None = None) -> dict:
+def http_json(
+    url: str,
+    payload: dict | None = None,
+    method: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict:
     opener = request.build_opener(request.ProxyHandler({}))
     if payload is None and method is None:
-        with opener.open(url, timeout=10) as resp:
+        req = request.Request(url, headers=headers or {})
+        with opener.open(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
-    req = request.Request(url, data=body, method=method or "POST", headers={"Content-Type": "application/json"})
+    req = request.Request(
+        url,
+        data=body,
+        method=method or "POST",
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
     with opener.open(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -64,6 +82,148 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(cfg["rebalance_month_analysis_enabled"])
         self.assertFalse(cfg["rebalance_to_target"])
         self.assertTrue(status["status"])
+
+    def test_rebalance_display_payload_exposes_annual_total_and_return_bases(self) -> None:
+        payload = {
+            "decision_total_asset_cny": 1_120_000.0,
+            "year_profit_cny": 120_000.0,
+            "year_profit_on_year_start": 0.12,
+            "year_profit_on_original_capital": 0.10,
+            "internal_only": "hidden",
+        }
+
+        displayed = rebalance_display_payload(payload)
+
+        self.assertEqual(displayed["decision_total_asset_cny"], 1_120_000.0)
+        self.assertEqual(displayed["year_profit_on_year_start"], 0.12)
+        self.assertEqual(displayed["year_profit_on_original_capital"], 0.10)
+        self.assertNotIn("internal_only", displayed)
+
+    def test_identity_accepts_long_special_key_and_sets_persistent_cookie(self) -> None:
+        initial = http_json(f"{self.base_url}/api/identity")
+        self.assertFalse(initial["configured"])
+
+        raw_key = "Aa1~!@#$%^&*()_+-=[]{}|;:',.<>/?中文" + "x" * 5000
+        expected_key_id = leaderboard_key_id(raw_key)
+        body = json.dumps({"key": raw_key}, ensure_ascii=False).encode("utf-8")
+        req = request.Request(
+            f"{self.base_url}/api/identity",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        opener = request.build_opener(request.ProxyHandler({}))
+        with opener.open(req, timeout=10) as response:
+            saved = json.loads(response.read().decode("utf-8"))
+            set_cookie = response.headers.get("Set-Cookie", "")
+
+        self.assertTrue(saved["configured"])
+        self.assertEqual(saved["key_hint"], expected_key_id[:8])
+        self.assertIn(f"{IDENTITY_COOKIE_NAME}={expected_key_id}", set_cookie)
+        self.assertIn(f"Max-Age={IDENTITY_COOKIE_MAX_AGE_SECONDS}", set_cookie)
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=Lax", set_cookie)
+        self.assertNotIn(raw_key, set_cookie)
+
+        identified = http_json(
+            f"{self.base_url}/api/identity",
+            headers={"Cookie": f"{IDENTITY_COOKIE_NAME}={expected_key_id}"},
+        )
+        self.assertTrue(identified["configured"])
+        self.assertEqual(identified["key_hint"], expected_key_id[:8])
+
+        result = http_json(
+            f"{self.base_url}/api/backtest/run",
+            {"config": self.config},
+            headers={"Cookie": f"{IDENTITY_COOKIE_NAME}={expected_key_id}"},
+        )
+        with db_session(self.db_path) as conn:
+            membership = conn.execute(
+                "SELECT 1 FROM leaderboard_memberships WHERE key_id=? AND run_id=?",
+                (expected_key_id, result["run_id"]),
+            ).fetchone()
+        self.assertIsNotNone(membership)
+
+    def test_global_leaderboard_isolated_by_key_while_history_is_shared(self) -> None:
+        second_key_id = leaderboard_key_id("Second-Key!大小写")
+        xp_run_id = "identity-xp-run"
+        second_run_id = "identity-second-run"
+        config = {
+            "start_date": "2020-01-01",
+            "end_date": "2020-12-31",
+            "assets": [{"symbol": "TEST", "name": "TEST", "enabled": True, "target_weight": 1.0}],
+        }
+        summary = {
+            "start_date": "2020-01-01",
+            "end_date": "2020-12-31",
+            "annualized_return": 0.12,
+            "max_drawdown": -0.10,
+            "ranking_eligible": True,
+            "ranking_score": 70.0,
+        }
+        try:
+            with db_session(self.db_path) as conn:
+                for run_id, created_at, key_id in (
+                    (xp_run_id, "2030-01-01T00:00:00+00:00", DEFAULT_LEADERBOARD_KEY_ID),
+                    (second_run_id, "2030-01-02T00:00:00+00:00", second_key_id),
+                ):
+                    conn.execute(
+                        "INSERT INTO backtest_runs(run_id,created_at,config_json,summary_json) VALUES(?,?,?,?)",
+                        (run_id, created_at, json.dumps(config), json.dumps(summary)),
+                    )
+                    add_leaderboard_membership(conn, key_id, run_id)
+
+            xp_board = http_json(f"{self.base_url}/api/backtest/leaderboard?period=all")
+            second_board = http_json(
+                f"{self.base_url}/api/backtest/leaderboard?period=all",
+                headers={"Cookie": f"{IDENTITY_COOKIE_NAME}={second_key_id}"},
+            )
+            shared_history = http_json(
+                f"{self.base_url}/api/backtest/history",
+                headers={"Cookie": f"{IDENTITY_COOKIE_NAME}={second_key_id}"},
+            )
+
+            xp_ids = {entry["run_id"] for entry in xp_board["records"]}
+            second_ids = {entry["run_id"] for entry in second_board["records"]}
+            history_ids = {entry["run_id"] for entry in shared_history["records"]}
+            self.assertIn(xp_run_id, xp_ids)
+            self.assertNotIn(second_run_id, xp_ids)
+            self.assertIn(second_run_id, second_ids)
+            self.assertNotIn(xp_run_id, second_ids)
+            self.assertTrue({xp_run_id, second_run_id}.issubset(history_ids))
+        finally:
+            with db_session(self.db_path) as conn:
+                conn.execute("DELETE FROM leaderboard_memberships WHERE run_id IN (?,?)", (xp_run_id, second_run_id))
+                conn.execute("DELETE FROM backtest_runs WHERE run_id IN (?,?)", (xp_run_id, second_run_id))
+
+    def test_existing_leaderboard_records_migrate_to_xp(self) -> None:
+        db_path = temp_db_path()
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE backtest_runs (
+                  run_id TEXT PRIMARY KEY,
+                  created_at TEXT NOT NULL,
+                  config_json TEXT NOT NULL,
+                  summary_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO backtest_runs(run_id,created_at,config_json,summary_json) VALUES(?,?,?,?)",
+                ("legacy-run", "2026-01-01T00:00:00+00:00", "{}", "{}"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        init_db(db_path)
+        with db_session(db_path) as migrated:
+            membership = migrated.execute(
+                "SELECT key_id FROM leaderboard_memberships WHERE run_id='legacy-run'"
+            ).fetchone()
+        self.assertEqual(membership["key_id"], DEFAULT_LEADERBOARD_KEY_ID)
 
     def test_daily_pnl_separates_daily_cumulative_and_drawdown_bases(self) -> None:
         config = {
@@ -186,6 +346,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("year_profit_cny", rebalance["rebalance"][0]["payload"])
         self.assertIn("year_profit_on_year_start", rebalance["rebalance"][0]["payload"])
         self.assertIn("year_profit_on_original_capital", rebalance["rebalance"][0]["payload"])
+        self.assertIn("total_asset_before", rebalance["rebalance"][0])
         self.assertTrue(chart["weights"])
         self.assertEqual(set(chart["values"]), set(chart["weights"]))
         self.assertAlmostEqual(
@@ -296,6 +457,19 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"Object.keys(row.payload?.weights", decoded_app_js)
         self.assertIn(b"payload?.values", decoded_app_js)
         self.assertIn("各标的金额 · 组合占比".encode("utf-8"), decoded_app_js)
+        self.assertIn("当年总资产".encode("utf-8"), decoded_app_js)
+        self.assertIn("当年收益（按上年度总资产）".encode("utf-8"), decoded_app_js)
+        self.assertIn("当年收益（按原始资金）".encode("utf-8"), decoded_app_js)
+
+        _styles_headers, styles_body = http_get_raw(
+            f"{self.base_url}/static/styles.css",
+            {"Accept-Encoding": "gzip"},
+        )
+        decoded_styles = gzip.decompress(styles_body)
+        self.assertIn(b".table-year-profit", decoded_styles)
+        self.assertIn(b"background: transparent", decoded_styles)
+        self.assertNotIn(b"background: color-mix(in srgb, var(--accent) 12%, var(--surface))", decoded_styles)
+        self.assertNotIn(b"background: color-mix(in srgb, var(--danger) 12%, var(--surface))", decoded_styles)
 
         versioned_headers, _versioned_body = http_get_raw(
             f"{self.base_url}/static/app.js?v=20260715-perf-2",
@@ -441,6 +615,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="historySearch"', html)
         self.assertIn('id="historySort"', html)
         self.assertIn('data-history-view="leaderboard"', html)
+        self.assertIn('id="identityGate"', html)
+        self.assertIn('id="identityKeyInput"', html)
+        self.assertIn('id="identityKeyButton"', html)
         self.assertIn("allocationSummary", html)
         self.assertIn("data-repo-mode", html)
         self.assertNotIn('<script src="static/echarts.min.js', html)
@@ -461,7 +638,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260831-asset-pnl-1", detail)
+        self.assertIn("20260902-rebalance-year-1", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")

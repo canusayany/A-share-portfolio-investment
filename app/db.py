@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Iterator
 
+from app.identity import DEFAULT_LEADERBOARD_KEY_ID
+
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -233,6 +235,43 @@ def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_rebalance_events_run_id_date
         ON rebalance_events(run_id, rebalance_date)
         """
+    )
+    leaderboard_memberships_existed = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='leaderboard_memberships'"
+    ).fetchone()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leaderboard_memberships (
+          key_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (key_id, run_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_leaderboard_memberships_run_id
+        ON leaderboard_memberships(run_id)
+        """
+    )
+    if not leaderboard_memberships_existed:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO leaderboard_memberships(key_id, run_id, created_at)
+            SELECT ?, run_id, created_at FROM backtest_runs
+            """,
+            (DEFAULT_LEADERBOARD_KEY_ID,),
+        )
+
+
+def add_leaderboard_membership(conn: sqlite3.Connection, key_id: str, run_id: str) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO leaderboard_memberships(key_id, run_id, created_at)
+        VALUES(?,?,?)
+        """,
+        (key_id, run_id, utc_now()),
     )
 
 

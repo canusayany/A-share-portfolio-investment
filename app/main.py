@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from email.utils import format_datetime
 import gc
 import gzip
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
@@ -20,7 +22,14 @@ from urllib.parse import parse_qs, urlparse
 import uuid
 
 from app.config import backtest_assets, repo_rate_symbol, STATIC_DIR, default_config, get_settings, normalize_config, validate_config
-from app.db import data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
+from app.db import add_leaderboard_membership, data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
+from app.identity import (
+    DEFAULT_LEADERBOARD_KEY_ID,
+    IDENTITY_COOKIE_MAX_AGE_SECONDS,
+    IDENTITY_COOKIE_NAME,
+    leaderboard_key_id,
+    valid_leaderboard_key_id,
+)
 from app.services.backtest_engine import (
     BacktestCancelled,
     BacktestError,
@@ -319,6 +328,7 @@ def rebalance_display_payload(payload: dict) -> dict:
             "year_profit_cny",
             "year_profit_on_year_start",
             "year_profit_on_original_capital",
+            "decision_total_asset_cny",
             "year_return_basis",
             "year_profit_basis",
             "year_asset_performance",
@@ -431,24 +441,35 @@ def refresh_ranking_summary(conn, run_id: str, summary: dict) -> dict:
     }
 
 
-def backtest_archive_entries(conn, limit: int, leaderboard: bool = False) -> list[dict]:
+def backtest_archive_entries(
+    conn,
+    limit: int,
+    leaderboard: bool = False,
+    leaderboard_key_id: str | None = None,
+) -> list[dict]:
     if leaderboard:
+        membership_join = ""
+        query_params: tuple = (limit,)
+        if leaderboard_key_id is not None:
+            membership_join = "JOIN leaderboard_memberships lm ON lm.run_id=br.run_id AND lm.key_id=?"
+            query_params = (leaderboard_key_id, limit)
         rows = rows_to_dicts(
             conn.execute(
-                """
-                SELECT run_id,created_at,config_json,summary_json
-                FROM backtest_runs
-                WHERE COALESCE(json_extract(summary_json, '$.ranking_eligible'), 0) = 1
+                f"""
+                SELECT br.run_id,br.created_at,br.config_json,br.summary_json
+                FROM backtest_runs br
+                {membership_join}
+                WHERE COALESCE(json_extract(br.summary_json, '$.ranking_eligible'), 0) = 1
                 ORDER BY
-                  COALESCE(json_extract(summary_json, '$.ranking_score'), 0) DESC,
-                  COALESCE(json_extract(summary_json, '$.excess_annualized_return'), 0) DESC,
-                  COALESCE(json_extract(summary_json, '$.adjusted_calmar'), 0) DESC,
-                  COALESCE(json_extract(summary_json, '$.positive_year_ratio'), 0) DESC,
-                  created_at DESC,
-                  run_id DESC
+                  COALESCE(json_extract(br.summary_json, '$.ranking_score'), 0) DESC,
+                  COALESCE(json_extract(br.summary_json, '$.excess_annualized_return'), 0) DESC,
+                  COALESCE(json_extract(br.summary_json, '$.adjusted_calmar'), 0) DESC,
+                  COALESCE(json_extract(br.summary_json, '$.positive_year_ratio'), 0) DESC,
+                  br.created_at DESC,
+                  br.run_id DESC
                 LIMIT ?
                 """,
-                (limit,),
+                query_params,
             )
         )
     else:
@@ -484,15 +505,23 @@ def backtest_archive_entries(conn, limit: int, leaderboard: bool = False) -> lis
     return entries
 
 
-def leaderboard_available_years(conn) -> list[int]:
+def leaderboard_available_years(conn, leaderboard_key_id: str | None = None) -> list[int]:
     """Return calendar-year candidates without scanning the large daily table."""
     years: set[int] = set()
+    membership_join = ""
+    query_params: tuple = ()
+    if leaderboard_key_id is not None:
+        membership_join = "JOIN leaderboard_memberships lm ON lm.run_id=br.run_id AND lm.key_id=?"
+        query_params = (leaderboard_key_id,)
     rows = conn.execute(
+        f"""
+        SELECT COALESCE(json_extract(br.summary_json, '$.start_date'), json_extract(br.config_json, '$.start_date')) AS start_date,
+               COALESCE(json_extract(br.summary_json, '$.end_date'), json_extract(br.config_json, '$.end_date')) AS end_date
+        FROM backtest_runs br
+        {membership_join}
         """
-        SELECT COALESCE(json_extract(summary_json, '$.start_date'), json_extract(config_json, '$.start_date')) AS start_date,
-               COALESCE(json_extract(summary_json, '$.end_date'), json_extract(config_json, '$.end_date')) AS end_date
-        FROM backtest_runs
-        """
+        ,
+        query_params,
     ).fetchall()
     for row in rows:
         try:
@@ -602,16 +631,23 @@ def time_aware_backtest_leaderboard(
     start_date: str,
     end_date: str,
     limit: int = 100,
+    leaderboard_key_id: str | None = None,
 ) -> list[dict]:
     """Rank strategies only after recomputing all metrics over one shared period."""
+    membership_join = ""
+    query_params: tuple = (start_date, end_date)
+    if leaderboard_key_id is not None:
+        membership_join = "JOIN leaderboard_memberships lm ON lm.run_id=pd.run_id AND lm.key_id=?"
+        query_params = (leaderboard_key_id, start_date, end_date)
     daily_rows = conn.execute(
-        """
-        SELECT run_id,trade_date,daily_return
-        FROM portfolio_daily
-        WHERE trade_date BETWEEN ? AND ?
-        ORDER BY run_id,trade_date
+        f"""
+        SELECT pd.run_id,pd.trade_date,pd.daily_return
+        FROM portfolio_daily pd
+        {membership_join}
+        WHERE pd.trade_date BETWEEN ? AND ?
+        ORDER BY pd.run_id,pd.trade_date
         """,
-        (start_date, end_date),
+        query_params,
     ).fetchall()
     grouped: dict[str, list] = {}
     for row in daily_rows:
@@ -706,16 +742,25 @@ def time_aware_backtest_leaderboard(
     return entries
 
 
-def backtest_leaderboard_payload(conn, query: dict[str, list[str]] | None = None) -> dict:
+def backtest_leaderboard_payload(
+    conn,
+    query: dict[str, list[str]] | None = None,
+    leaderboard_key_id: str | None = None,
+) -> dict:
     query = query or {}
-    available_years = leaderboard_available_years(conn)
+    available_years = leaderboard_available_years(conn, leaderboard_key_id)
     mode = (query.get("period") or [""])[0]
     requested_year = (query.get("year") or [""])[0]
     requested_start = (query.get("start_date") or [""])[0]
     requested_end = (query.get("end_date") or [""])[0]
 
     if mode == "all" or (not available_years and not requested_year and not requested_start and not requested_end):
-        records = backtest_archive_entries(conn, limit=100, leaderboard=True)
+        records = backtest_archive_entries(
+            conn,
+            limit=100,
+            leaderboard=True,
+            leaderboard_key_id=leaderboard_key_id,
+        )
         period = {
             "mode": "all",
             "label": "各自完整回测期",
@@ -750,7 +795,13 @@ def backtest_leaderboard_payload(conn, query: dict[str, list[str]] | None = None
             end_date = date(year, 12, 31)
             period_mode = "year"
             label = f"{year}年"
-        records = time_aware_backtest_leaderboard(conn, start_date.isoformat(), end_date.isoformat(), limit=100)
+        records = time_aware_backtest_leaderboard(
+            conn,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            limit=100,
+            leaderboard_key_id=leaderboard_key_id,
+        )
         period = {
             "mode": period_mode,
             "label": label,
@@ -820,6 +871,7 @@ def execute_backtest_request(
     should_cancel=None,
     *,
     defer_extended_analysis: bool = False,
+    leaderboard_key_id: str = DEFAULT_LEADERBOARD_KEY_ID,
 ) -> dict:
     request_id = str(uuid.uuid4())[:8]
     started_at = time.perf_counter()
@@ -850,6 +902,7 @@ def execute_backtest_request(
                 cache_started_at = time.perf_counter()
                 cached = get_cached_backtest_run(conn, config)
                 if cached:
+                    add_leaderboard_membership(conn, leaderboard_key_id, cached["run_id"])
                     cached_status = cached["summary"].get("analysis_status", "completed")
                     cached["analysis_pending"] = bool(
                         defer_extended_analysis
@@ -908,6 +961,7 @@ def execute_backtest_request(
                 result,
                 "pending" if needs_extended_analysis else "completed",
             )
+            add_leaderboard_membership(conn, leaderboard_key_id, result["run_id"])
             result["analysis_pending"] = needs_extended_analysis
             logger.info("backtest engine complete id=%s seconds=%.3f cache=%s", request_id, time.perf_counter() - run_started_at, result.get("cache"))
             result["data_sync"] = {
@@ -1008,9 +1062,9 @@ def cleanup_jobs(server) -> None:
             server.job_activity.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_cancel_events.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_futures.pop(job_id, None)  # type: ignore[attr-defined]
-            client_request_id = job.get("client_request_id") if job else None
-            if client_request_id:
-                server.job_request_index.pop(client_request_id, None)  # type: ignore[attr-defined]
+            request_index_key = job.get("request_index_key") if job else None
+            if request_index_key:
+                server.job_request_index.pop(request_index_key, None)  # type: ignore[attr-defined]
     for job_id in to_cancel:
         cancel_job(server, job_id)
     if to_delete:
@@ -1104,7 +1158,12 @@ def schedule_deferred_backtest_analysis(server, run_id: str, config: dict) -> No
         server.analysis_futures[run_id] = future  # type: ignore[attr-defined]
 
 
-def run_backtest_job(server, job_id: str, config: dict) -> None:
+def run_backtest_job(
+    server,
+    job_id: str,
+    config: dict,
+    leaderboard_key_id: str = DEFAULT_LEADERBOARD_KEY_ID,
+) -> None:
     set_job(server, job_id, status="running", message="正在检查数据并运行回测", started_at=iso_now())
     try:
         execute_parameters = inspect.signature(execute_backtest_request).parameters
@@ -1116,6 +1175,11 @@ def run_backtest_job(server, job_id: str, config: dict) -> None:
             for parameter in execute_parameters.values()
         ):
             execute_kwargs["defer_extended_analysis"] = True
+        if "leaderboard_key_id" in execute_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in execute_parameters.values()
+        ):
+            execute_kwargs["leaderboard_key_id"] = leaderboard_key_id
         result = execute_backtest_request(
             server.settings,  # type: ignore[attr-defined]
             server.write_lock,  # type: ignore[attr-defined]
@@ -1212,7 +1276,39 @@ class ApiHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8")
         return json.loads(body) if body else {}
 
-    def send_json(self, status: int, data: object) -> None:
+    def identity_cookie_key_id(self) -> str | None:
+        raw_cookie = self.headers.get("Cookie") or ""
+        if not raw_cookie:
+            return None
+        try:
+            cookies = SimpleCookie()
+            cookies.load(raw_cookie)
+            morsel = cookies.get(IDENTITY_COOKIE_NAME)
+            key_id = morsel.value if morsel else None
+        except Exception:
+            return None
+        return key_id if valid_leaderboard_key_id(key_id) else None
+
+    def current_leaderboard_key_id(self) -> str:
+        return self.identity_cookie_key_id() or DEFAULT_LEADERBOARD_KEY_ID
+
+    def identity_cookie_header(self, key_id: str) -> str:
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=IDENTITY_COOKIE_MAX_AGE_SECONDS)
+        attributes = [
+            f"{IDENTITY_COOKIE_NAME}={key_id}",
+            "Path=/",
+            f"Max-Age={IDENTITY_COOKIE_MAX_AGE_SECONDS}",
+            f"Expires={format_datetime(expires_at, usegmt=True)}",
+            "HttpOnly",
+            "SameSite=Lax",
+        ]
+        forwarded_proto = (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+        host = (self.headers.get("Host") or "").split(":", 1)[0].strip().lower()
+        if forwarded_proto == "https" or host not in {"", "127.0.0.1", "localhost", "::1"}:
+            attributes.append("Secure")
+        return "; ".join(attributes)
+
+    def send_json(self, status: int, data: object, headers: dict[str, str] | None = None) -> None:
         body = response_bytes(data)
         use_gzip = len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
         if use_gzip:
@@ -1224,6 +1320,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self._response_bytes = len(body)
         try:
@@ -1325,6 +1423,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 self.send_json(HTTPStatus.OK, {"ok": True, "service": "portfolio-backtest", "time": iso_now()})
+            elif path == "/api/identity":
+                key_id = self.identity_cookie_key_id()
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "configured": key_id is not None,
+                        "key_hint": key_id[:8] if key_id else None,
+                    },
+                )
             elif path == "/api/default-config":
                 self.send_json(HTTPStatus.OK, default_config())
             elif path == "/api/data/status":
@@ -1336,7 +1443,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/backtest/leaderboard":
                 with db_session(self.settings.db_path) as conn:
                     try:
-                        payload = backtest_leaderboard_payload(conn, parse_qs(parsed.query))
+                        payload = backtest_leaderboard_payload(
+                            conn,
+                            parse_qs(parsed.query),
+                            leaderboard_key_id=self.current_leaderboard_key_id(),
+                        )
                     except ValueError as exc:
                         self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                         return
@@ -1360,7 +1471,18 @@ class ApiHandler(BaseHTTPRequestHandler):
         path = self.normalize_path(parsed.path)
         try:
             payload = self.read_json()
-            if path == "/api/data/sync":
+            if path == "/api/identity":
+                try:
+                    key_id = leaderboard_key_id(payload.get("key"))
+                except ValueError as exc:
+                    self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self.send_json(
+                    HTTPStatus.OK,
+                    {"configured": True, "key_hint": key_id[:8]},
+                    headers={"Set-Cookie": self.identity_cookie_header(key_id)},
+                )
+            elif path == "/api/data/sync":
                 config = normalize_config(payload.get("config") or payload)
                 errors = validate_config(config)
                 if errors:
@@ -1386,7 +1508,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, result)
             elif path == "/api/backtest/run":
                 config = normalize_config(payload.get("config") or payload)
-                result = execute_backtest_request(self.settings, self.write_lock, config)
+                result = execute_backtest_request(
+                    self.settings,
+                    self.write_lock,
+                    config,
+                    leaderboard_key_id=self.current_leaderboard_key_id(),
+                )
                 self.send_json(HTTPStatus.OK, result)
             elif path == "/api/backtest/start":
                 config = normalize_config(payload.get("config") or payload)
@@ -1394,11 +1521,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if errors:
                     raise BacktestError("; ".join(errors))
                 client_request_id = str(payload.get("client_request_id") or "").strip()
+                active_key_id = self.current_leaderboard_key_id()
+                request_index_key = f"{active_key_id}:{client_request_id}" if client_request_id else ""
                 job_id = str(uuid.uuid4())
                 now_mono = time.monotonic()
                 if client_request_id:
                     with self.jobs_lock:
-                        existing_job_id = self.server.job_request_index.get(client_request_id)  # type: ignore[attr-defined]
+                        existing_job_id = self.server.job_request_index.get(request_index_key)  # type: ignore[attr-defined]
                         existing_job = self.jobs.get(existing_job_id) if existing_job_id else None
                         if existing_job:
                             self.server.job_activity[existing_job_id] = now_mono  # type: ignore[index,attr-defined]
@@ -1414,6 +1543,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "created_at": iso_now(),
                     "updated_at": iso_now(),
                     "client_request_id": client_request_id or None,
+                    "request_index_key": request_index_key or None,
                     "cancel_if_unrequested_seconds": self.server.job_abandoned_seconds,  # type: ignore[attr-defined]
                 }
                 with self.jobs_lock:
@@ -1421,8 +1551,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self.server.job_activity[job_id] = now_mono  # type: ignore[attr-defined]
                     self.server.job_cancel_events[job_id] = Event()  # type: ignore[attr-defined]
                     if client_request_id:
-                        self.server.job_request_index[client_request_id] = job_id  # type: ignore[attr-defined]
-                future = self.server.job_executor.submit(run_backtest_job, self.server, job_id, config)  # type: ignore[attr-defined]
+                        self.server.job_request_index[request_index_key] = job_id  # type: ignore[attr-defined]
+                future = self.server.job_executor.submit(  # type: ignore[attr-defined]
+                    run_backtest_job,
+                    self.server,
+                    job_id,
+                    config,
+                    active_key_id,
+                )
                 with self.jobs_lock:
                     self.server.job_futures[job_id] = future  # type: ignore[attr-defined]
                 self.send_json(HTTPStatus.ACCEPTED, job)
@@ -1454,6 +1590,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     conn.execute("DELETE FROM portfolio_daily WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM trades WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM rebalance_events WHERE run_id=?", (run_id,))
+                    conn.execute("DELETE FROM leaderboard_memberships WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM backtest_runs WHERE run_id=?", (run_id,))
             self.send_json(HTTPStatus.OK, {"deleted": run_id})
         except Exception as exc:
@@ -1528,7 +1665,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 rows = rows_to_dicts(
                     conn.execute(
                         """
-                        SELECT rebalance_date,period_return,fee_cny,payload_json
+                        SELECT rebalance_date,period_return,total_asset_before,fee_cny,payload_json
                         FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date
                         """,
                         (run_id,),

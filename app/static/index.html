@@ -4,15 +4,34 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260831-asset-pnl-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260902-rebalance-year-1" />
   </head>
   <body class="history-collapsed">
+    <div id="identityGate" class="identity-gate" hidden>
+      <section class="identity-dialog" role="dialog" aria-modal="true" aria-labelledby="identityTitle">
+        <div class="identity-mark" aria-hidden="true">K</div>
+        <div>
+          <h1 id="identityTitle">输入你的 Key</h1>
+        </div>
+        <form id="identityForm">
+          <label for="identityKeyInput">身份 Key</label>
+          <input id="identityKeyInput" name="key" type="text" required autocomplete="off" autocapitalize="none" spellcheck="false" />
+          <p id="identityError" class="identity-error" role="alert" hidden></p>
+          <div class="identity-actions">
+            <button id="identityCancel" class="button button-secondary" type="button">取消</button>
+            <button id="identitySubmit" class="button button-primary" type="submit">保存并进入</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
     <header class="mobile-app-bar">
       <div>
         <strong>永久投资策略</strong>
         <span id="mobileDataStatus">正在检查数据</span>
       </div>
       <div class="mobile-app-actions">
+        <button id="mobileIdentityKeyButton" class="button button-secondary" type="button">Key</button>
         <button id="mobileHistoryToggle" class="button button-secondary" type="button" aria-controls="historyPanel" aria-expanded="false">回测记录</button>
         <button id="mobileParameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">调整参数</button>
       </div>
@@ -285,6 +304,7 @@
             <p>先看收益和回撤，再深入检查资产走势与交易记录</p>
           </div>
           <div class="workspace-actions">
+            <button id="identityKeyButton" class="button button-secondary" type="button">身份 Key</button>
             <button id="historyToggle" class="button button-secondary" type="button" aria-controls="historyPanel" aria-expanded="false">回测记录</button>
             <button id="parameterToggle" class="button button-secondary" type="button" aria-controls="parameterPanel" aria-expanded="false">调整参数</button>
           </div>
@@ -442,6 +462,6 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260831-asset-pnl-1"></script>
+  <script src="static/app.js?v=20260902-rebalance-year-1"></script>
   </body>
 </html>
