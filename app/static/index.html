@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260902-rebalance-year-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260902-asset-comovement-1" />
   </head>
   <body class="history-collapsed">
     <div id="identityGate" class="identity-gate" hidden>
@@ -348,6 +348,7 @@
             <button id="chartTabReturn" type="button" role="tab" aria-selected="false" aria-controls="returnChartView" data-chart-tab="returnChart">收益率</button>
             <button id="chartTabDaily" type="button" role="tab" aria-selected="false" aria-controls="dailyReturnChartView" data-chart-tab="dailyReturnChart">单日收益</button>
             <button id="chartTabDailyPnl" type="button" role="tab" aria-selected="false" aria-controls="dailyPnlChartView" data-chart-tab="dailyPnlChart">标的盈亏</button>
+            <button id="chartTabComovement" type="button" role="tab" aria-selected="false" aria-controls="assetComovementView" data-chart-tab="assetComovementChart">资产联动</button>
             <button id="chartTabDrawdown" type="button" role="tab" aria-selected="false" aria-controls="drawdownChartView" data-chart-tab="drawdownChart">回撤</button>
             <button id="chartTabWeight" type="button" role="tab" aria-selected="false" aria-controls="weightChartView" data-chart-tab="weightChart">资产权重</button>
             <button id="chartTabComparison" type="button" role="tab" aria-selected="false" aria-controls="comparisonChartView" data-chart-tab="comparisonChart">总资产对比</button>
@@ -374,6 +375,28 @@
               </div>
               <div id="dailyPnlChart" class="chart"></div>
               <div id="dailyPnlEmpty" class="daily-pnl-empty" hidden></div>
+            </div>
+            <div id="assetComovementView" class="chart-view asset-comovement-view" role="tabpanel" aria-labelledby="chartTabComovement" hidden>
+              <div class="asset-comovement-toolbar">
+                <div>
+                  <strong>30年国债ETF · 红利ETF · 黄金ETF</strong>
+                  <span id="assetComovementRange">运行回测后统计完整交易日</span>
+                </div>
+                <label for="assetComovementWindow">
+                  时间窗口
+                  <select id="assetComovementWindow">
+                    <option value="all">全部历史</option>
+                    <option value="1y">近1年</option>
+                    <option value="3y">近3年</option>
+                    <option value="5y">近5年</option>
+                    <option value="10y">近10年</option>
+                  </select>
+                </label>
+              </div>
+              <div id="assetComovementSummary" class="asset-comovement-summary" aria-live="polite"></div>
+              <div id="assetComovementChart" class="chart asset-comovement-chart"></div>
+              <p id="assetComovementNote" class="asset-comovement-note">仅统计三项都有有效日总收益的共同交易日。</p>
+              <div id="assetComovementEmpty" class="daily-pnl-empty" hidden></div>
             </div>
             <div id="drawdownChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabDrawdown" hidden><div id="drawdownChart" class="chart"></div></div>
             <div id="weightChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabWeight" hidden><div id="weightChart" class="chart"></div></div>
@@ -462,6 +485,6 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260902-rebalance-year-1"></script>
+  <script src="static/app.js?v=20260902-asset-comovement-1"></script>
   </body>
 </html>

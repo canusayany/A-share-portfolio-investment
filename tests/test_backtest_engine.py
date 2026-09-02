@@ -29,7 +29,9 @@ from app.services.backtest_engine import (
     adjusted_price_series,
     annual_return_drawdown_ratio,
     annual_expense_factor,
+    asset_comovement_statistics,
     attach_proxy_price_maps,
+    classify_asset_comovement,
     comparison_assets,
     compute_metrics,
     dip_buy_annual_budget,
@@ -60,6 +62,32 @@ from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
 class BacktestEngineTests(unittest.TestCase):
+    def test_asset_comovement_classifies_four_requested_outcomes_and_windows(self) -> None:
+        self.assertEqual(classify_asset_comovement([0.01, 0.02, 0.03]), "same_up")
+        self.assertEqual(classify_asset_comovement([-0.01, -0.02, -0.03]), "same_down")
+        self.assertEqual(classify_asset_comovement([0.04, -0.01, -0.01]), "hedge_positive")
+        self.assertEqual(classify_asset_comovement([0.01, -0.03, -0.02]), "hedge_negative")
+        self.assertEqual(classify_asset_comovement([0.01, 0.0, 0.02]), "unclassified")
+
+        db_path, config = build_synced_db("2020-01-01", "2020-02-28")
+        with db_session(db_path) as conn:
+            statistics = asset_comovement_statistics(conn, config)
+
+        self.assertTrue(statistics["available"])
+        self.assertEqual([asset["key"] for asset in statistics["assets"]], ["treasury_30y", "dividend_low_vol", "gold"])
+        self.assertEqual(statistics["window_order"], ["all", "1y", "3y", "5y", "10y"])
+        all_window = statistics["windows"]["all"]
+        self.assertGreater(all_window["comparable_days"], 0)
+        self.assertEqual(sum(all_window["counts"].values()), all_window["comparable_days"])
+        self.assertEqual(
+            all_window["hedge_days"],
+            all_window["counts"]["hedge_positive"] + all_window["counts"]["hedge_negative"],
+        )
+        self.assertEqual(
+            all_window["same_direction_days"],
+            all_window["counts"]["same_up"] + all_window["counts"]["same_down"],
+        )
+
     def test_daily_asset_profit_excludes_principal_and_attributes_income_and_fees(self) -> None:
         profit = _daily_asset_profit_cny(
             {"A": 1_000.0, "B": 0.0, "REPO": 500.0},

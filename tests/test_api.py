@@ -324,6 +324,7 @@ class ApiTests(unittest.TestCase):
         series = http_json(f"{self.base_url}/api/backtest/{run_id}/series")
         chart_series = http_json(f"{self.base_url}/api/backtest/{run_id}/chart-series")
         daily_pnl_response = http_json(f"{self.base_url}/api/backtest/{run_id}/daily-pnl")
+        comovement_response = http_json(f"{self.base_url}/api/backtest/{run_id}/asset-comovement")
         rebalance = http_json(f"{self.base_url}/api/backtest/{run_id}/rebalance")
         trades = http_json(f"{self.base_url}/api/backtest/{run_id}/trades")
         positions = http_json(f"{self.base_url}/api/backtest/{run_id}/positions?limit=2")
@@ -391,6 +392,14 @@ class ApiTests(unittest.TestCase):
                 series["series"][index]["drawdown"],
                 places=12,
             )
+        comovement = comovement_response["asset_comovement"]
+        self.assertTrue(comovement["available"])
+        self.assertEqual(comovement["window_order"], ["all", "1y", "3y", "5y", "10y"])
+        self.assertEqual(len(comovement["assets"]), 3)
+        all_window = comovement["windows"]["all"]
+        self.assertEqual(sum(all_window["counts"].values()), all_window["comparable_days"])
+        self.assertIn("hedge_positive", all_window["counts"])
+        self.assertIn("hedge_negative", all_window["counts"])
         self.assertGreaterEqual(len(rebalance["rebalance"]), 1)
         self.assertGreater(len(trades["trades"]), 0)
         self.assertLessEqual(len(positions["positions"]), 2)
@@ -449,6 +458,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"/api/health", decoded_app_js)
         self.assertIn(b"recoverApiConnection", decoded_app_js)
         self.assertIn(b"/daily-pnl", decoded_app_js)
+        self.assertIn(b"/asset-comovement", decoded_app_js)
         self.assertIn(b"rebalance_to_target", decoded_app_js)
         self.assertIn(b"tradeAssetName", decoded_app_js)
         self.assertIn(b"rebalanceAssetColumnName", decoded_app_js)
@@ -460,6 +470,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("当年总资产".encode("utf-8"), decoded_app_js)
         self.assertIn("当年收益（按上年度总资产）".encode("utf-8"), decoded_app_js)
         self.assertIn("当年收益（按原始资金）".encode("utf-8"), decoded_app_js)
+        self.assertIn("对冲为正".encode("utf-8"), decoded_app_js)
+        self.assertIn("对冲为负".encode("utf-8"), decoded_app_js)
 
         _styles_headers, styles_body = http_get_raw(
             f"{self.base_url}/static/styles.css",
@@ -467,6 +479,7 @@ class ApiTests(unittest.TestCase):
         )
         decoded_styles = gzip.decompress(styles_body)
         self.assertIn(b".table-year-profit", decoded_styles)
+        self.assertIn(b".asset-comovement-summary", decoded_styles)
         self.assertIn(b"background: transparent", decoded_styles)
         self.assertNotIn(b"background: color-mix(in srgb, var(--accent) 12%, var(--surface))", decoded_styles)
         self.assertNotIn(b"background: color-mix(in srgb, var(--danger) 12%, var(--surface))", decoded_styles)
@@ -638,7 +651,9 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260902-rebalance-year-1", detail)
+        self.assertIn("20260902-asset-comovement-1", detail)
+        self.assertIn("资产联动", detail)
+        self.assertIn("时间窗口", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
             app_js = resp.read().decode("utf-8")

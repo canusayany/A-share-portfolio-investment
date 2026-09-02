@@ -28,6 +28,11 @@ let dailyPnlRunId = null;
 let dailyPnlLoadingRunId = null;
 let dailyPnlRequestVersion = 0;
 let dailyPnlScale = "amount";
+let assetComovementData = null;
+let assetComovementRunId = null;
+let assetComovementLoadingRunId = null;
+let assetComovementRequestVersion = 0;
+let assetComovementWindow = "all";
 const APP_BASE_PATH = (() => {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
   const knownAppPaths = ["/backtest/permanent-investment", "/backtest/cross-market", "/portfolio"];
@@ -1707,6 +1712,7 @@ function selectChart(chartId) {
     view.hidden = view.querySelector(".chart")?.id !== chartId;
   });
   if (chartId === "dailyPnlChart") loadDailyPnlChart().catch(() => {});
+  if (chartId === "assetComovementChart") loadAssetComovementChart().catch(() => {});
   window.requestAnimationFrame(() => {
     applyChartOption(chartId);
     charts[chartId]?.resize();
@@ -1944,6 +1950,164 @@ async function loadDailyPnlChart() {
     }
   } finally {
     if (requestVersion === dailyPnlRequestVersion) dailyPnlLoadingRunId = null;
+  }
+}
+
+const ASSET_COMOVEMENT_CATEGORIES = [
+  { key: "same_up", label: "同涨", color: "#d96b45", className: "is-same-up" },
+  { key: "same_down", label: "同跌", color: "#5278a8", className: "is-same-down" },
+  { key: "hedge_positive", label: "对冲为正", color: "#1f7a5a", className: "is-hedge-positive" },
+  { key: "hedge_negative", label: "对冲为负", color: "#b58a32", className: "is-hedge-negative" },
+  { key: "unclassified", label: "未分类", color: "#b4bec2", className: "is-unclassified" },
+];
+
+function resetAssetComovementChart() {
+  assetComovementRequestVersion += 1;
+  assetComovementData = null;
+  assetComovementRunId = null;
+  assetComovementLoadingRunId = null;
+  assetComovementWindow = "all";
+  const windowSelect = $("assetComovementWindow");
+  if (windowSelect) windowSelect.value = "all";
+  delete pendingChartOptions.assetComovementChart;
+  charts.assetComovementChart?.clear();
+  const chartHost = $("assetComovementChart");
+  if (chartHost && !window.echarts) chartHost.innerHTML = "";
+  const summary = $("assetComovementSummary");
+  if (summary) summary.innerHTML = "";
+  const range = $("assetComovementRange");
+  if (range) range.textContent = "运行回测后统计完整交易日";
+  const empty = $("assetComovementEmpty");
+  if (empty) empty.hidden = true;
+}
+
+function showAssetComovementEmpty(message) {
+  charts.assetComovementChart?.clear();
+  const summary = $("assetComovementSummary");
+  if (summary) summary.innerHTML = "";
+  const empty = $("assetComovementEmpty");
+  if (!empty) return;
+  empty.textContent = message;
+  empty.hidden = false;
+}
+
+function renderAssetComovementFallback(items, total) {
+  const host = $("assetComovementChart");
+  if (!host) return;
+  const segments = items
+    .filter((item) => item.count > 0)
+    .map((item) => (
+      `<span style="width:${(item.count / total * 100).toFixed(4)}%;background:${item.color}" title="${escapeHtml(item.label)} ${item.count} 天"></span>`
+    )).join("");
+  host.innerHTML = `<div class="asset-comovement-fallback" role="img" aria-label="三资产联动天数分布">${segments}</div>`;
+}
+
+function renderAssetComovementChart() {
+  const data = assetComovementData;
+  const selected = data?.windows?.[assetComovementWindow] || data?.windows?.all;
+  if (!data?.available || !selected?.comparable_days) {
+    showAssetComovementEmpty(data?.message || "所选区间没有三项均可比的交易日");
+    return;
+  }
+  const empty = $("assetComovementEmpty");
+  if (empty) empty.hidden = true;
+  const counts = selected.counts || {};
+  const percentages = selected.percentages || {};
+  const requestedItems = ASSET_COMOVEMENT_CATEGORIES.slice(0, 4).map((item) => ({
+    ...item,
+    count: Number(counts[item.key] || 0),
+    percentage: Number(percentages[item.key] || 0),
+  }));
+  const chartItems = ASSET_COMOVEMENT_CATEGORIES.map((item) => ({
+    ...item,
+    count: Number(counts[item.key] || 0),
+    percentage: Number(percentages[item.key] || 0),
+  }));
+  const summary = $("assetComovementSummary");
+  if (summary) {
+    summary.innerHTML = requestedItems.map((item) => `
+      <article class="asset-comovement-card ${item.className}">
+        <span>${escapeHtml(item.label)}</span>
+        <strong>${item.count.toLocaleString("zh-CN")}<small>天</small></strong>
+        <em>${fmtPct(item.percentage)}</em>
+      </article>
+    `).join("");
+  }
+  const range = $("assetComovementRange");
+  if (range) {
+    range.textContent = `${selected.start_date} 至 ${selected.end_date} · 可比 ${selected.comparable_days.toLocaleString("zh-CN")} 天`;
+  }
+  const note = $("assetComovementNote");
+  if (note) {
+    const unclassified = Number(counts.unclassified || 0);
+    note.textContent = `对冲 ${selected.hedge_days} 天，同向 ${selected.same_direction_days} 天${unclassified ? `，未分类 ${unclassified} 天` : ""}。对冲日按三项等权平均日总收益区分正负；分红、上市前代理和ETF替换沿用回测口径。`;
+  }
+  if (!window.echarts) {
+    renderAssetComovementFallback(chartItems, selected.comparable_days);
+    return;
+  }
+  queueChartOption("assetComovementChart", {
+    animationDuration: 420,
+    grid: { left: 8, right: 8, top: 50, bottom: 14 },
+    tooltip: {
+      trigger: "item",
+      formatter: (params) => `${escapeHtml(params.seriesName)}<br><strong>${Number(params.value).toLocaleString("zh-CN")} 天</strong> · ${fmtPct(Number(params.value) / selected.comparable_days)}`,
+    },
+    legend: { top: 5, left: "center", itemWidth: 12, itemHeight: 8, textStyle: { fontSize: 11 } },
+    xAxis: { type: "value", max: selected.comparable_days, show: false },
+    yAxis: { type: "category", data: ["交易日"], show: false },
+    series: chartItems.map((item, index) => ({
+      type: "bar",
+      name: item.label,
+      stack: "days",
+      data: [item.count],
+      barWidth: 34,
+      itemStyle: {
+        color: item.color,
+        borderRadius: index === 0 ? [7, 0, 0, 7] : index === chartItems.length - 1 ? [0, 7, 7, 0] : 0,
+      },
+      label: {
+        show: item.percentage >= 0.08,
+        position: "inside",
+        formatter: `${item.count}天`,
+        color: "#fff",
+        fontSize: 10,
+        fontWeight: 700,
+      },
+    })),
+  });
+  if (activeChartId === "assetComovementChart") {
+    applyChartOption("assetComovementChart");
+    charts.assetComovementChart?.resize();
+  }
+}
+
+async function loadAssetComovementChart() {
+  const runId = currentRunId;
+  if (!runId) {
+    showAssetComovementEmpty("运行回测后查看三资产联动统计");
+    return;
+  }
+  if (assetComovementRunId === runId && assetComovementData) {
+    renderAssetComovementChart();
+    return;
+  }
+  if (assetComovementLoadingRunId === runId) return;
+  const requestVersion = ++assetComovementRequestVersion;
+  assetComovementLoadingRunId = runId;
+  showAssetComovementEmpty("正在统计全部共同交易日…");
+  try {
+    const response = await api(`/api/backtest/${encodeURIComponent(runId)}/asset-comovement`, { attempts: 4, retryDelayMs: 500 });
+    if (requestVersion !== assetComovementRequestVersion || currentRunId !== runId) return;
+    assetComovementRunId = runId;
+    assetComovementData = response.asset_comovement;
+    renderAssetComovementChart();
+  } catch (error) {
+    if (requestVersion === assetComovementRequestVersion && currentRunId === runId) {
+      showAssetComovementEmpty(`资产联动统计加载失败：${humanizeError(error.message)}`);
+    }
+  } finally {
+    if (requestVersion === assetComovementRequestVersion) assetComovementLoadingRunId = null;
   }
 }
 
@@ -2862,6 +3026,7 @@ async function deleteHistoryRun(runId) {
     if (currentRunId === runId) {
       currentRunId = null;
       resetDailyPnlChart();
+      resetAssetComovementChart();
     }
     if (comparisonRunId === runId) comparisonRunId = null;
     await refreshBacktestArchiveSafely({ includeLeaderboard: true });
@@ -2879,6 +3044,7 @@ async function replayHistoryRun(runId) {
     config = JSON.parse(JSON.stringify(entry.config));
     renderControls();
     resetDailyPnlChart();
+    resetAssetComovementChart();
     currentRunId = entry.run_id;
     renderSummary(entry.summary);
     const { rebalance, trades } = await loadBacktestResultSections(currentRunId, async (series) => {
@@ -2921,6 +3087,7 @@ async function runBacktest() {
     setMessage(job.message || "回测任务已进入队列");
     const result = await waitForBacktestJob(job.job_id);
     resetDailyPnlChart();
+    resetAssetComovementChart();
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
     renderSummary(result.summary);
@@ -3077,6 +3244,10 @@ function setupUiInteractions() {
       });
       renderDailyPnlChart();
     });
+  });
+  $("assetComovementWindow")?.addEventListener("change", (event) => {
+    assetComovementWindow = event.target.value || "all";
+    renderAssetComovementChart();
   });
   setupTabs("[data-record-tab]", "recordTab", selectRecordPanel);
   selectChart(activeChartId);

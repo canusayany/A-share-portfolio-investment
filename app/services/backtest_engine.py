@@ -59,6 +59,19 @@ RANKING_CALMAR_CAP = 1.5
 DIP_BUY_CASH_BUFFER_MONTHS = 24
 REBALANCE_EDGE_GUARD_WEIGHT = 1e-5
 _MONEY_FUND_UNSET = object()
+ASSET_COMOVEMENT_SLEEVES = (
+    ("cn_treasury_30y_index", "treasury_30y", "30年国债ETF"),
+    ("cn_dividend_low_vol", "dividend_low_vol", "红利ETF"),
+    ("cn_gold_etf", "gold", "黄金ETF"),
+)
+ASSET_COMOVEMENT_WINDOWS = (
+    ("all", "全部历史", None),
+    ("1y", "近1年", 1),
+    ("3y", "近3年", 3),
+    ("5y", "近5年", 5),
+    ("10y", "近10年", 10),
+)
+ASSET_COMOVEMENT_EPSILON = 1e-12
 
 
 @dataclass
@@ -678,6 +691,207 @@ def active_route_symbols(
         elif proxy and proxy_start is not None and day >= proxy_start and available_prices.get(proxy["symbol"]) is not None:
             result[str(asset["symbol"])] = str(proxy["symbol"])
     return result
+
+
+def classify_asset_comovement(daily_returns: list[float]) -> str:
+    """Classify one shared trading day for the three defensive ETF sleeves."""
+    if len(daily_returns) != len(ASSET_COMOVEMENT_SLEEVES) or any(
+        not math.isfinite(float(value)) for value in daily_returns
+    ):
+        return "unclassified"
+    positive = sum(float(value) > ASSET_COMOVEMENT_EPSILON for value in daily_returns)
+    negative = sum(float(value) < -ASSET_COMOVEMENT_EPSILON for value in daily_returns)
+    if positive == len(daily_returns):
+        return "same_up"
+    if negative == len(daily_returns):
+        return "same_down"
+    if positive and negative:
+        equal_weight_return = sum(float(value) for value in daily_returns) / len(daily_returns)
+        if equal_weight_return > ASSET_COMOVEMENT_EPSILON:
+            return "hedge_positive"
+        if equal_weight_return < -ASSET_COMOVEMENT_EPSILON:
+            return "hedge_negative"
+    return "unclassified"
+
+
+def _asset_comovement_cutoff(end_day: date, years: int | None) -> date | None:
+    if years is None:
+        return None
+    try:
+        anchor = end_day.replace(year=end_day.year - years)
+    except ValueError:
+        anchor = end_day.replace(year=end_day.year - years, day=28)
+    return anchor + timedelta(days=1)
+
+
+def _summarize_asset_comovement_window(
+    records: list[dict[str, Any]],
+    end_day: date,
+    window_key: str,
+    label: str,
+    years: int | None,
+) -> dict[str, Any]:
+    cutoff = _asset_comovement_cutoff(end_day, years)
+    selected = [row for row in records if cutoff is None or parse_date(row["trade_date"]) >= cutoff]
+    counts = {
+        "same_up": 0,
+        "same_down": 0,
+        "hedge_positive": 0,
+        "hedge_negative": 0,
+        "unclassified": 0,
+    }
+    for row in selected:
+        counts[row["category"]] += 1
+    comparable_days = len(selected)
+    classified_days = comparable_days - counts["unclassified"]
+    percentages = {
+        key: (value / comparable_days if comparable_days else 0.0)
+        for key, value in counts.items()
+    }
+    return {
+        "key": window_key,
+        "label": label,
+        "requested_start_date": cutoff.isoformat() if cutoff else None,
+        "start_date": selected[0]["trade_date"] if selected else None,
+        "end_date": selected[-1]["trade_date"] if selected else None,
+        "comparable_days": comparable_days,
+        "classified_days": classified_days,
+        "same_direction_days": counts["same_up"] + counts["same_down"],
+        "hedge_days": counts["hedge_positive"] + counts["hedge_negative"],
+        "counts": counts,
+        "percentages": percentages,
+    }
+
+
+def asset_comovement_statistics(conn, user_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Count exact shared trading days for 30Y treasury, dividend and gold sleeves.
+
+    Each logical sleeve follows the same proxy and replacement routes as the
+    backtest engine. Returns use normalized close prices and recognize cash
+    distributions on the ex-date. Route-switch days use the selected physical
+    instrument's own previous close instead of comparing unrelated price scales.
+    """
+    config = normalize_config(user_config)
+    start = str(config["start_date"])
+    end = str(config["end_date"])
+    configured_by_key = {str(asset.get("key")): asset for asset in config["assets"]}
+    sleeves: list[dict[str, Any]] = []
+    public_assets: list[dict[str, Any]] = []
+    for config_key, public_key, label in ASSET_COMOVEMENT_SLEEVES:
+        source = configured_by_key.get(config_key)
+        if not source:
+            continue
+        sleeve = deepcopy(source)
+        sleeve["enabled"] = True
+        sleeves.append(sleeve)
+        public_assets.append(
+            {
+                "key": public_key,
+                "config_key": config_key,
+                "label": label,
+                "logical_symbol": str(sleeve["symbol"]),
+            }
+        )
+    if len(sleeves) != len(ASSET_COMOVEMENT_SLEEVES):
+        return {
+            "available": False,
+            "assets": public_assets,
+            "windows": {},
+            "window_order": [key for key, _label, _years in ASSET_COMOVEMENT_WINDOWS],
+            "message": "缺少三资产配置，无法计算联动统计",
+        }
+
+    sim_assets = simulation_assets(sleeves)
+    symbols = [str(asset["symbol"]) for asset in sim_assets]
+    share_scale_maps: dict[str, dict[str, float]] = {}
+    price_maps = load_price_map(
+        conn,
+        symbols,
+        start,
+        end,
+        share_splits=configured_share_splits(sleeves),
+        share_scale_maps=share_scale_maps,
+    )
+    attach_proxy_price_maps(price_maps, sleeves)
+    attach_nontradable_route_expense_drag(price_maps, sleeves)
+    ex_events, _pay_events = load_dividend_events(conn, symbols, start, end, share_scale_maps)
+    dividends: dict[tuple[str, str], float] = {}
+    for trade_date, events in ex_events.items():
+        for event in events:
+            key = (trade_date, str(event["symbol"]))
+            dividends[key] = dividends.get(key, 0.0) + (
+                float(event["div_cash"])
+                * float(event.get("normalized_share_scale", 1.0) or 1.0)
+            )
+
+    route_config = {**config, "assets": sleeves}
+    prepared_routes = prepare_active_asset_routes(route_config)
+    logical_symbols = [str(asset["symbol"]) for asset in sleeves]
+    public_key_by_symbol = {
+        str(asset["symbol"]): public_key
+        for asset, (_config_key, public_key, _label) in zip(sleeves, ASSET_COMOVEMENT_SLEEVES)
+    }
+    route_symbols: dict[str, set[str]] = {public_key: set() for _config_key, public_key, _label in ASSET_COMOVEMENT_SLEEVES}
+    all_dates = sorted({trade_date for prices in price_maps.values() for trade_date in prices})
+    latest_prices: dict[str, float | None] = {symbol: None for symbol in price_maps}
+    previous_prices: dict[str, float] = {}
+    records: list[dict[str, Any]] = []
+    for trade_date in all_dates:
+        day = parse_date(trade_date)
+        current_prices: dict[str, float] = {}
+        for symbol, prices in price_maps.items():
+            current = prices.get(trade_date)
+            if current is not None:
+                current_prices[symbol] = float(current)
+                latest_prices[symbol] = float(current)
+        active_symbols = active_route_symbols(day, latest_prices, prepared_routes)
+        daily_returns: list[float] = []
+        complete = True
+        for logical_symbol in logical_symbols:
+            route_symbol = active_symbols.get(logical_symbol)
+            current = current_prices.get(route_symbol) if route_symbol else None
+            previous = previous_prices.get(route_symbol) if route_symbol else None
+            if route_symbol is None or current is None or previous is None or previous <= 0:
+                complete = False
+                break
+            total_return = (
+                current + dividends.get((trade_date, route_symbol), 0.0)
+            ) / previous - 1.0
+            daily_returns.append(total_return)
+            route_symbols[public_key_by_symbol[logical_symbol]].add(route_symbol)
+        if complete:
+            records.append(
+                {
+                    "trade_date": trade_date,
+                    "category": classify_asset_comovement(daily_returns),
+                }
+            )
+        previous_prices.update(current_prices)
+
+    end_day = parse_date(end)
+    windows = {
+        key: _summarize_asset_comovement_window(records, end_day, key, label, years)
+        for key, label, years in ASSET_COMOVEMENT_WINDOWS
+    }
+    for asset in public_assets:
+        asset["route_symbols"] = sorted(route_symbols[asset["key"]])
+    return {
+        "available": bool(records),
+        "assets": public_assets,
+        "window_order": [key for key, _label, _years in ASSET_COMOVEMENT_WINDOWS],
+        "windows": windows,
+        "available_start_date": records[0]["trade_date"] if records else None,
+        "available_end_date": records[-1]["trade_date"] if records else None,
+        "methodology": {
+            "same_up": "三项日总收益均大于0",
+            "same_down": "三项日总收益均小于0",
+            "hedge_positive": "至少一涨一跌，三项等权平均日总收益大于0",
+            "hedge_negative": "至少一涨一跌，三项等权平均日总收益小于0",
+            "unclassified": "含零涨跌且未同时出现正负，或等权平均收益为0",
+            "return_basis": "复权连续价格，并在除息日计入现金分红；上市前代理和ETF替换沿用回测规则",
+        },
+        "message": None if records else "所选回测区间没有三项均可比的交易日",
+    }
 
 
 def repo_fixed_target_weight(config: dict[str, Any], total_value_cny: float | None) -> float:

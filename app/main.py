@@ -31,6 +31,7 @@ from app.identity import (
     valid_leaderboard_key_id,
 )
 from app.services.backtest_engine import (
+    asset_comovement_statistics,
     BacktestCancelled,
     BacktestError,
     RANKING_VERSION,
@@ -1660,6 +1661,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(
                     HTTPStatus.OK,
                     {"daily_pnl": daily_pnl_chart_payload(rows, json_loads(run["config_json"], {}))},
+                )
+            elif section == "asset-comovement":
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "asset_comovement": asset_comovement_statistics(
+                            conn,
+                            json_loads(run["config_json"], {}),
+                        )
+                    },
                 )
             elif section == "rebalance":
                 rows = rows_to_dicts(
