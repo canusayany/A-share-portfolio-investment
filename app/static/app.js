@@ -1,6 +1,7 @@
 let config = null;
 let defaultConfigSnapshot = null;
 let currentRunId = null;
+let currentSummary = null;
 let runHistory = [];
 let leaderboardHistory = [];
 let comparisonRunId = null;
@@ -33,6 +34,12 @@ let assetComovementRunId = null;
 let assetComovementLoadingRunId = null;
 let assetComovementRequestVersion = 0;
 let assetComovementWindow = "all";
+const strategyDiagnosticsCache = new Map();
+let strategyDiagnosticsData = null;
+let strategyDiagnosticsRunId = null;
+let strategyDiagnosticsLoadingKey = null;
+let strategyDiagnosticsRequestVersion = 0;
+let strategyDiagnosticsWindow = "all";
 const APP_BASE_PATH = (() => {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
   const knownAppPaths = ["/backtest/permanent-investment", "/backtest/cross-market", "/portfolio"];
@@ -1415,6 +1422,7 @@ function renderRiskInsights(summary = {}) {
 }
 
 function renderInitialSummary() {
+  currentSummary = null;
   renderSummaryGroups(
     ["期末总资产", "累计收益（现金流调整）", "年化收益（现金流调整）", "最大回撤"].map((label) => ({ label, value: "--" })),
     ["原始本金折算年化", "原始本金累计盈亏", "总手续费", "实际到账现金分红", "总消费", "浮盈浮亏", "对比期末资产", "再平衡次数", "交易次数", "分红预扣税"]
@@ -1424,6 +1432,7 @@ function renderInitialSummary() {
 }
 
 function renderSummary(summary) {
+  currentSummary = summary;
   const positiveTone = (value) => Number(value || 0) >= 0 ? "positive" : "negative";
   const optionalPct = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : fmtPct(value);
   const originalProfitValue = summary.net_profit_cny == null
@@ -1703,6 +1712,7 @@ function queueChartResize() {
 
 function selectChart(chartId) {
   activeChartId = chartId;
+  document.querySelector(".analysis-panel")?.classList.toggle("is-diagnostics-active", chartId === "strategyDiagnosticsChart");
   document.querySelectorAll("[data-chart-tab]").forEach((button) => {
     const active = button.dataset.chartTab === chartId;
     button.setAttribute("aria-selected", active ? "true" : "false");
@@ -1712,7 +1722,7 @@ function selectChart(chartId) {
     view.hidden = view.querySelector(".chart")?.id !== chartId;
   });
   if (chartId === "dailyPnlChart") loadDailyPnlChart().catch(() => {});
-  if (chartId === "assetComovementChart") loadAssetComovementChart().catch(() => {});
+  if (chartId === "strategyDiagnosticsChart") loadStrategyDiagnostics().catch(() => {});
   window.requestAnimationFrame(() => {
     applyChartOption(chartId);
     charts[chartId]?.resize();
@@ -1951,6 +1961,261 @@ async function loadDailyPnlChart() {
   } finally {
     if (requestVersion === dailyPnlRequestVersion) dailyPnlLoadingRunId = null;
   }
+}
+
+function resetStrategyDiagnostics() {
+  strategyDiagnosticsRequestVersion += 1;
+  strategyDiagnosticsCache.clear();
+  strategyDiagnosticsData = null;
+  strategyDiagnosticsRunId = null;
+  strategyDiagnosticsLoadingKey = null;
+  strategyDiagnosticsWindow = "all";
+  const windowSelect = $("strategyDiagnosticsWindow");
+  if (windowSelect) windowSelect.value = "all";
+  delete pendingChartOptions.strategyDiagnosticsChart;
+  charts.strategyDiagnosticsChart?.clear();
+  const content = $("strategyDiagnosticsContent");
+  if (content) content.hidden = true;
+  const loading = $("strategyDiagnosticsLoading");
+  if (loading) {
+    loading.hidden = false;
+    loading.textContent = "运行回测后查看策略诊断";
+  }
+  const range = $("strategyDiagnosticsRange");
+  if (range) range.textContent = "运行回测后生成真实反事实诊断";
+}
+
+function diagnosticDeltaMarkup(value, kind = "percent") {
+  if (value == null || !Number.isFinite(Number(value))) return '<span class="diagnostic-delta is-neutral">—</span>';
+  const number = Number(value);
+  const text = kind === "ratio" ? `${number > 0 ? "+" : ""}${number.toFixed(2)}` : fmtSignedPct(number);
+  const tone = number > 1e-12 ? "good" : number < -1e-12 ? "bad" : "neutral";
+  return `<span class="diagnostic-delta is-${tone}">${escapeHtml(text)}</span>`;
+}
+
+function diagnosticWeightText(weights = {}) {
+  return Object.entries(weights)
+    .filter(([, weight]) => Number(weight || 0) > 1e-12)
+    .map(([symbol, weight]) => `${SHORT_NAMES[symbol] || assetName(symbol)} ${fmtPct(weight)}`)
+    .join(" · ");
+}
+
+function renderStrategyOptimizationChart(data) {
+  const host = $("strategyDiagnosticsChart");
+  if (!host) return;
+  const candidates = data.optimization_candidates || [];
+  const recommendedId = data.recommendation?.candidate_id;
+  if (!candidates.length) {
+    host.innerHTML = '<div class="strategy-diagnostics-loading">没有可比较的权重候选</div>';
+    return;
+  }
+  if (!window.echarts) {
+    host.innerHTML = `<div class="optimization-fallback">${candidates
+      .slice()
+      .sort((a, b) => Number(b.annual_return_drawdown_ratio || 0) - Number(a.annual_return_drawdown_ratio || 0))
+      .slice(0, 6)
+      .map((row) => `<div class="${row.id === recommendedId ? "is-recommended" : ""}"><strong>${escapeHtml(row.label)}</strong><span>年化 ${fmtPct(row.annualized_return)} · 回撤 ${fmtPct(row.max_drawdown)} · 比值 ${fmtRatio(row.annual_return_drawdown_ratio)}</span></div>`)
+      .join("")}</div>`;
+    return;
+  }
+  const points = candidates.map((row) => {
+    const recommended = row.id === recommendedId;
+    return {
+      value: [Math.abs(Number(row.max_drawdown || 0)) * 100, Number(row.annualized_return || 0) * 100],
+      name: row.label,
+      row,
+      symbolSize: row.current || recommended ? 16 : 9,
+      itemStyle: { color: row.current ? "#087a55" : recommended ? "#b97918" : "#90a0a6", opacity: row.current || recommended ? 1 : 0.72 },
+      label: { show: row.current || recommended, formatter: row.current ? "当前" : "建议复核", position: "top", color: row.current ? "#087a55" : "#8a5c12", fontWeight: 700 },
+    };
+  });
+  queueChartOption("strategyDiagnosticsChart", {
+    animationDuration: 420,
+    grid: { left: 54, right: 24, top: 34, bottom: 52 },
+    tooltip: {
+      trigger: "item",
+      formatter: (params) => {
+        const row = params.data.row;
+        return [
+          `<div style="font-weight:700;margin-bottom:6px">${escapeHtml(row.label)}</div>`,
+          `<div>年化收益 <strong>${fmtPct(row.annualized_return)}</strong></div>`,
+          `<div>最大回撤 <strong>${fmtPct(row.max_drawdown)}</strong></div>`,
+          `<div>收益/回撤 <strong>${fmtRatio(row.annual_return_drawdown_ratio)}</strong></div>`,
+          `<div style="max-width:360px;margin-top:6px;color:#cbd5d8">${escapeHtml(diagnosticWeightText(row.weights))}</div>`,
+        ].join("");
+      },
+    },
+    xAxis: { type: "value", name: "最大回撤绝对值（越左越稳）", nameLocation: "middle", nameGap: 32, axisLabel: { formatter: "{value}%" }, splitLine: { lineStyle: { color: "#edf1f2" } } },
+    yAxis: { type: "value", name: "年化收益", axisLabel: { formatter: "{value}%" }, splitLine: { lineStyle: { color: "#edf1f2" } } },
+    series: [{ type: "scatter", data: points, emphasis: { focus: "self", scale: 1.2 } }],
+  });
+  if (activeChartId === "strategyDiagnosticsChart") {
+    applyChartOption("strategyDiagnosticsChart");
+    charts.strategyDiagnosticsChart?.resize();
+  }
+}
+
+function renderStrategyDiagnostics() {
+  const data = strategyDiagnosticsData;
+  if (!data?.available) return;
+  const base = data.base || {};
+  const loading = $("strategyDiagnosticsLoading");
+  if (loading) loading.hidden = true;
+  const content = $("strategyDiagnosticsContent");
+  if (content) content.hidden = false;
+  if ($("diagnosticAnnualized")) $("diagnosticAnnualized").textContent = fmtPct(base.annualized_return);
+  if ($("diagnosticDrawdown")) $("diagnosticDrawdown").textContent = fmtPct(base.max_drawdown);
+  if ($("diagnosticCalmar")) $("diagnosticCalmar").textContent = fmtRatio(base.annual_return_drawdown_ratio);
+  if ($("diagnosticPositiveYears")) $("diagnosticPositiveYears").textContent = `${Number(base.positive_year_count || 0)} / ${Number(base.complete_year_count || 0)}`;
+  if ($("strategyDiagnosticsRange")) {
+    $("strategyDiagnosticsRange").textContent = `${data.window.start_date} 至 ${data.window.end_date} · ${data.window.label} · ${data.optimization_candidates.length}组真实权重回测`;
+  }
+
+  const effects = data.asset_effects || [];
+  const redundant = effects.filter((row) => row.conclusion === "可能冗余");
+  const core = effects.filter((row) => row.conclusion === "核心贡献");
+  const verdictTitle = redundant.length
+    ? `发现 ${redundant.length} 个可能冗余的标的，需要优先复核`
+    : core.length
+      ? `组合有效，且有 ${core.length} 个标的同时改善收益与回撤`
+      : "组合有价值，但标的作用存在明确的收益与保护取舍";
+  if ($("strategyVerdictTitle")) $("strategyVerdictTitle").textContent = verdictTitle;
+  if ($("strategyVerdictText")) {
+    $("strategyVerdictText").textContent = "判断来自删除标的后的完整重跑，而不是只看相关性。回撤变化为正表示删除后回撤改善，为负表示删除后风险变差。";
+  }
+  if ($("strategyRecommendation")) {
+    $("strategyRecommendation").innerHTML = `<span>本窗口建议</span>${escapeHtml(data.recommendation?.text || "保持当前权重")}<small>${escapeHtml(diagnosticWeightText(data.recommendation?.weights || {}))}</small>`;
+  }
+  if ($("strategyAssetEffects")) {
+    $("strategyAssetEffects").innerHTML = effects.map((row) => `
+      <tr title="${escapeHtml(row.explanation)}">
+        <td><strong>${escapeHtml(row.removed_name)}</strong><small>${escapeHtml(row.removed_symbol)} · 原权重 ${fmtPct(row.removed_weight)}</small></td>
+        <td>${diagnosticDeltaMarkup(row.annualized_return_delta)}</td>
+        <td>${diagnosticDeltaMarkup(row.max_drawdown_delta)}</td>
+        <td>${diagnosticDeltaMarkup(row.annual_return_drawdown_ratio_delta, "ratio")}</td>
+        <td><span class="diagnostic-conclusion is-${row.conclusion === "可能冗余" ? "bad" : row.conclusion === "核心贡献" ? "good" : "neutral"}">${escapeHtml(row.conclusion)}</span></td>
+      </tr>`).join("");
+  }
+
+  const stress = data.stress_protection || {};
+  if ($("stressProtectionCaption")) {
+    $("stressProtectionCaption").textContent = `${stress.comparable_periods || 0}个月中有 ${stress.stress_periods || 0}个红利下跌月；保护率表示该月标的总收益大于0。`;
+  }
+  if ($("stressProtectionGrid")) {
+    $("stressProtectionGrid").innerHTML = (stress.assets || []).map((asset) => {
+      const isRisk = asset.role === "risk_asset";
+      const rate = asset.stress_positive_rate;
+      return `<article class="stress-protection-card ${isRisk ? "is-risk" : ""}">
+        <span>${escapeHtml(asset.label)}</span>
+        <strong>${isRisk ? `${stress.stress_periods || 0}个下跌月` : rate == null ? "—" : fmtPct(rate)}</strong>
+        <small>${isRisk ? "压力基准" : `压力期平均 ${fmtSignedPct(asset.stress_average_return)}`}</small>
+        <em>最差10%月份为正 ${asset.worst_decile_positive_rate == null ? "—" : fmtPct(asset.worst_decile_positive_rate)}</em>
+      </article>`;
+    }).join("");
+  }
+  renderStrategyOptimizationChart(data);
+}
+
+async function loadStrategyDiagnostics() {
+  const runId = currentRunId;
+  if (!runId) {
+    const loading = $("strategyDiagnosticsLoading");
+    if (loading) {
+      loading.hidden = false;
+      loading.textContent = "运行回测后查看策略诊断";
+    }
+    return;
+  }
+  const cacheKey = `${runId}:${strategyDiagnosticsWindow}`;
+  if (strategyDiagnosticsCache.has(cacheKey)) {
+    strategyDiagnosticsRunId = runId;
+    strategyDiagnosticsData = strategyDiagnosticsCache.get(cacheKey);
+    renderStrategyDiagnostics();
+    return;
+  }
+  if (strategyDiagnosticsLoadingKey === cacheKey) return;
+  const requestVersion = ++strategyDiagnosticsRequestVersion;
+  strategyDiagnosticsLoadingKey = cacheKey;
+  const loading = $("strategyDiagnosticsLoading");
+  if (loading) {
+    loading.hidden = false;
+    loading.textContent = "正在运行“删掉一个标的”和5%调权对照，请稍候…";
+  }
+  const content = $("strategyDiagnosticsContent");
+  if (content) content.hidden = true;
+  try {
+    const response = await api(`/api/backtest/${encodeURIComponent(runId)}/strategy-diagnostics?window=${encodeURIComponent(strategyDiagnosticsWindow)}`, {
+      attempts: 1,
+      requestTimeoutMs: 180000,
+    });
+    if (requestVersion !== strategyDiagnosticsRequestVersion || currentRunId !== runId) return;
+    strategyDiagnosticsCache.set(cacheKey, response.strategy_diagnostics);
+    strategyDiagnosticsRunId = runId;
+    strategyDiagnosticsData = response.strategy_diagnostics;
+    renderStrategyDiagnostics();
+  } catch (error) {
+    if (requestVersion === strategyDiagnosticsRequestVersion && currentRunId === runId && loading) {
+      loading.hidden = false;
+      loading.textContent = `策略诊断失败：${humanizeError(error.message)}`;
+    }
+  } finally {
+    if (requestVersion === strategyDiagnosticsRequestVersion) strategyDiagnosticsLoadingKey = null;
+  }
+}
+
+function openCsvExportDialog() {
+  if (!currentRunId) {
+    setMessage("请先运行或回放一条回测结果，再导出CSV", true);
+    return;
+  }
+  const dialog = $("csvExportDialog");
+  const start = config?.start_date || currentSummary?.start_date || "";
+  const end = config?.end_date || currentSummary?.end_date || "";
+  if ($("csvExportStart")) {
+    $("csvExportStart").min = config?.start_date || start;
+    $("csvExportStart").max = config?.end_date || end;
+    $("csvExportStart").value = start;
+  }
+  if ($("csvExportEnd")) {
+    $("csvExportEnd").min = config?.start_date || start;
+    $("csvExportEnd").max = config?.end_date || end;
+    $("csvExportEnd").value = end;
+  }
+  const assets = (config?.assets || []).filter((asset) => asset.enabled && Number(asset.target_weight || 0) > 0);
+  if ($("csvExportAssets")) {
+    $("csvExportAssets").innerHTML = assets.map((asset) => `<label><input type="checkbox" value="${escapeHtml(asset.symbol)}" checked /><span><strong>${escapeHtml(asset.choice_label || asset.name || asset.symbol)}</strong><small>${escapeHtml(asset.symbol)}</small></span></label>`).join("");
+  }
+  if ($("csvExportError")) $("csvExportError").textContent = "";
+  if (typeof dialog?.showModal === "function") dialog.showModal();
+  else dialog?.setAttribute("open", "");
+}
+
+function downloadCsvExport() {
+  const startInput = $("csvExportStart");
+  const endInput = $("csvExportEnd");
+  const error = $("csvExportError");
+  const startDate = String(startInput?.value || "");
+  const endDate = String(endInput?.value || "");
+  const symbols = [...document.querySelectorAll('#csvExportAssets input[type="checkbox"]:checked')].map((input) => input.value);
+  const datesValid = Boolean(startDate && endDate && startDate <= endDate);
+  [startInput, endInput].filter(Boolean).forEach((input) => input.setCustomValidity(datesValid ? "" : "请选择有效的开始和结束时间"));
+  if (!datesValid) {
+    (startDate ? endInput : startInput)?.reportValidity();
+    return;
+  }
+  if (!symbols.length) {
+    if (error) error.textContent = "请至少选择一个标的";
+    return;
+  }
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate, symbols: symbols.join(",") });
+  const link = document.createElement("a");
+  link.href = `${APP_BASE_PATH}/api/backtest/${encodeURIComponent(currentRunId)}/export.csv?${params}`;
+  link.download = `permanent-investment-${startDate.replaceAll("-", "")}-${endDate.replaceAll("-", "")}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  $("csvExportDialog")?.close();
+  setMessage(`正在导出 ${startDate} 至 ${endDate} 的CSV`);
 }
 
 const ASSET_COMOVEMENT_CATEGORIES = [
@@ -3025,7 +3290,9 @@ async function deleteHistoryRun(runId) {
     await api(`/api/backtest/${encodeURIComponent(runId)}`, { method: "DELETE", retry: true });
     if (currentRunId === runId) {
       currentRunId = null;
+      currentSummary = null;
       resetDailyPnlChart();
+      resetStrategyDiagnostics();
       resetAssetComovementChart();
     }
     if (comparisonRunId === runId) comparisonRunId = null;
@@ -3044,6 +3311,7 @@ async function replayHistoryRun(runId) {
     config = JSON.parse(JSON.stringify(entry.config));
     renderControls();
     resetDailyPnlChart();
+    resetStrategyDiagnostics();
     resetAssetComovementChart();
     currentRunId = entry.run_id;
     renderSummary(entry.summary);
@@ -3053,6 +3321,7 @@ async function replayHistoryRun(runId) {
       renderCharts(series);
     });
     renderBacktestRecords(entry.summary, rebalance, trades);
+    if (activeChartId === "strategyDiagnosticsChart") loadStrategyDiagnostics().catch(() => {});
     scheduleArchiveRefresh({ includeLeaderboard: activeArchiveView === "leaderboard" });
     setHistoryPanel(false);
     if (["pending", "running"].includes(entry.summary?.analysis_status)) {
@@ -3087,6 +3356,7 @@ async function runBacktest() {
     setMessage(job.message || "回测任务已进入队列");
     const result = await waitForBacktestJob(job.job_id);
     resetDailyPnlChart();
+    resetStrategyDiagnostics();
     resetAssetComovementChart();
     currentRunId = result.run_id;
     if (result.status) renderStatus(result.status);
@@ -3099,6 +3369,7 @@ async function runBacktest() {
       renderCharts(computedSeries);
     }, result.chart || null);
     renderBacktestRecords(finalSummary, rebalance, trades);
+    if (activeChartId === "strategyDiagnosticsChart") loadStrategyDiagnostics().catch(() => {});
     scheduleArchiveRefresh({ includeLeaderboard: false });
     const analysisPending = Boolean(result.analysis_pending) || ["pending", "running"].includes(result.summary?.analysis_status);
     if (analysisPending) {
@@ -3249,6 +3520,16 @@ function setupUiInteractions() {
     assetComovementWindow = event.target.value || "all";
     renderAssetComovementChart();
   });
+  $("strategyDiagnosticsWindow")?.addEventListener("change", (event) => {
+    strategyDiagnosticsWindow = event.target.value || "all";
+    loadStrategyDiagnostics().catch(() => {});
+  });
+  $("assetComovementDetails")?.addEventListener("toggle", (event) => {
+    if (!event.target.open) return;
+    loadAssetComovementChart().then(() => charts.assetComovementChart?.resize()).catch(() => {});
+  });
+  $("openCsvExport")?.addEventListener("click", openCsvExportDialog);
+  $("downloadCsv")?.addEventListener("click", downloadCsvExport);
   setupTabs("[data-record-tab]", "recordTab", selectRecordPanel);
   selectChart(activeChartId);
   selectRecordPanel("statusPanel");

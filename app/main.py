@@ -41,6 +41,7 @@ from app.services.backtest_engine import (
     run_backtest,
 )
 from app.services.data_sync import SyncCancelled, required_data_missing, sync_all
+from app.services.strategy_diagnostics import build_backtest_csv, strategy_diagnostics
 
 logger = logging.getLogger(__name__)
 MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -1334,6 +1335,28 @@ class ApiHandler(BaseHTTPRequestHandler):
     def send_error_json(self, status: int, message: str) -> None:
         self.send_json(status, {"error": message})
 
+    def send_bytes(
+        self,
+        status: int,
+        body: bytes,
+        content_type: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self._response_bytes = len(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning("client disconnected while sending bytes path=%s status=%s bytes=%d", self.path, status, len(body))
+            raise
+
     def normalize_path(self, path: str) -> str:
         if path == "/portfolio":
             return "/"
@@ -1463,6 +1486,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.serve_static(path)
         except (BrokenPipeError, ConnectionResetError):
             raise
+        except (BacktestError, ValueError) as exc:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:
             logger.exception("http get failed path=%s", path)
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
@@ -1672,6 +1697,42 @@ class ApiHandler(BaseHTTPRequestHandler):
                         )
                     },
                 )
+            elif section == "strategy-diagnostics":
+                window_key = str((query.get("window") or ["all"])[0] or "all")
+                cache_key = (run_id, window_key)
+                with self.server.diagnostics_cache_lock:  # type: ignore[attr-defined]
+                    diagnostics = self.server.diagnostics_cache.get(cache_key)  # type: ignore[attr-defined]
+                    if diagnostics is None:
+                        diagnostics = strategy_diagnostics(
+                            conn,
+                            json_loads(run["config_json"], {}),
+                            json_loads(run["summary_json"], {}),
+                            window_key,
+                        )
+                        if len(self.server.diagnostics_cache) >= 32:  # type: ignore[attr-defined]
+                            self.server.diagnostics_cache.clear()  # type: ignore[attr-defined]
+                        self.server.diagnostics_cache[cache_key] = diagnostics  # type: ignore[index,attr-defined]
+                self.send_json(HTTPStatus.OK, {"strategy_diagnostics": diagnostics})
+            elif section == "export.csv":
+                selected_symbols = [
+                    symbol.strip()
+                    for symbol in str((query.get("symbols") or [""])[0]).split(",")
+                    if symbol.strip()
+                ]
+                body, filename = build_backtest_csv(
+                    conn,
+                    json_loads(run["config_json"], {}),
+                    json_loads(run["summary_json"], {}),
+                    start_date=(query.get("start_date") or [None])[0],
+                    end_date=(query.get("end_date") or [None])[0],
+                    symbols=selected_symbols or None,
+                )
+                self.send_bytes(
+                    HTTPStatus.OK,
+                    body,
+                    "text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
             elif section == "rebalance":
                 rows = rows_to_dicts(
                     conn.execute(
@@ -1748,6 +1809,8 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | Path
     server.analysis_futures = {}  # type: ignore[attr-defined]
     server.static_cache_lock = Lock()  # type: ignore[attr-defined]
     server.static_cache = {}  # type: ignore[attr-defined]
+    server.diagnostics_cache_lock = Lock()  # type: ignore[attr-defined]
+    server.diagnostics_cache = {}  # type: ignore[attr-defined]
     server.job_abandoned_seconds = float(os.getenv("PORTFOLIO_JOB_ABANDONED_SECONDS", DEFAULT_ABANDONED_JOB_SECONDS))  # type: ignore[attr-defined]
     server.job_retention_seconds = float(os.getenv("PORTFOLIO_JOB_RETENTION_SECONDS", DEFAULT_JOB_RETENTION_SECONDS))  # type: ignore[attr-defined]
     server.job_executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[attr-defined]

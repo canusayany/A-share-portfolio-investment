@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260902-asset-comovement-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260902-strategy-diagnostics-1" />
   </head>
   <body class="history-collapsed">
     <div id="identityGate" class="identity-gate" hidden>
@@ -348,7 +348,7 @@
             <button id="chartTabReturn" type="button" role="tab" aria-selected="false" aria-controls="returnChartView" data-chart-tab="returnChart">收益率</button>
             <button id="chartTabDaily" type="button" role="tab" aria-selected="false" aria-controls="dailyReturnChartView" data-chart-tab="dailyReturnChart">单日收益</button>
             <button id="chartTabDailyPnl" type="button" role="tab" aria-selected="false" aria-controls="dailyPnlChartView" data-chart-tab="dailyPnlChart">标的盈亏</button>
-            <button id="chartTabComovement" type="button" role="tab" aria-selected="false" aria-controls="assetComovementView" data-chart-tab="assetComovementChart">资产联动</button>
+            <button id="chartTabDiagnostics" type="button" role="tab" aria-selected="false" aria-controls="strategyDiagnosticsView" data-chart-tab="strategyDiagnosticsChart">策略诊断</button>
             <button id="chartTabDrawdown" type="button" role="tab" aria-selected="false" aria-controls="drawdownChartView" data-chart-tab="drawdownChart">回撤</button>
             <button id="chartTabWeight" type="button" role="tab" aria-selected="false" aria-controls="weightChartView" data-chart-tab="weightChart">资产权重</button>
             <button id="chartTabComparison" type="button" role="tab" aria-selected="false" aria-controls="comparisonChartView" data-chart-tab="comparisonChart">总资产对比</button>
@@ -376,27 +376,89 @@
               <div id="dailyPnlChart" class="chart"></div>
               <div id="dailyPnlEmpty" class="daily-pnl-empty" hidden></div>
             </div>
-            <div id="assetComovementView" class="chart-view asset-comovement-view" role="tabpanel" aria-labelledby="chartTabComovement" hidden>
-              <div class="asset-comovement-toolbar">
+            <div id="strategyDiagnosticsView" class="chart-view strategy-diagnostics-view" role="tabpanel" aria-labelledby="chartTabDiagnostics" hidden>
+              <div class="strategy-diagnostics-toolbar">
                 <div>
-                  <strong>30年国债ETF · 红利ETF · 黄金ETF</strong>
-                  <span id="assetComovementRange">运行回测后统计完整交易日</span>
+                  <strong>先判断标的有没有用，再讨论怎么调权重</strong>
+                  <span id="strategyDiagnosticsRange">运行回测后生成真实反事实诊断</span>
                 </div>
-                <label for="assetComovementWindow">
-                  时间窗口
-                  <select id="assetComovementWindow">
-                    <option value="all">全部历史</option>
-                    <option value="1y">近1年</option>
-                    <option value="3y">近3年</option>
-                    <option value="5y">近5年</option>
-                    <option value="10y">近10年</option>
-                  </select>
-                </label>
+                <div class="strategy-diagnostics-actions">
+                  <label for="strategyDiagnosticsWindow">
+                    时间窗口
+                    <select id="strategyDiagnosticsWindow">
+                      <option value="all">全部历史</option>
+                      <option value="1y">近1年</option>
+                      <option value="3y">近3年</option>
+                      <option value="5y">近5年</option>
+                      <option value="10y">近10年</option>
+                    </select>
+                  </label>
+                  <button id="openCsvExport" type="button" class="csv-export-button">导出CSV</button>
+                </div>
               </div>
-              <div id="assetComovementSummary" class="asset-comovement-summary" aria-live="polite"></div>
-              <div id="assetComovementChart" class="chart asset-comovement-chart"></div>
-              <p id="assetComovementNote" class="asset-comovement-note">仅统计三项都有有效日总收益的共同交易日。</p>
-              <div id="assetComovementEmpty" class="daily-pnl-empty" hidden></div>
+              <div id="strategyDiagnosticsLoading" class="strategy-diagnostics-loading">运行回测后查看策略诊断</div>
+              <div id="strategyDiagnosticsContent" class="strategy-diagnostics-content" hidden>
+                <div class="strategy-metric-grid" aria-label="策略结果">
+                  <article><span>年化收益</span><strong id="diagnosticAnnualized">—</strong><small>收益能力</small></article>
+                  <article><span>最大回撤</span><strong id="diagnosticDrawdown">—</strong><small>最坏持有体验</small></article>
+                  <article><span>收益 / 回撤</span><strong id="diagnosticCalmar">—</strong><small>风险收益效率</small></article>
+                  <article><span>正收益年份</span><strong id="diagnosticPositiveYears">—</strong><small>年度稳定性</small></article>
+                </div>
+                <section class="strategy-verdict" aria-labelledby="strategyVerdictTitle">
+                  <div>
+                    <span>当前诊断</span>
+                    <h3 id="strategyVerdictTitle">正在计算真实对照结果</h3>
+                    <p id="strategyVerdictText"></p>
+                  </div>
+                  <strong id="strategyRecommendation"></strong>
+                </section>
+                <div class="strategy-diagnostics-grid">
+                  <section class="strategy-diagnostic-card">
+                    <div class="strategy-card-heading">
+                      <div><h3>删掉一个标的，组合会怎样？</h3><p>删除后按原比例补到其他标的与现金，再使用完整回测引擎重跑。</p></div>
+                      <span>反事实回测</span>
+                    </div>
+                    <div class="table-scroll"><table class="strategy-effects-table"><thead><tr><th>删掉的标的</th><th>年化变化</th><th>回撤变化</th><th>收益/回撤变化</th><th>判断</th></tr></thead><tbody id="strategyAssetEffects"></tbody></table></div>
+                  </section>
+                  <section class="strategy-diagnostic-card">
+                    <div class="strategy-card-heading">
+                      <div><h3>压力期真正保护率</h3><p id="stressProtectionCaption">红利ETF下跌月份中，防守资产是否真正上涨。</p></div>
+                    </div>
+                    <div id="stressProtectionGrid" class="stress-protection-grid"></div>
+                  </section>
+                </div>
+                <section class="strategy-diagnostic-card optimization-card">
+                  <div class="strategy-card-heading">
+                    <div><h3>当前权重附近的优化地图</h3><p>任意两个资金桶之间移动5个百分点；越靠左回撤越小，越靠上收益越高。</p></div>
+                    <span>真实回测 · 含费用</span>
+                  </div>
+                  <div id="strategyDiagnosticsChart" class="chart strategy-optimization-chart"></div>
+                  <p class="optimization-warning">这里只寻找当前权重附近的小步候选。请切换多个时间窗口交叉验证，避免追逐单一历史最高点。</p>
+                </section>
+                <details id="assetComovementDetails" class="asset-comovement-details">
+                  <summary>查看辅助证据：同涨、同跌和对冲天数</summary>
+                  <div class="asset-comovement-toolbar">
+                    <div>
+                      <strong>30年国债ETF · 红利ETF · 黄金ETF</strong>
+                      <span id="assetComovementRange">统计完整共同交易日</span>
+                    </div>
+                    <label for="assetComovementWindow">
+                      时间窗口
+                      <select id="assetComovementWindow">
+                        <option value="all">全部历史</option>
+                        <option value="1y">近1年</option>
+                        <option value="3y">近3年</option>
+                        <option value="5y">近5年</option>
+                        <option value="10y">近10年</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div id="assetComovementSummary" class="asset-comovement-summary" aria-live="polite"></div>
+                  <div id="assetComovementChart" class="chart asset-comovement-chart"></div>
+                  <p id="assetComovementNote" class="asset-comovement-note">仅统计三项都有有效日总收益的共同交易日。</p>
+                  <div id="assetComovementEmpty" class="daily-pnl-empty" hidden></div>
+                </details>
+              </div>
             </div>
             <div id="drawdownChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabDrawdown" hidden><div id="drawdownChart" class="chart"></div></div>
             <div id="weightChartView" class="chart-view" role="tabpanel" aria-labelledby="chartTabWeight" hidden><div id="weightChart" class="chart"></div></div>
@@ -485,6 +547,24 @@
         </div>
       </aside>
     </div>
-  <script src="static/app.js?v=20260902-asset-comovement-1"></script>
+    <dialog id="csvExportDialog" class="csv-export-dialog" aria-labelledby="csvExportTitle">
+      <form method="dialog">
+        <div class="csv-export-heading">
+          <div><span>回测数据导出</span><h2 id="csvExportTitle">导出CSV</h2></div>
+          <button type="submit" value="cancel" aria-label="关闭">×</button>
+        </div>
+        <p>文件顶部记录选择时间与标的，随后列出每个交易日的实际行情代码、名称和收盘价，底部附该时间段的最终回测结果。</p>
+        <div class="csv-export-dates">
+          <label for="csvExportStart">开始时间<input id="csvExportStart" type="date" required /></label>
+          <label for="csvExportEnd">结束时间<input id="csvExportEnd" type="date" required /></label>
+        </div>
+        <fieldset><legend>选择标的</legend><div id="csvExportAssets" class="csv-export-assets"></div></fieldset>
+        <div class="csv-export-footer">
+          <span id="csvExportError" role="alert"></span>
+          <button type="button" id="downloadCsv">导出CSV</button>
+        </div>
+      </form>
+    </dialog>
+  <script src="static/app.js?v=20260902-strategy-diagnostics-1"></script>
   </body>
 </html>

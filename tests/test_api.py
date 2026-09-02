@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import csv
 import gzip
+import io
 import json
 import sqlite3
 import time
 from threading import Thread
 import unittest
-from urllib import request
+from urllib import error, request
 
 import app.main as main_module
 from app.config import normalize_config
@@ -325,6 +327,7 @@ class ApiTests(unittest.TestCase):
         chart_series = http_json(f"{self.base_url}/api/backtest/{run_id}/chart-series")
         daily_pnl_response = http_json(f"{self.base_url}/api/backtest/{run_id}/daily-pnl")
         comovement_response = http_json(f"{self.base_url}/api/backtest/{run_id}/asset-comovement")
+        diagnostics_response = http_json(f"{self.base_url}/api/backtest/{run_id}/strategy-diagnostics?window=all")
         rebalance = http_json(f"{self.base_url}/api/backtest/{run_id}/rebalance")
         trades = http_json(f"{self.base_url}/api/backtest/{run_id}/trades")
         positions = http_json(f"{self.base_url}/api/backtest/{run_id}/positions?limit=2")
@@ -400,12 +403,61 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(sum(all_window["counts"].values()), all_window["comparable_days"])
         self.assertIn("hedge_positive", all_window["counts"])
         self.assertIn("hedge_negative", all_window["counts"])
+        diagnostics = diagnostics_response["strategy_diagnostics"]
+        self.assertEqual(diagnostics["window"]["key"], "all")
+        self.assertEqual(len(diagnostics["asset_effects"]), 3)
+        self.assertGreaterEqual(len(diagnostics["optimization_candidates"]), 2)
+        self.assertIn("stress_protection", diagnostics)
         self.assertGreaterEqual(len(rebalance["rebalance"]), 1)
         self.assertGreater(len(trades["trades"]), 0)
         self.assertLessEqual(len(positions["positions"]), 2)
         cached = http_json(f"{self.base_url}/api/backtest/run", {"config": run_config})
         self.assertEqual(cached["run_id"], run_id)
         self.assertTrue(cached["cache"]["hit"])
+
+    def test_csv_export_contains_selection_daily_prices_and_final_backtest_result(self) -> None:
+        result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        run_id = result["run_id"]
+        headers, body = http_get_raw(
+            f"{self.base_url}/api/backtest/{run_id}/export.csv"
+            "?start_date=2020-01-06&end_date=2020-01-10"
+            "&symbols=512890.SH,CBA21801"
+        )
+
+        self.assertEqual(headers["Content-Type"], "text/csv; charset=utf-8")
+        self.assertIn("attachment;", headers["Content-Disposition"])
+        decoded = body.decode("utf-8-sig")
+        rows = list(csv.reader(io.StringIO(decoded)))
+        self.assertIn(["选择开始时间", "2020-01-06"], rows)
+        self.assertIn(["选择结束时间", "2020-01-10"], rows)
+        selected_row = next(row for row in rows if row and row[0] == "选择标的")
+        self.assertIn("512890.SH 红利低波基金", selected_row[1])
+        self.assertIn("CBA21801 30年国债ETF", selected_row[1])
+        header_index = rows.index(["交易日", "选择标的代码", "标的名称", "实际行情代码", "实际行情名称", "当天收盘价", "币种"])
+        price_rows = []
+        for row in rows[header_index + 1 :]:
+            if not row:
+                break
+            price_rows.append(row)
+        self.assertTrue(price_rows)
+        self.assertEqual({row[1] for row in price_rows}, {"512890.SH", "CBA21801"})
+        self.assertTrue(all("2020-01-06" <= row[0] <= "2020-01-10" for row in price_rows))
+        self.assertIn(["最终回测结果", "指标", "数值"], rows)
+        self.assertTrue(any(row and row[0] == "最终回测结果" and row[1] == "年化收益" for row in rows))
+        self.assertTrue(any(row and row[0] == "最终回测结果" and row[1] == "最大回撤" for row in rows))
+
+    def test_csv_export_rejects_dates_outside_run_and_unselected_assets(self) -> None:
+        result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
+        run_id = result["run_id"]
+        invalid_urls = [
+            f"{self.base_url}/api/backtest/{run_id}/export.csv?start_date=2019-12-31&end_date=2020-01-10",
+            f"{self.base_url}/api/backtest/{run_id}/export.csv?symbols=VOO",
+        ]
+        opener = request.build_opener(request.ProxyHandler({}))
+        for url in invalid_urls:
+            with self.subTest(url=url), self.assertRaises(error.HTTPError) as raised:
+                opener.open(url, timeout=10)
+            self.assertEqual(raised.exception.code, 400)
 
     def test_backtest_history_leaderboard_and_delete(self) -> None:
         result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
@@ -459,6 +511,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"recoverApiConnection", decoded_app_js)
         self.assertIn(b"/daily-pnl", decoded_app_js)
         self.assertIn(b"/asset-comovement", decoded_app_js)
+        self.assertIn(b"/strategy-diagnostics", decoded_app_js)
+        self.assertIn(b"/export.csv", decoded_app_js)
         self.assertIn(b"rebalance_to_target", decoded_app_js)
         self.assertIn(b"tradeAssetName", decoded_app_js)
         self.assertIn(b"rebalanceAssetColumnName", decoded_app_js)
@@ -472,6 +526,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("当年收益（按原始资金）".encode("utf-8"), decoded_app_js)
         self.assertIn("对冲为正".encode("utf-8"), decoded_app_js)
         self.assertIn("对冲为负".encode("utf-8"), decoded_app_js)
+        self.assertIn("导出CSV".encode("utf-8"), decoded_app_js)
+        self.assertIn("删掉一个标的".encode("utf-8"), decoded_app_js)
 
         _styles_headers, styles_body = http_get_raw(
             f"{self.base_url}/static/styles.css",
@@ -651,8 +707,9 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260902-asset-comovement-1", detail)
-        self.assertIn("资产联动", detail)
+        self.assertIn("20260902-strategy-diagnostics-1", detail)
+        self.assertIn("策略诊断", detail)
+        self.assertIn("导出CSV", detail)
         self.assertIn("时间窗口", detail)
 
         with opener.open(f"{self.base_url}/backtest/permanent-investment/static/app.js", timeout=10) as resp:
