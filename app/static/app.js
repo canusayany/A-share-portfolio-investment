@@ -2,6 +2,7 @@ let config = null;
 let defaultConfigSnapshot = null;
 let currentRunId = null;
 let currentSummary = null;
+let currentRunConfig = null;
 let runHistory = [];
 let leaderboardHistory = [];
 let comparisonRunId = null;
@@ -56,6 +57,7 @@ const API_HEALTH_TIMEOUT_MS = 5000;
 let apiRecoveryPromise = null;
 let controlsEventController = null;
 let chartLibraryPromise = null;
+let toastTimer = null;
 
 function loadChartLibrary() {
   if (window.echarts) return Promise.resolve(window.echarts);
@@ -1965,6 +1967,22 @@ async function loadDailyPnlChart() {
   }
 }
 
+function showToast(text, isError = false) {
+  const toast = $("toast");
+  if (!toast) {
+    setMessage(text, isError);
+    return;
+  }
+  if (toastTimer) window.clearTimeout(toastTimer);
+  toast.textContent = text || "";
+  toast.className = isError ? "toast error" : "toast";
+  toast.hidden = false;
+  toastTimer = window.setTimeout(() => {
+    toast.hidden = true;
+    toastTimer = null;
+  }, 5000);
+}
+
 function resetStrategyDiagnostics() {
   strategyDiagnosticsRequestVersion += 1;
   strategyDiagnosticsCache.clear();
@@ -2165,34 +2183,70 @@ async function loadStrategyDiagnostics() {
   }
 }
 
-function openCsvExportDialog() {
+async function openCsvExportDialog() {
   if (!currentRunId) {
-    setMessage("请先运行或回放一条回测结果，再导出CSV", true);
+    showToast("请先运行或回放一条回测结果，再导出CSV", true);
     return;
   }
   const dialog = $("csvExportDialog");
-  const start = config?.start_date || currentSummary?.start_date || "";
-  const end = config?.end_date || currentSummary?.end_date || "";
+  const runId = currentRunId;
+  let exportConfig = null;
+  try {
+    const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`, { attempts: 1 });
+    if (currentRunId !== runId) return;
+    currentRunConfig = JSON.parse(JSON.stringify(entry.config));
+    currentSummary = entry.summary;
+    exportConfig = currentRunConfig;
+  } catch (loadError) {
+    showToast(`读取当前回测失败：${humanizeError(loadError.message)}`, true);
+    return;
+  }
+  if (!exportConfig) {
+    showToast("当前回测配置尚未加载，请重新打开该回测后再导出CSV", true);
+    return;
+  }
+  const start = exportConfig.start_date || currentSummary?.start_date || "";
+  const end = exportConfig.end_date || currentSummary?.end_date || "";
   if ($("csvExportStart")) {
-    $("csvExportStart").min = config?.start_date || start;
-    $("csvExportStart").max = config?.end_date || end;
+    $("csvExportStart").min = exportConfig.start_date || start;
+    $("csvExportStart").max = exportConfig.end_date || end;
     $("csvExportStart").value = start;
   }
   if ($("csvExportEnd")) {
-    $("csvExportEnd").min = config?.start_date || start;
-    $("csvExportEnd").max = config?.end_date || end;
+    $("csvExportEnd").min = exportConfig.start_date || start;
+    $("csvExportEnd").max = exportConfig.end_date || end;
     $("csvExportEnd").value = end;
   }
-  const assets = (config?.assets || []).filter((asset) => asset.enabled && Number(asset.target_weight || 0) > 0);
+  const assets = (exportConfig.assets || []).filter((asset) => asset.enabled && Number(asset.target_weight || 0) > 0);
+  const repoOption = (exportConfig.repo_options || []).find((option) => (
+    option.symbol === exportConfig.repo_symbol && (option.instrument_type || "repo") === "repo"
+  ));
+  const exportOptions = [
+    ...assets.map((asset) => ({
+      symbol: asset.symbol,
+      name: asset.choice_label || asset.name || asset.symbol,
+      detail: asset.symbol,
+    })),
+    {
+      symbol: "REPO",
+      name: "现金部分（含逆回购及应收分红）",
+      detail: "逐日市值、盈亏、收益与回撤",
+    },
+    ...(repoOption ? [{
+      symbol: repoOption.symbol,
+      name: repoOption.name || repoOption.symbol,
+      detail: `${repoOption.symbol} · 逆回购利率`,
+    }] : []),
+  ];
   if ($("csvExportAssets")) {
-    $("csvExportAssets").innerHTML = assets.map((asset) => `<label><input type="checkbox" value="${escapeHtml(asset.symbol)}" checked /><span><strong>${escapeHtml(asset.choice_label || asset.name || asset.symbol)}</strong><small>${escapeHtml(asset.symbol)}</small></span></label>`).join("");
+    $("csvExportAssets").innerHTML = exportOptions.map((option) => `<label><input type="checkbox" value="${escapeHtml(option.symbol)}" checked /><span><strong>${escapeHtml(option.name)}</strong><small>${escapeHtml(option.detail)}</small></span></label>`).join("");
   }
   if ($("csvExportError")) $("csvExportError").textContent = "";
   if (typeof dialog?.showModal === "function") dialog.showModal();
   else dialog?.setAttribute("open", "");
 }
 
-function downloadCsvExport() {
+async function downloadCsvExport() {
   const startInput = $("csvExportStart");
   const endInput = $("csvExportEnd");
   const error = $("csvExportError");
@@ -2207,17 +2261,54 @@ function downloadCsvExport() {
   }
   if (!symbols.length) {
     if (error) error.textContent = "请至少选择一个标的";
+    showToast("导出失败：请至少选择一个标的", true);
     return;
   }
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate, symbols: symbols.join(",") });
-  const link = document.createElement("a");
-  link.href = `${APP_BASE_PATH}/api/backtest/${encodeURIComponent(currentRunId)}/export.csv?${params}`;
-  link.download = `permanent-investment-${startDate.replaceAll("-", "")}-${endDate.replaceAll("-", "")}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  $("csvExportDialog")?.close();
-  setMessage(`正在导出 ${startDate} 至 ${endDate} 的CSV`);
+  const button = $("downloadCsv");
+  if (error) error.textContent = "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在导出";
+  }
+  try {
+    const response = await fetch(
+      `${APP_BASE_PATH}/api/backtest/${encodeURIComponent(currentRunId)}/export.csv?${params}`,
+      { method: "GET", cache: "no-store", credentials: "same-origin", headers: { Accept: "text/csv" } },
+    );
+    if (!response.ok) {
+      const responseText = await response.text();
+      let message = response.statusText || `HTTP ${response.status}`;
+      try {
+        message = JSON.parse(responseText).error || message;
+      } catch {
+        if (responseText.trim()) message = responseText.trim();
+      }
+      const responseError = new Error(message);
+      responseError.status = response.status;
+      throw responseError;
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `permanent-investment-${startDate.replaceAll("-", "")}-${endDate.replaceAll("-", "")}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    $("csvExportDialog")?.close();
+    showToast(`CSV已下载：${startDate} 至 ${endDate}`);
+  } catch (downloadError) {
+    const message = `导出失败：${humanizeError(downloadError.message)}`;
+    if (error) error.textContent = message;
+    showToast(message, true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "导出CSV";
+    }
+  }
 }
 
 const ASSET_COMOVEMENT_CATEGORIES = [
@@ -3294,6 +3385,7 @@ async function deleteHistoryRun(runId) {
     if (currentRunId === runId) {
       currentRunId = null;
       currentSummary = null;
+      currentRunConfig = null;
       resetDailyPnlChart();
       resetStrategyDiagnostics();
       resetAssetComovementChart();
@@ -3312,6 +3404,7 @@ async function replayHistoryRun(runId) {
     const chartReady = loadChartLibrary().catch((error) => console.warn(error));
     const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`);
     config = JSON.parse(JSON.stringify(entry.config));
+    currentRunConfig = JSON.parse(JSON.stringify(entry.config));
     renderControls();
     resetDailyPnlChart();
     resetStrategyDiagnostics();
@@ -3347,7 +3440,8 @@ async function runBacktest() {
   if (isMobileLayout()) setParameterPanel(false);
   setMessage("正在提交回测任务...");
   try {
-    const submittedConfig = compactConfigForRequest(readConfig());
+    const submittedFullConfig = readConfig();
+    const submittedConfig = compactConfigForRequest(submittedFullConfig);
     const chartReady = loadChartLibrary().catch((error) => console.warn(error));
     const job = await api("/api/backtest/start", {
       method: "POST",
@@ -3362,6 +3456,7 @@ async function runBacktest() {
     resetStrategyDiagnostics();
     resetAssetComovementChart();
     currentRunId = result.run_id;
+    currentRunConfig = JSON.parse(JSON.stringify(submittedFullConfig));
     if (result.status) renderStatus(result.status);
     renderSummary(result.summary);
     let finalSummary = result.summary;

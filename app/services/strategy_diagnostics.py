@@ -7,7 +7,8 @@ import io
 import math
 from typing import Any
 
-from app.config import normalize_config
+from app.config import normalize_config, selected_repo_option
+from app.db import json_loads
 from app.services.calendar import parse_date
 from app.services.backtest_engine import (
     ASSET_COMOVEMENT_EPSILON,
@@ -516,67 +517,310 @@ def strategy_diagnostics(
     }
 
 
+def _stored_backtest_daily_metrics(
+    conn,
+    run_id: str | None,
+    selected_assets: list[dict[str, Any]],
+    end_date: str,
+    include_cash: bool = False,
+) -> dict[tuple[str, str], dict[str, float | None]]:
+    if not run_id or (not selected_assets and not include_cash):
+        return {}
+    rows = conn.execute(
+        """
+        SELECT trade_date,total_asset_cny,flow_cny,daily_return,
+               cumulative_return,drawdown,payload_json
+        FROM portfolio_daily
+        WHERE run_id=? AND trade_date<=?
+        ORDER BY trade_date
+        """,
+        (run_id, end_date),
+    ).fetchall()
+    aliases = {
+        str(asset["symbol"]): list(
+            dict.fromkeys(
+                [
+                    str(asset["symbol"]),
+                    *(
+                        [str(asset["price_fallback"]["symbol"])]
+                        if isinstance(asset.get("price_fallback"), dict)
+                        and asset["price_fallback"].get("symbol")
+                        else []
+                    ),
+                    *(
+                        str(replacement["symbol"])
+                        for replacement in asset.get("replacement_assets", [])
+                        if isinstance(replacement, dict) and replacement.get("symbol")
+                    ),
+                ]
+            )
+        )
+        for asset in selected_assets
+    }
+    if include_cash:
+        aliases["REPO"] = ["REPO"]
+    previous_values = {symbol: 0.0 for symbol in aliases}
+    navs = {symbol: 1.0 for symbol in aliases}
+    peaks = {symbol: 1.0 for symbol in aliases}
+    result: dict[tuple[str, str], dict[str, float | None]] = {}
+    for row in rows:
+        trade_date = str(row["trade_date"])
+        payload = json_loads(row["payload_json"], {})
+        source_values = payload.get("values", {})
+        source_profits = payload.get("asset_daily_profit_cny")
+        for logical_symbol, group_aliases in aliases.items():
+            current_value = sum(float(source_values.get(alias, 0.0) or 0.0) for alias in group_aliases)
+            profit = (
+                sum(float(source_profits.get(alias, 0.0) or 0.0) for alias in group_aliases)
+                if isinstance(source_profits, dict)
+                else None
+            )
+            daily_return: float | None = None
+            if profit is not None:
+                capital_base = max(previous_values[logical_symbol], current_value - profit, 0.0)
+                daily_return = profit / capital_base if capital_base > 1e-9 else None
+                if daily_return is not None:
+                    navs[logical_symbol] = max(navs[logical_symbol] * (1.0 + daily_return), 0.0)
+                peaks[logical_symbol] = max(peaks[logical_symbol], navs[logical_symbol])
+            result[(trade_date, logical_symbol)] = {
+                "asset_value_cny": current_value,
+                "asset_daily_profit_cny": profit,
+                "asset_daily_return": daily_return,
+                "asset_cumulative_return": navs[logical_symbol] - 1.0 if profit is not None else None,
+                "asset_drawdown": (
+                    navs[logical_symbol] / peaks[logical_symbol] - 1.0
+                    if profit is not None and peaks[logical_symbol] > 1e-12
+                    else None
+                ),
+                "portfolio_total_asset_cny": float(row["total_asset_cny"]),
+                "portfolio_flow_cny": float(row["flow_cny"] or 0.0),
+                "portfolio_daily_return": float(row["daily_return"] or 0.0),
+                "portfolio_cumulative_return": float(row["cumulative_return"] or 0.0),
+                "portfolio_drawdown": float(row["drawdown"] or 0.0),
+            }
+            previous_values[logical_symbol] = current_value
+    return result
+
+
+def _cash_bucket_rows(
+    conn,
+    run_id: str | None,
+    repo_option: dict[str, Any],
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, Any]]:
+    if not run_id:
+        return []
+    metrics = _stored_backtest_daily_metrics(
+        conn,
+        run_id,
+        [],
+        end_date,
+        include_cash=True,
+    )
+    rows = conn.execute(
+        """
+        SELECT trade_date,payload_json
+        FROM portfolio_daily
+        WHERE run_id=? AND trade_date BETWEEN ? AND ?
+        ORDER BY trade_date
+        """,
+        (run_id, start_date, end_date),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        trade_date = str(row["trade_date"])
+        payload = json_loads(row["payload_json"], {})
+        cash_cny = float(payload.get("cash_cny", 0.0) or 0.0)
+        receivable_cny = float(payload.get("dividend_receivable_cny", 0.0) or 0.0)
+        repo_lots = int(payload.get("repo_lots", 0) or 0)
+        repo_symbol = str(payload.get("treasury_instrument") or repo_option.get("symbol") or "REPO")
+        result.append(
+            {
+                "trade_date": trade_date,
+                "logical_symbol": "REPO",
+                "logical_name": "现金部分（含逆回购及应收分红）",
+                "route_type": "现金管理",
+                "actual_symbol": repo_symbol,
+                "actual_name": str(repo_option.get("name") or repo_symbol),
+                "raw_data_symbol": repo_symbol,
+                "raw_close": None,
+                "adj_factor": None,
+                "split_scale": None,
+                "total_multiplier": None,
+                "used_close": None,
+                "event_note": (
+                    f"现金余额={cash_cny:.2f}元；应收分红={receivable_cny:.2f}元；"
+                    f"持有逆回购合约={repo_lots}笔"
+                ),
+                "currency": "CNY",
+                "source": "portfolio_daily",
+                **metrics.get((trade_date, "REPO"), {}),
+            }
+        )
+    return result
+
+
 def _raw_route_price_rows(
     conn,
     config: dict[str, Any],
     selected_assets: list[dict[str, Any]],
     start_date: str,
     end_date: str,
+    run_id: str | None = None,
 ) -> list[dict[str, Any]]:
     sim_assets = simulation_assets(selected_assets)
     symbols = [str(asset["symbol"]) for asset in sim_assets]
     if not symbols:
         return []
+    # Price continuity is path dependent: a split multiplier and the route in
+    # force immediately before a narrow export window both come from earlier
+    # observations.  Always reconstruct from the original backtest start, then
+    # emit only the user-selected dates.
+    calculation_start = str(config["start_date"])
     placeholders = ",".join("?" for _ in symbols)
     rows = conn.execute(
         f"""
-        SELECT symbol, trade_date, close, currency
+        SELECT prices.symbol,prices.trade_date,prices.close,prices.currency,prices.source,
+               adj_factors.adj_factor
         FROM prices
-        WHERE symbol IN ({placeholders}) AND trade_date BETWEEN ? AND ?
-        ORDER BY trade_date, symbol
+        LEFT JOIN adj_factors
+          ON adj_factors.symbol=prices.symbol AND adj_factors.trade_date=prices.trade_date
+        WHERE prices.symbol IN ({placeholders}) AND prices.trade_date BETWEEN ? AND ?
+        ORDER BY prices.trade_date,prices.symbol
         """,
-        (*symbols, start_date, end_date),
+        (*symbols, calculation_start, end_date),
     ).fetchall()
-    raw_by_symbol: dict[str, dict[str, tuple[float, str]]] = {symbol: {} for symbol in symbols}
+    raw_by_symbol: dict[str, dict[str, dict[str, Any]]] = {symbol: {} for symbol in symbols}
     for row in rows:
-        raw_by_symbol[str(row["symbol"])][str(row["trade_date"])] = (
-            float(row["close"]),
-            str(row["currency"] or "CNY"),
-        )
+        raw_by_symbol[str(row["symbol"])][str(row["trade_date"])] = {
+            "close": float(row["close"]),
+            "currency": str(row["currency"] or "CNY"),
+            "source": str(row["source"] or ""),
+            "adj_factor": float(row["adj_factor"]) if row["adj_factor"] not in (None, 0) else None,
+        }
+    share_scale_maps: dict[str, dict[str, float]] = {}
+    price_maps = load_price_map(
+        conn,
+        symbols,
+        calculation_start,
+        end_date,
+        share_splits=configured_share_splits(selected_assets),
+        share_scale_maps=share_scale_maps,
+    )
+    attach_proxy_price_maps(price_maps, selected_assets)
+    attach_nontradable_route_expense_drag(price_maps, selected_assets)
     names = {str(asset["symbol"]): _asset_label(asset) for asset in sim_assets}
+    asset_by_symbol = {str(asset["symbol"]): asset for asset in sim_assets}
     prepared_routes = prepare_active_asset_routes({**config, "assets": selected_assets})
-    all_dates = sorted({trade_date for values in raw_by_symbol.values() for trade_date in values})
+    all_dates = sorted({trade_date for values in price_maps.values() for trade_date in values})
     latest: dict[str, float | None] = {symbol: None for symbol in symbols}
+    previous_routes: dict[str, str] = {}
+    daily_metrics = _stored_backtest_daily_metrics(conn, run_id, selected_assets, end_date)
+    configured_splits = configured_share_splits(selected_assets)
     result: list[dict[str, Any]] = []
     for trade_date in all_dates:
-        for symbol, values in raw_by_symbol.items():
+        for symbol, values in price_maps.items():
             if trade_date in values:
-                latest[symbol] = values[trade_date][0]
+                latest[symbol] = values[trade_date]
         routes = active_route_symbols(parse_date(trade_date), latest, prepared_routes)
         for asset in selected_assets:
             logical_symbol = str(asset["symbol"])
             route_symbol = routes.get(logical_symbol)
-            current = raw_by_symbol.get(route_symbol or "", {}).get(trade_date)
-            if route_symbol is None or current is None:
+            used_close = price_maps.get(route_symbol or "", {}).get(trade_date)
+            if route_symbol is None or used_close is None:
                 continue
-            result.append(
-                {
-                    "trade_date": trade_date,
-                    "logical_symbol": logical_symbol,
-                    "logical_name": _asset_label(asset),
-                    "actual_symbol": route_symbol,
-                    "actual_name": names.get(route_symbol, route_symbol),
-                    "close": current[0],
-                    "currency": current[1],
-                }
+            proxy_symbol = (
+                str(asset["price_fallback"]["symbol"])
+                if isinstance(asset.get("price_fallback"), dict) and asset["price_fallback"].get("symbol")
+                else None
             )
+            route_type = "上市前代理" if route_symbol == proxy_symbol else (
+                "替换ETF" if route_symbol != logical_symbol else "原始标的"
+            )
+            raw_data_symbol = route_symbol
+            raw = raw_by_symbol.get(route_symbol, {}).get(trade_date)
+            if raw is None and route_symbol == proxy_symbol:
+                raw_data_symbol = logical_symbol
+                raw = raw_by_symbol.get(logical_symbol, {}).get(trade_date)
+            raw_close = float(raw["close"]) if raw else None
+            split_scale = share_scale_maps.get(raw_data_symbol, {}).get(trade_date, 1.0)
+            total_multiplier = (
+                float(used_close) / raw_close
+                if raw_close is not None and abs(raw_close) > 1e-18
+                else None
+            )
+            notes: list[str] = []
+            configured_split = configured_splits.get(raw_data_symbol, {}).get(trade_date)
+            if configured_split:
+                notes.append(f"基金份额拆分/合并，连续价倍率={configured_split:g}")
+            previous_route = previous_routes.get(logical_symbol)
+            if previous_route and previous_route != route_symbol:
+                notes.append(f"路线切换 {previous_route}→{route_symbol}，禁止跨代码直接比较价格")
+            if route_type == "上市前代理":
+                notes.append("上市前代理行情")
+            if start_date <= trade_date <= end_date:
+                metric = daily_metrics.get((trade_date, logical_symbol), {})
+                route_asset = asset_by_symbol.get(route_symbol, {})
+                result.append(
+                    {
+                        "trade_date": trade_date,
+                        "logical_symbol": logical_symbol,
+                        "logical_name": _asset_label(asset),
+                        "route_type": route_type,
+                        "actual_symbol": route_symbol,
+                        "actual_name": names.get(route_symbol, route_symbol),
+                        "raw_data_symbol": raw_data_symbol,
+                        "raw_close": raw_close,
+                        "adj_factor": raw.get("adj_factor") if raw else None,
+                        "split_scale": split_scale,
+                        "total_multiplier": total_multiplier,
+                        "used_close": float(used_close),
+                        "event_note": "；".join(notes),
+                        "currency": raw.get("currency") if raw else str(route_asset.get("currency") or "CNY"),
+                        "source": raw.get("source") if raw else "",
+                        **metric,
+                    }
+                )
+            previous_routes[logical_symbol] = route_symbol
     return result
+
+
+def _raw_repo_rate_rows(
+    conn,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "trade_date": str(row["trade_date"]),
+            "symbol": str(row["symbol"]),
+            "close_rate": float(row["close_rate"]),
+            "source": str(row["source"] or ""),
+        }
+        for row in conn.execute(
+            """
+            SELECT symbol, trade_date, close_rate, source
+            FROM repo_rates
+            WHERE symbol=? AND trade_date BETWEEN ? AND ?
+            ORDER BY trade_date
+            """,
+            (symbol, start_date, end_date),
+        ).fetchall()
+    ]
+
+
+def _csv_number(row: dict[str, Any], key: str) -> str:
+    value = row.get(key)
+    return "" if value is None else format(float(value), ".12g")
 
 
 def build_backtest_csv(
     conn,
     user_config: dict[str, Any],
     stored_summary: dict[str, Any],
+    run_id: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     symbols: list[str] | None = None,
@@ -584,8 +828,8 @@ def build_backtest_csv(
     config, configuration_adjustments = _normalize_historical_config(user_config)
     configured_start = str(config["start_date"])
     configured_end = str(config["end_date"])
-    selected_start = str(start_date or stored_summary.get("start_date") or configured_start)
-    selected_end = str(end_date or stored_summary.get("end_date") or configured_end)
+    selected_start = str(start_date or configured_start)
+    selected_end = str(end_date or configured_end)
     try:
         start_day = parse_date(selected_start)
         end_day = parse_date(selected_end)
@@ -597,14 +841,50 @@ def build_backtest_csv(
         raise ValueError("导出时间必须位于原回测配置区间内")
 
     available_assets = {str(asset["symbol"]): asset for asset in _selected_assets(config)}
-    requested_symbols = list(dict.fromkeys(symbol for symbol in (symbols or available_assets.keys()) if symbol))
-    invalid = [symbol for symbol in requested_symbols if symbol not in available_assets]
+    repo_option = selected_repo_option(config)
+    selected_repo_symbol = (
+        str(repo_option["symbol"])
+        if repo_option.get("instrument_type", "repo") == "repo"
+        else None
+    )
+    available_symbols = [*available_assets]
+    available_symbols.append("REPO")
+    if selected_repo_symbol:
+        available_symbols.append(selected_repo_symbol)
+    requested_symbols = list(dict.fromkeys(symbol for symbol in (symbols or available_symbols) if symbol))
+    invalid = [symbol for symbol in requested_symbols if symbol not in available_symbols]
     if invalid:
         raise ValueError(f"导出标的不属于当前回测：{', '.join(invalid)}")
     if not requested_symbols:
         raise ValueError("至少选择一个导出标的")
-    selected_assets = [available_assets[symbol] for symbol in requested_symbols]
-    price_rows = _raw_route_price_rows(conn, config, selected_assets, selected_start, selected_end)
+    selected_assets = [available_assets[symbol] for symbol in requested_symbols if symbol in available_assets]
+    include_cash = "REPO" in requested_symbols
+    include_repo = bool(selected_repo_symbol and selected_repo_symbol in requested_symbols)
+    price_rows = _raw_route_price_rows(
+        conn,
+        config,
+        selected_assets,
+        selected_start,
+        selected_end,
+        run_id=run_id,
+    )
+    if include_cash:
+        price_rows.extend(
+            _cash_bucket_rows(
+                conn,
+                run_id,
+                repo_option,
+                selected_start,
+                selected_end,
+            )
+        )
+    row_order = {symbol: index for index, symbol in enumerate(requested_symbols)}
+    price_rows.sort(key=lambda row: (row["trade_date"], row_order.get(row["logical_symbol"], len(row_order))))
+    repo_rate_rows = (
+        _raw_repo_rate_rows(conn, selected_repo_symbol, selected_start, selected_end)
+        if include_repo and selected_repo_symbol
+        else []
+    )
 
     use_stored_summary = selected_start == configured_start and selected_end == configured_end
     if use_stored_summary:
@@ -623,25 +903,100 @@ def build_backtest_csv(
     writer.writerow(
         [
             "选择标的",
-            "；".join(f"{asset['symbol']} {_asset_label(asset)}" for asset in selected_assets),
+            "；".join(
+                f"{symbol} "
+                + (
+                    _asset_label(available_assets[symbol])
+                    if symbol in available_assets
+                    else "现金部分（含逆回购及应收分红）"
+                    if symbol == "REPO"
+                    else str(repo_option.get("name") or symbol)
+                )
+                for symbol in requested_symbols
+            ),
         ]
     )
     if configuration_adjustments:
         writer.writerow(["配置兼容调整", "；".join(configuration_adjustments)])
+    writer.writerow(
+        [
+            "价格与收益口径",
+            "原始收盘价仅供核对；收益和回撤以回测使用价、资产桶和组合列为准，禁止跨路线代码直接比较价格；累计收益和回撤为原回测全程截至当日口径，底部区间结果按导出日期重算",
+        ]
+    )
     writer.writerow([])
-    writer.writerow(["交易日", "选择标的代码", "标的名称", "实际行情代码", "实际行情名称", "当天收盘价", "币种"])
+    writer.writerow(
+        [
+            "交易日",
+            "选择标的代码",
+            "标的名称",
+            "路线类型",
+            "实际行情代码",
+            "实际行情名称",
+            "原始数据代码",
+            "原始收盘价",
+            "行情复权因子",
+            "拆分连续倍率",
+            "回测价格总倍率",
+            "回测使用收盘价",
+            "事件说明",
+            "资产桶市值(元)",
+            "资产桶单日盈亏(元)",
+            "资产桶单日收益(小数)",
+            "资产桶累计收益(小数)",
+            "资产桶回撤(小数)",
+            "组合总资产(元)",
+            "外部现金流(元)",
+            "组合单日收益(小数)",
+            "组合累计收益(小数)",
+            "组合回撤(小数)",
+            "币种",
+            "数据源",
+        ]
+    )
     for row in price_rows:
         writer.writerow(
             [
                 row["trade_date"],
                 row["logical_symbol"],
                 row["logical_name"],
+                row["route_type"],
                 row["actual_symbol"],
                 row["actual_name"],
-                format(float(row["close"]), ".10g"),
+                row["raw_data_symbol"],
+                _csv_number(row, "raw_close"),
+                _csv_number(row, "adj_factor"),
+                _csv_number(row, "split_scale"),
+                _csv_number(row, "total_multiplier"),
+                _csv_number(row, "used_close"),
+                row["event_note"],
+                _csv_number(row, "asset_value_cny"),
+                _csv_number(row, "asset_daily_profit_cny"),
+                _csv_number(row, "asset_daily_return"),
+                _csv_number(row, "asset_cumulative_return"),
+                _csv_number(row, "asset_drawdown"),
+                _csv_number(row, "portfolio_total_asset_cny"),
+                _csv_number(row, "portfolio_flow_cny"),
+                _csv_number(row, "portfolio_daily_return"),
+                _csv_number(row, "portfolio_cumulative_return"),
+                _csv_number(row, "portfolio_drawdown"),
                 row["currency"],
+                row["source"],
             ]
         )
+    if include_repo:
+        writer.writerow([])
+        writer.writerow(["逆回购交易日", "逆回购代码", "逆回购名称", "收盘年化利率(%)", "数据源"])
+        for row in repo_rate_rows:
+            writer.writerow(
+                [
+                    row["trade_date"],
+                    row["symbol"],
+                    repo_option.get("name") or row["symbol"],
+                    format(float(row["close_rate"]), ".10g"),
+                    row["source"],
+                ]
+            )
     writer.writerow([])
     writer.writerow(["最终回测结果", "指标", "数值"])
     summary_rows = (

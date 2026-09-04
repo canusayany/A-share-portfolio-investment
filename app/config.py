@@ -116,7 +116,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "choice_label": "沪深300 510300",
         "inception_date": "2012-05-04",
         "trade_start_date": "2012-05-28",
-        "allocation_start_date": "2013-01-01",
+        "auto_switch_on_trade_start": True,
         "management_fee": 0.0015,
         "custodian_fee": 0.0005,
         "price_fallback": {
@@ -303,6 +303,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
                 "allocation_start_date": "2021-01-01",
                 "management_fee": 0.0015,
                 "custodian_fee": 0.0005,
+                "auto_switch_on_trade_start": True,
             }
         ],
     },

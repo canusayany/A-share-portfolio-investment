@@ -1103,7 +1103,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertFalse(has_investable_asset_target({"REPO": 1.0}))
         self.assertTrue(has_investable_asset_target({"VOO": 0.2, "REPO": 0.8}))
 
-    def test_hs300_price_proxy_switches_to_510300_from_2013(self) -> None:
+    def test_hs300_proxy_switches_value_to_510300_at_first_tradable_open(self) -> None:
         db_path, cfg = build_synced_db("2012-01-01", "2013-01-31")
         cfg["rebalance_frequency"] = "yearly"
         cfg["monthly_spend_cny"] = 0.0
@@ -1116,7 +1116,10 @@ class BacktestEngineTests(unittest.TestCase):
             result = run_backtest(conn, cfg)
             trades = rows_to_dicts(
                 conn.execute(
-                    "SELECT trade_date, symbol, side FROM trades WHERE run_id=? ORDER BY trade_date, side",
+                    """
+                    SELECT trade_date,symbol,side,quantity,price,gross_amount,fee,reason
+                    FROM trades WHERE run_id=? ORDER BY trade_date,side
+                    """,
                     (result["run_id"],),
                 )
             )
@@ -1128,8 +1131,24 @@ class BacktestEngineTests(unittest.TestCase):
             )
 
         self.assertTrue(any(trade["symbol"] == "160706" and trade["side"] == "BUY" for trade in trades))
-        self.assertTrue(any(trade["symbol"] == "160706" and trade["side"] == "SELL" and trade["trade_date"] >= "2013-01-01" for trade in trades))
-        self.assertTrue(any(trade["symbol"] == "510300.SH" and trade["side"] == "BUY" and trade["trade_date"] >= "2013-01-01" for trade in trades))
+        proxy_sell = next(
+            trade
+            for trade in trades
+            if trade["symbol"] == "160706" and trade["side"] == "SELL" and trade["reason"] == "asset_replacement"
+        )
+        etf_buy = next(
+            trade
+            for trade in trades
+            if trade["symbol"] == "510300.SH" and trade["side"] == "BUY" and trade["reason"] == "asset_replacement"
+        )
+        self.assertEqual(proxy_sell["trade_date"], "2012-05-28")
+        self.assertEqual(etf_buy["trade_date"], "2012-05-28")
+        self.assertFalse(any(trade["trade_date"] == "2012-05-28" and trade["reason"] == "rebalance" for trade in trades))
+        net_proceeds = float(proxy_sell["gross_amount"]) - float(proxy_sell["fee"])
+        replacement_cost = float(etf_buy["gross_amount"]) + float(etf_buy["fee"])
+        self.assertGreaterEqual(net_proceeds, replacement_cost)
+        self.assertLess(net_proceeds - replacement_cost, float(etf_buy["price"]) * 100.0 + 1.0)
+        self.assertGreater(float(etf_buy["gross_amount"]) / float(proxy_sell["gross_amount"]), 0.995)
         first_targets = json.loads(rebalances[0]["payload_json"])["targets"]
         switch_targets = json.loads(rebalances[1]["payload_json"])["targets"]
         self.assertIn("160706", first_targets)
@@ -2111,6 +2130,7 @@ class BacktestEngineTests(unittest.TestCase):
                 "start_date": "2020-12-21",
                 "end_date": "2021-07-02",
                 "monthly_spend_cny": 0,
+                "annual_rebalance_month": 6,
             }
         )
         for asset in cfg["assets"]:
@@ -2121,26 +2141,59 @@ class BacktestEngineTests(unittest.TestCase):
         init_db(db_path)
         with db_session(db_path) as conn:
             seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
+            # The generic fixture includes New Year's Day. Remove the benchmark
+            # observation so the first real reference-market session is Jan 4.
+            conn.execute("DELETE FROM prices WHERE symbol='000300.SH' AND trade_date='2021-01-01'")
             result = run_backtest(conn, cfg)
-            trades = rows_to_dicts(
+            switch_trades = rows_to_dicts(
                 conn.execute(
-                    "SELECT trade_date,symbol,side FROM trades WHERE run_id=? ORDER BY trade_date,side",
+                    """
+                    SELECT trade_date,symbol,side,quantity,price,gross_amount,fee,reason,payload_json
+                    FROM trades
+                    WHERE run_id=? AND reason='asset_replacement'
+                    ORDER BY trade_date,side
+                    """,
                     (result["run_id"],),
                 )
             )
-        self.assertTrue(any(row["symbol"] == "518880.SH" and row["side"] == "BUY" for row in trades))
-        self.assertTrue(
-            any(
-                row["symbol"] == "518880.SH" and row["side"] == "SELL" and row["trade_date"] >= "2021-01-01"
-                for row in trades
+            switch_daily = dict(
+                conn.execute(
+                    """
+                    SELECT trade_date,daily_return,drawdown,payload_json
+                    FROM portfolio_daily WHERE run_id=? AND trade_date='2021-01-04'
+                    """,
+                    (result["run_id"],),
+                ).fetchone()
             )
+            jan_rebalances = conn.execute(
+                "SELECT COUNT(*) AS count FROM rebalance_events WHERE run_id=? AND rebalance_date='2021-01-04'",
+                (result["run_id"],),
+            ).fetchone()["count"]
+
+        self.assertEqual(
+            {(row["symbol"], row["side"]) for row in switch_trades},
+            {("518880.SH", "SELL"), ("518850.SH", "BUY")},
         )
-        self.assertTrue(
-            any(
-                row["symbol"] == "518850.SH" and row["side"] == "BUY" and row["trade_date"] >= "2021-01-01"
-                for row in trades
-            )
+        self.assertTrue(all(row["trade_date"] == "2021-01-04" for row in switch_trades))
+        self.assertTrue(all(row["reason"] == "asset_replacement" for row in switch_trades))
+        self.assertEqual(jan_rebalances, 0)
+        sold = next(row for row in switch_trades if row["side"] == "SELL")
+        bought = next(row for row in switch_trades if row["side"] == "BUY")
+        proceeds = sold["gross_amount"] - sold["fee"]
+        spent = bought["gross_amount"] + bought["fee"]
+        residual_cash = proceeds - spent
+        self.assertGreaterEqual(residual_cash, -1e-8)
+        self.assertEqual(int(bought["quantity"]) % 100, 0)
+        self.assertAlmostEqual(
+            sold["gross_amount"] - (bought["gross_amount"] + residual_cash),
+            sold["fee"] + bought["fee"],
+            places=6,
         )
+        self.assertGreater(float(switch_daily["daily_return"]), -0.10)
+        self.assertGreater(float(switch_daily["drawdown"]), -0.10)
+        self.assertEqual(result["summary"]["route_switch_count"], 1)
+        self.assertEqual(result["summary"]["route_switches"][0]["from_symbol"], "518880.SH")
+        self.assertEqual(result["summary"]["route_switches"][0]["to_symbol"], "518850.SH")
         self.assertGreater(result["summary"]["total_dividend_cny"], 0.0)
 
     def test_money_fund_target_falls_back_to_repo_until_trade_start_and_price(self) -> None:

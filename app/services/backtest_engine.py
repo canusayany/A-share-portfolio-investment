@@ -50,7 +50,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 44
+BACKTEST_ENGINE_VERSION = 46
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -2190,11 +2190,11 @@ def _execute_auto_route_switches(
     assets_by_symbol: dict[str, dict[str, Any]],
     allow_fractional_us_shares: bool,
 ) -> list[dict[str, Any]]:
-    """Move an existing proxy holding into its real ETF at the first open.
+    """Move an existing sleeve holding into its next configured route at the first open.
 
-    Only replacements explicitly marked ``auto_switch_on_trade_start`` are
-    eligible.  The old proxy is valued at its latest previously published
-    close, while the new ETF uses that session's real opening quote.
+    Only destination routes explicitly marked ``auto_switch_on_trade_start``
+    are eligible.  A non-tradable proxy is valued at its latest previously
+    published close, while the new ETF uses that session's real opening quote.
     """
     switches: list[dict[str, Any]] = []
     for logical_symbol, new_symbol in current_routes.items():

@@ -4,9 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260902-responsive-4" />
+    <link rel="stylesheet" href="static/styles.css?v=20260904-current-run-cash-export-3" />
   </head>
   <body class="history-collapsed">
+    <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
     <div id="identityGate" class="identity-gate" hidden>
       <section class="identity-dialog" role="dialog" aria-modal="true" aria-labelledby="identityTitle">
         <div class="identity-mark" aria-hidden="true">K</div>
@@ -553,7 +554,7 @@
           <div><span>回测数据导出</span><h2 id="csvExportTitle">导出CSV</h2></div>
           <button type="submit" value="cancel" aria-label="关闭">×</button>
         </div>
-        <p>文件顶部记录选择时间与标的，随后列出每个交易日的实际行情代码、名称和收盘价，底部附该时间段的最终回测结果。</p>
+        <p>时间和标的从服务器上的当前回测读取；文件同时列出原始价、拆分倍率、回测使用价、实际路线、现金部分、资产桶及组合收益与回撤。逆回购利率可单独选择导出。</p>
         <div class="csv-export-dates">
           <label for="csvExportStart">开始时间<input id="csvExportStart" type="date" required /></label>
           <label for="csvExportEnd">结束时间<input id="csvExportEnd" type="date" required /></label>
@@ -565,6 +566,6 @@
         </div>
       </form>
     </dialog>
-  <script src="static/app.js?v=20260902-responsive-4"></script>
+  <script src="static/app.js?v=20260904-current-run-cash-export-3"></script>
   </body>
 </html>

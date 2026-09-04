@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import unittest
 
 from app.db import db_session
 from app.services.backtest_engine import run_backtest
 from app.services.strategy_diagnostics import (
+    build_backtest_csv,
     diagnostic_window_config,
     leave_one_out_configs,
     local_weight_candidate_configs,
@@ -17,6 +20,98 @@ from tests.helpers import build_synced_db
 
 
 class StrategyDiagnosticsTests(unittest.TestCase):
+    def test_csv_uses_split_continuous_price_and_persisted_returns(self) -> None:
+        db_path, config = build_synced_db("2021-10-20", "2021-10-27")
+        for asset in config["assets"]:
+            selected = asset["symbol"] == "512890.SH"
+            asset["enabled"] = selected
+            asset["target_weight"] = 0.90 if selected else 0.0
+
+        with db_session(db_path) as conn:
+            conn.execute(
+                """
+                UPDATE prices
+                SET open=1.639,high=1.639,low=1.639,close=1.639,adj_close=1.639
+                WHERE symbol='512890.SH' AND trade_date<'2021-10-25'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE prices
+                SET open=0.801,high=0.801,low=0.801,close=0.801,adj_close=0.801
+                WHERE symbol='512890.SH' AND trade_date>='2021-10-25'
+                """
+            )
+            result = run_backtest(conn, config)
+            content, _filename = build_backtest_csv(
+                conn,
+                config,
+                result["summary"],
+                run_id=result["run_id"],
+                start_date="2021-10-25",
+                end_date="2021-10-27",
+                symbols=["512890.SH"],
+            )
+
+        rows = list(csv.reader(io.StringIO(content.decode("utf-8-sig"))))
+        header = next(row for row in rows if row and row[0] == "交易日")
+        split_row = next(row for row in rows if row and row[0] == "2021-10-25" and row[1] == "512890.SH")
+        values = dict(zip(header, split_row))
+        self.assertAlmostEqual(float(values["原始收盘价"]), 0.801)
+        self.assertAlmostEqual(float(values["拆分连续倍率"]), 2.0)
+        self.assertAlmostEqual(float(values["回测使用收盘价"]), 1.602)
+        self.assertIn("基金份额拆分/合并", values["事件说明"])
+        self.assertGreater(float(values["资产桶单日收益(小数)"]), -0.10)
+        self.assertGreater(float(values["组合单日收益(小数)"]), -0.10)
+        self.assertGreater(float(values["组合回撤(小数)"]), -0.10)
+
+    def test_csv_marks_route_switch_without_turning_price_scale_into_a_loss(self) -> None:
+        db_path, config = build_synced_db("2023-06-08", "2023-06-16")
+        for asset in config["assets"]:
+            selected = asset["symbol"] == "CBA21801"
+            asset["enabled"] = selected
+            asset["target_weight"] = 0.90 if selected else 0.0
+
+        with db_session(db_path) as conn:
+            conn.execute(
+                """
+                UPDATE prices
+                SET open=197.971,high=197.971,low=197.971,close=197.971,adj_close=197.971
+                WHERE symbol='CBA21801'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE prices
+                SET open=100.98,high=100.98,low=100.98,close=100.98,adj_close=100.98
+                WHERE symbol='511090.SH'
+                """
+            )
+            result = run_backtest(conn, config)
+            content, _filename = build_backtest_csv(
+                conn,
+                config,
+                result["summary"],
+                run_id=result["run_id"],
+                start_date="2023-06-13",
+                end_date="2023-06-16",
+                symbols=["CBA21801"],
+            )
+
+        rows = list(csv.reader(io.StringIO(content.decode("utf-8-sig"))))
+        header = next(row for row in rows if row and row[0] == "交易日")
+        switch_row = next(row for row in rows if row and row[0] == "2023-06-13" and row[1] == "CBA21801")
+        values = dict(zip(header, switch_row))
+        self.assertEqual(values["路线类型"], "替换ETF")
+        self.assertEqual(values["实际行情代码"], "511090.SH")
+        self.assertAlmostEqual(float(values["原始收盘价"]), 100.98)
+        self.assertAlmostEqual(float(values["回测使用收盘价"]), 100.98)
+        self.assertIn("路线切换 CBA21801→511090.SH", values["事件说明"])
+        self.assertIn("禁止跨代码直接比较价格", values["事件说明"])
+        self.assertGreater(float(values["资产桶单日收益(小数)"]), -0.10)
+        self.assertGreater(float(values["组合单日收益(小数)"]), -0.10)
+        self.assertGreater(float(values["组合回撤(小数)"]), -0.10)
+
     def test_historical_rerun_replaces_retired_repo_selection_with_current_default(self) -> None:
         _db_path, config = build_synced_db("2020-01-01", "2020-02-28")
         config["repo_symbol"] = "511260.SH"

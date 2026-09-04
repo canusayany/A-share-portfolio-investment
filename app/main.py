@@ -1723,6 +1723,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     conn,
                     json_loads(run["config_json"], {}),
                     json_loads(run["summary_json"], {}),
+                    run_id=run_id,
                     start_date=(query.get("start_date") or [None])[0],
                     end_date=(query.get("end_date") or [None])[0],
                     symbols=selected_symbols or None,

@@ -421,7 +421,7 @@ class ApiTests(unittest.TestCase):
         headers, body = http_get_raw(
             f"{self.base_url}/api/backtest/{run_id}/export.csv"
             "?start_date=2020-01-06&end_date=2020-01-10"
-            "&symbols=512890.SH,CBA21801"
+            "&symbols=512890.SH,CBA21801,REPO,204001"
         )
 
         self.assertEqual(headers["Content-Type"], "text/csv; charset=utf-8")
@@ -433,18 +433,121 @@ class ApiTests(unittest.TestCase):
         selected_row = next(row for row in rows if row and row[0] == "选择标的")
         self.assertIn("512890.SH 红利低波基金", selected_row[1])
         self.assertIn("CBA21801 30年国债ETF", selected_row[1])
-        header_index = rows.index(["交易日", "选择标的代码", "标的名称", "实际行情代码", "实际行情名称", "当天收盘价", "币种"])
+        self.assertIn("REPO 现金部分（含逆回购及应收分红）", selected_row[1])
+        self.assertIn("204001 1天国债逆回购", selected_row[1])
+        metric_row = next(row for row in rows if row and row[0] == "价格与收益口径")
+        self.assertIn("禁止跨路线代码直接比较价格", metric_row[1])
+        price_header = [
+            "交易日",
+            "选择标的代码",
+            "标的名称",
+            "路线类型",
+            "实际行情代码",
+            "实际行情名称",
+            "原始数据代码",
+            "原始收盘价",
+            "行情复权因子",
+            "拆分连续倍率",
+            "回测价格总倍率",
+            "回测使用收盘价",
+            "事件说明",
+            "资产桶市值(元)",
+            "资产桶单日盈亏(元)",
+            "资产桶单日收益(小数)",
+            "资产桶累计收益(小数)",
+            "资产桶回撤(小数)",
+            "组合总资产(元)",
+            "外部现金流(元)",
+            "组合单日收益(小数)",
+            "组合累计收益(小数)",
+            "组合回撤(小数)",
+            "币种",
+            "数据源",
+        ]
+        header_index = rows.index(price_header)
         price_rows = []
         for row in rows[header_index + 1 :]:
             if not row:
                 break
             price_rows.append(row)
         self.assertTrue(price_rows)
-        self.assertEqual({row[1] for row in price_rows}, {"512890.SH", "CBA21801"})
+        self.assertEqual({row[1] for row in price_rows}, {"512890.SH", "CBA21801", "REPO"})
         self.assertTrue(all("2020-01-06" <= row[0] <= "2020-01-10" for row in price_rows))
+        self.assertTrue(all(len(row) == len(price_header) for row in price_rows))
+        market_rows = [row for row in price_rows if row[1] != "REPO"]
+        cash_rows = [row for row in price_rows if row[1] == "REPO"]
+        self.assertTrue(all(row[11] for row in market_rows))
+        self.assertTrue(all(row[15] for row in price_rows))
+        self.assertTrue(all(row[20] for row in price_rows))
+        self.assertTrue(all(row[22] for row in price_rows))
+        self.assertTrue(cash_rows)
+        self.assertTrue(all(row[3] == "现金管理" for row in cash_rows))
+        self.assertTrue(all("现金余额=" in row[12] and "持有逆回购合约=" in row[12] for row in cash_rows))
+        self.assertTrue(all(row[24] == "portfolio_daily" for row in cash_rows))
+        series = http_json(f"{self.base_url}/api/backtest/{run_id}/series")["series"]
+        series_by_date = {row["trade_date"]: row for row in series}
+        cash_sample = cash_rows[0]
+        source_sample = series_by_date[cash_sample[0]]["payload"]
+        self.assertAlmostEqual(float(cash_sample[13]), float(source_sample["values"]["REPO"]), places=6)
+        self.assertAlmostEqual(
+            float(cash_sample[14]),
+            float(source_sample["asset_daily_profit_cny"]["REPO"]),
+            places=6,
+        )
+        repo_header = ["逆回购交易日", "逆回购代码", "逆回购名称", "收盘年化利率(%)", "数据源"]
+        repo_header_index = rows.index(repo_header)
+        repo_rows = []
+        for row in rows[repo_header_index + 1 :]:
+            if not row:
+                break
+            repo_rows.append(row)
+        self.assertTrue(repo_rows)
+        self.assertEqual({row[1] for row in repo_rows}, {"204001"})
+        self.assertTrue(all("2020-01-06" <= row[0] <= "2020-01-10" for row in repo_rows))
         self.assertIn(["最终回测结果", "指标", "数值"], rows)
         self.assertTrue(any(row and row[0] == "最终回测结果" and row[1] == "年化收益" for row in rows))
         self.assertTrue(any(row and row[0] == "最终回测结果" and row[1] == "最大回撤" for row in rows))
+
+        _default_headers, default_body = http_get_raw(
+            f"{self.base_url}/api/backtest/{run_id}/export.csv"
+        )
+        default_rows = list(csv.reader(io.StringIO(default_body.decode("utf-8-sig"))))
+        self.assertIn(["选择开始时间", self.config["start_date"]], default_rows)
+        self.assertIn(["选择结束时间", self.config["end_date"]], default_rows)
+        default_selection = next(row for row in default_rows if row and row[0] == "选择标的")
+        self.assertIn("REPO 现金部分（含逆回购及应收分红）", default_selection[1])
+        self.assertIn("204001 1天国债逆回购", default_selection[1])
+        self.assertIn(repo_header, default_rows)
+
+    def test_csv_export_uses_saved_run_assets_and_supports_cash_only(self) -> None:
+        run_config = json.loads(json.dumps(self.config))
+        for asset in run_config["assets"]:
+            if asset["symbol"] == "512890.SH":
+                asset["enabled"] = False
+                asset["target_weight"] = 0.0
+            elif asset["symbol"] == "510300.SH":
+                asset["enabled"] = True
+                asset["target_weight"] = 0.25
+        result = http_json(f"{self.base_url}/api/backtest/run", {"config": run_config})
+        run_id = result["run_id"]
+        detail = http_json(f"{self.base_url}/api/backtest/{run_id}")
+        selected = {
+            asset["symbol"]
+            for asset in detail["config"]["assets"]
+            if asset["enabled"] and float(asset["target_weight"]) > 0
+        }
+        self.assertIn("510300.SH", selected)
+        self.assertNotIn("512890.SH", selected)
+
+        _headers, body = http_get_raw(
+            f"{self.base_url}/api/backtest/{run_id}/export.csv?symbols=510300.SH,REPO"
+        )
+        rows = list(csv.reader(io.StringIO(body.decode("utf-8-sig"))))
+        selected_row = next(row for row in rows if row and row[0] == "选择标的")
+        self.assertIn("510300.SH 沪深300 510300", selected_row[1])
+        self.assertIn("REPO 现金部分（含逆回购及应收分红）", selected_row[1])
+        self.assertNotIn("512890.SH", selected_row[1])
+        self.assertTrue(any(row and len(row) > 1 and row[1] == "REPO" for row in rows))
 
     def test_csv_export_rejects_dates_outside_run_and_unselected_assets(self) -> None:
         result = http_json(f"{self.base_url}/api/backtest/run", {"config": self.config})
@@ -513,6 +616,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"/asset-comovement", decoded_app_js)
         self.assertIn(b"/strategy-diagnostics", decoded_app_js)
         self.assertIn(b"/export.csv", decoded_app_js)
+        self.assertIn(b"currentRunConfig", decoded_app_js)
+        self.assertIn(b"response.blob()", decoded_app_js)
+        self.assertIn(b"showToast(message, true)", decoded_app_js)
+        self.assertIn(b'symbol: "REPO"', decoded_app_js)
+        self.assertIn(b"await api(`/api/backtest/${encodeURIComponent(runId)}`", decoded_app_js)
         self.assertIn(b"rebalance_to_target", decoded_app_js)
         self.assertIn(b"tradeAssetName", decoded_app_js)
         self.assertIn(b"rebalanceAssetColumnName", decoded_app_js)
@@ -707,7 +815,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260902-responsive-4", detail)
+        self.assertIn("20260904-current-run-cash-export-3", detail)
         self.assertIn("策略诊断", detail)
         self.assertIn("导出CSV", detail)
         self.assertIn("时间窗口", detail)

@@ -326,8 +326,8 @@ class DbAndSyncTests(unittest.TestCase):
         finally:
             data_sync_module.missing_date_ranges = original_missing
 
-        self.assertEqual(full_calls, [("2012-01-01", "2012-12-31")])
-        self.assertEqual(tail_calls, [("2013-01-01", "2020-01-31")])
+        self.assertEqual(full_calls, [("2012-01-01", "2012-05-27")])
+        self.assertEqual(tail_calls, [("2012-05-28", "2020-01-31")])
         self.assertEqual(ranges, [("2012-01-01", "2020-01-31")])
 
     def test_fallback_price_sync_rebuilds_full_proxy_segment_for_historical_hole(self) -> None:
