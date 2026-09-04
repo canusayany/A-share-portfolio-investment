@@ -50,7 +50,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 46
+BACKTEST_ENGINE_VERSION = 47
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -2785,7 +2785,12 @@ def run_backtest(
     )
 
     raise_if_cancelled(should_cancel)
-    if any(not fx_maps.get(pair) for pair in needed_fx_pairs) or not repo_map:
+    # A selected multi-day contract can legitimately have no quote in an
+    # early historical sub-period.  The execution path below then uses the
+    # one-day contract.  Keep direct engine callers compatible when they only
+    # seed the selected contract; the API-level coverage check still requires
+    # complete 204001 history for real runs.
+    if any(not fx_maps.get(pair) for pair in needed_fx_pairs) or not (repo_map or one_day_repo_map):
         raise BacktestError("missing fx_rates or repo_rates; run data sync first")
     if len(days) < 2:
         raise BacktestError("backtest needs at least two reference-market trading days")
@@ -2902,8 +2907,9 @@ def run_backtest(
             year_start_total_cny = daily_total_assets[-1] if daily_total_assets else initial_capital_cny
             year_external_flow_cny = 0.0
             year_start_date = day_str
-        if latest_repo_rate is not None:
-            repo_benchmark_nav *= 1.0 + (latest_repo_rate / 100.0) * repo_actual_days(day, 1, days) / 365.0
+        benchmark_repo_rate = latest_repo_rate if latest_repo_rate is not None else latest_one_day_repo_rate
+        if benchmark_repo_rate is not None:
+            repo_benchmark_nav *= 1.0 + (benchmark_repo_rate / 100.0) * repo_actual_days(day, 1, days) / 365.0
 
         dip_buy_blackout_today = bool(
             dip_buy_active

@@ -675,7 +675,24 @@ def required_data_missing(
             missing.add(f"fx_rates:{pair}")
     repo_symbols = sorted({"204001", repo_symbol})
     for current_repo_symbol in repo_symbols:
-        if parse_date(start) <= cn_data_end and _coverage_gap(conn, "repo_rates", "symbol", current_repo_symbol, "trade_date", start, cn_data_end_text, require_start=True, end_tolerance_days=0):
+        # The one-day contract is the real, executable fallback whenever the
+        # selected tenor has no quote yet.  Its history must therefore cover
+        # the requested start, while a longer selected tenor only needs a real
+        # row somewhere in the range and complete tail coverage.  Requiring a
+        # longer tenor on the first requested day incorrectly rejects valid
+        # early periods (for example 204014 starts on 2008-01-10) even though
+        # the engine invests those days in 204001.
+        if parse_date(start) <= cn_data_end and _coverage_gap(
+            conn,
+            "repo_rates",
+            "symbol",
+            current_repo_symbol,
+            "trade_date",
+            start,
+            cn_data_end_text,
+            require_start=current_repo_symbol == "204001",
+            end_tolerance_days=0,
+        ):
             missing.add(f"repo_rates:{current_repo_symbol}")
 
     generated_checks = [

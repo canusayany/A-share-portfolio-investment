@@ -1246,6 +1246,42 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(repo_tenor_days(cfg), 7)
         self.assertGreater(payload["repo_lots"], 0)
 
+    def test_selected_repo_prefix_gap_uses_real_one_day_repo_fallback(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-31")
+        cfg["repo_symbol"] = "204014"
+        cfg["monthly_spend_cny"] = 0.0
+        with db_session(db_path) as conn:
+            from app.db import insert_many
+            from tests.helpers import fixture_repo_rates
+
+            conn.execute("DELETE FROM repo_rates")
+            insert_many(conn, "repo_rates", fixture_repo_rates(cfg["start_date"], cfg["end_date"], "204001"))
+            insert_many(conn, "repo_rates", fixture_repo_rates("2020-01-10", cfg["end_date"], "204014"))
+            result = run_backtest(conn, cfg)
+            first = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+
+        payload = json.loads(first["payload_json"])
+        self.assertGreater(payload["repo_lots"], 0)
+        self.assertGreater(result["summary"]["repo_annualized_return"], 0.0)
+
+    def test_selected_repo_absent_in_subperiod_uses_one_day_repo_fallback(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        cfg["repo_symbol"] = "204014"
+        cfg["monthly_spend_cny"] = 0.0
+        with db_session(db_path) as conn:
+            result = run_backtest(conn, cfg)
+            first = conn.execute(
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date LIMIT 1",
+                (result["run_id"],),
+            ).fetchone()
+
+        payload = json.loads(first["payload_json"])
+        self.assertGreater(payload["repo_lots"], 0)
+        self.assertGreater(result["summary"]["repo_annualized_return"], 0.0)
+
     def test_repo_purchase_reserves_monthly_spend_during_tenor(self) -> None:
         from datetime import date
 

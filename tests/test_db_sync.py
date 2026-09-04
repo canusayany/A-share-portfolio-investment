@@ -609,6 +609,28 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertIn("repo_rates:204001", missing)
         self.assertNotIn("repo_rates:204007", missing)
 
+    def test_required_data_missing_allows_selected_repo_prefix_covered_by_one_day_fallback(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        with db_session(db_path) as conn:
+            from app.db import insert_many
+
+            insert_many(conn, "repo_rates", fixture_repo_rates("2020-01-10", "2020-02-28", "204014"))
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"], "204014")
+
+        self.assertNotIn("repo_rates:204001", missing)
+        self.assertNotIn("repo_rates:204014", missing)
+
+    def test_required_data_missing_still_rejects_selected_repo_tail_gap(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        with db_session(db_path) as conn:
+            from app.db import insert_many
+
+            insert_many(conn, "repo_rates", fixture_repo_rates("2020-01-10", "2020-02-28", "204014"))
+            conn.execute("DELETE FROM repo_rates WHERE symbol='204014' AND trade_date='2020-02-28'")
+            missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"], "204014")
+
+        self.assertIn("repo_rates:204014", missing)
+
     def test_missing_date_ranges_only_returns_database_gaps(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         with db_session(db_path) as conn:
