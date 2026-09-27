@@ -815,7 +815,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260904-current-run-cash-export-3", detail)
+        self.assertIn("20260927-trading-calendar-1", detail)
         self.assertIn("策略诊断", detail)
         self.assertIn("导出CSV", detail)
         self.assertIn("时间窗口", detail)

@@ -17,7 +17,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 from app.config import DEFAULT_ASSETS, asset_price_start_date, asset_trade_start_date, required_fx_pairs_for_assets
 from app.db import insert_many, upsert_assets, utc_now
-from app.services.calendar import business_days, daterange, parse_date
+from app.services.calendar import (
+    business_days, calendar_missing_years, daterange, market_business_days,
+    market_day_on_or_before, parse_date,
+)
 
 
 TUSHARE_URL = "http://api.tushare.pro"
@@ -78,6 +81,74 @@ def curl_executable() -> str:
     return "curl.exe" if os.name == "nt" else "curl"
 
 
+def series_market(conn, table: str, code: str) -> str:
+    if table in {"repo_rates", "fx_rates"}:
+        return "CN"
+    row = conn.execute("SELECT market FROM assets WHERE symbol=?", (code,)).fetchone()
+    if row and row["market"]:
+        return row["market"]
+    if code.endswith(".HK"):
+        return "HK"
+    return "US" if code == "VOO" else "CN"
+
+
+def required_calendar_ranges(assets: list[dict[str, Any]], start: str, end: str):
+    # Include the preceding month for holidays crossing a year boundary. Only
+    # published dates up to today are needed even when the requested end is future.
+    first = parse_date(start) - timedelta(days=31)
+    last = min(parse_date(end), datetime.now(ZoneInfo("Asia/Shanghai")).date())
+    markets = {"CN"} | {asset.get("market", "CN") for asset in assets if asset.get("enabled", True)}
+    return [(market, first, last) for market in sorted(markets)]
+
+
+def fetch_trading_calendar(token: str, market: str, year: int) -> list[dict[str, Any]]:
+    api = {"CN": "trade_cal", "HK": "hk_tradecal", "US": "us_tradecal"}[market]
+    start, end = f"{year}-01-01", f"{year}-12-31"
+    params = {"start_date": tushare_date(start), "end_date": tushare_date(end)}
+    if market == "CN":
+        params["exchange"] = "SSE"
+    raw_rows = tushare_call(token, api, params, "cal_date,is_open,pretrade_date")
+    rows = {}
+    for item in raw_rows:
+        day = from_tushare_date(item.get("cal_date"))
+        state = item.get("is_open")
+        if not day or not start <= day <= end or state not in (0, 1, "0", "1"):
+            raise SyncWarning(f"invalid {market} trading calendar for {year}")
+        row = {
+            "market": market, "trade_date": day, "is_open": int(state),
+            "prev_trade_date": from_tushare_date(item.get("pretrade_date")),
+        }
+        if day in rows and rows[day]["is_open"] != row["is_open"]:
+            raise SyncWarning(f"conflicting {market} trading calendar for {day}")
+        rows[day] = row
+    expected = {day.isoformat() for day in daterange(parse_date(start), parse_date(end))}
+    if set(rows) != expected or not any(row["is_open"] for row in rows.values()):
+        raise SyncWarning(f"incomplete {market} trading calendar for {year}; no calendar rows cached")
+    return [rows[day] for day in sorted(rows)]
+
+
+def sync_trading_calendars(conn, token, assets, start, end, *, allow_network=True, should_cancel=None):
+    inserted = 0
+    warnings = []
+    missing = []
+    for market, first, last in required_calendar_ranges(assets, start, end):
+        for year in calendar_missing_years(conn, market, first, last):
+            raise_if_cancelled(should_cancel)
+            try:
+                if not allow_network:
+                    raise SyncWarning("network disabled for deterministic sync")
+                rows = fetch_trading_calendar(token, market, year)
+            except SyncWarning as exc:
+                warnings.append(str(exc))
+                missing.append(f"calendar:{market}")
+                # A provider failure must not fan out across every historical year.
+                break
+            inserted += insert_many(conn, "trading_calendar", rows)
+            mark_sync_coverage(conn, "calendar", market, rows[0]["trade_date"], rows[-1]["trade_date"], "tushare:trade_calendar")
+            logger.info("sync calendar complete market=%s year=%s rows=%s", market, year, len(rows))
+    return inserted, warnings, missing
+
+
 def _coverage_gap(
     conn,
     table: str,
@@ -91,6 +162,9 @@ def _coverage_gap(
     start_tolerance_days: int = 7,
     end_tolerance_days: int = 7,
 ) -> bool:
+    expected_days = market_business_days(conn, series_market(conn, table, code), start, end)
+    if not expected_days:
+        return False
     row = conn.execute(
         f"""
         SELECT COUNT(*) AS count, MIN({date_col}) AS first_date, MAX({date_col}) AS last_date
@@ -106,27 +180,12 @@ def _coverage_gap(
 
     first_date = parse_date(row["first_date"])
     last_date = parse_date(row["last_date"])
-    expected_days = business_days(start, end)
-    if not expected_days:
-        return False
     required_start = expected_days[0]
     requested_end = expected_days[-1]
     check_end = min(requested_end, datetime.now(timezone.utc).date())
     if require_start and first_date > required_start + timedelta(days=start_tolerance_days):
         return True
     if last_date < check_end - timedelta(days=end_tolerance_days):
-        future_row = conn.execute(
-            f"""
-            SELECT MIN({date_col}) AS next_date FROM {table}
-            WHERE {code_col}=?
-              AND {date_col}>?
-              AND {date_col}<=?
-              AND source NOT LIKE 'generated:%'
-            """,
-            (code, end, (check_end + timedelta(days=10)).isoformat()),
-        ).fetchone()
-        if future_row and future_row["next_date"] and last_date >= check_end - timedelta(days=7):
-            return False
         return True
     return False
 
@@ -156,7 +215,7 @@ def missing_date_ranges(
     start: str,
     end: str,
 ) -> list[tuple[str, str]]:
-    expected = business_days(start, end)
+    expected = market_business_days(conn, series_market(conn, table, code), start, end)
     if not expected:
         return []
     rows = conn.execute(
@@ -374,6 +433,10 @@ def missing_edge_date_ranges(
     requested_end = parse_date(end)
     if requested_start > requested_end:
         return []
+    expected_days = market_business_days(conn, series_market(conn, table, code), start, end)
+    if not expected_days:
+        return []
+    requested_start, requested_end = expected_days[0], expected_days[-1]
     row = conn.execute(
         f"""
         SELECT MIN({date_col}) AS first_date, MAX({date_col}) AS last_date
@@ -385,11 +448,7 @@ def missing_edge_date_ranges(
         (code, start, end),
     ).fetchone()
     if not row or not row["first_date"] or not row["last_date"]:
-        return [(start, end)]
-
-    expected_days = business_days(start, end)
-    if not expected_days:
-        return []
+        return [(requested_start.isoformat(), requested_end.isoformat())]
     required_start = expected_days[0]
     first_date = parse_date(row["first_date"])
     last_date = parse_date(row["last_date"])
@@ -397,7 +456,8 @@ def missing_edge_date_ranges(
     if first_date > required_start + timedelta(days=start_tolerance_days):
         ranges.append((requested_start.isoformat(), (first_date - timedelta(days=1)).isoformat()))
     if last_date < requested_end:
-        ranges.append(((last_date + timedelta(days=1)).isoformat(), requested_end.isoformat()))
+        tail_start = next(day for day in expected_days if day > last_date)
+        ranges.append((tail_start.isoformat(), requested_end.isoformat()))
     return ranges
 
 
@@ -541,10 +601,10 @@ def latest_completed_market_day(market: str, close_hour: int | None = None):
     return today
 
 
-def effective_price_end_for_market(market: str, end: str):
+def effective_price_end_for_market(market: str, end: str, conn=None):
     requested_end = parse_date(end)
     latest_completed = latest_completed_market_day(market)
-    return min(requested_end, latest_completed)
+    return market_day_on_or_before(conn, market, min(requested_end, latest_completed))
 
 
 def replacement_allocation_start(asset: dict[str, Any]) -> date | None:
@@ -571,7 +631,7 @@ def effective_asset_end(asset: dict[str, Any], end: str) -> date:
     return min(requested_end, replacement_start - timedelta(days=1))
 
 
-def effective_price_end_for_asset(asset: dict[str, Any], end: str):
+def effective_price_end_for_asset(asset: dict[str, Any], end: str, conn=None):
     if asset.get("asset_type") == "cn_bond_index":
         # ChinaBond total-return indices are published after the exchange close
         # and the exact release time is not guaranteed.  Treat the current
@@ -582,8 +642,8 @@ def effective_price_end_for_asset(asset: dict[str, Any], end: str):
             latest_completed_market_day("CN", close_hour=24),
         )
     else:
-        market_end = effective_price_end_for_market(asset.get("market", "CN"), end)
-    return min(market_end, effective_asset_end(asset, end))
+        market_end = effective_price_end_for_market(asset.get("market", "CN"), end, conn)
+    return market_day_on_or_before(conn, asset.get("market", "CN"), min(market_end, effective_asset_end(asset, end)))
 
 
 def required_data_missing(
@@ -596,6 +656,9 @@ def required_data_missing(
     assets = assets or DEFAULT_ASSETS
     requested_end = parse_date(end)
     missing: set[str] = set()
+    for market, first, last in required_calendar_ranges(assets, start, end):
+        if calendar_missing_years(conn, market, first, last):
+            missing.add(f"calendar:{market}")
     price_symbols = [asset["symbol"] for asset in assets if asset.get("enabled", True)] + ["000300.SH"]
 
     selected_asset_symbols = {asset["symbol"] for asset in assets if asset.get("enabled", True)}
@@ -611,7 +674,7 @@ def required_data_missing(
             else parse_date(asset_trade_start_date(asset, start)),
         )
         dividend_fetch_start = max(parse_date(start), parse_date(asset_trade_start_date(asset, start)))
-        price_end = effective_price_end_for_asset(asset, end)
+        price_end = effective_price_end_for_asset(asset, end, conn)
         fallback_covers_pre_inception = (
             isinstance(fallback, dict)
             and fallback_requires_history
@@ -645,7 +708,7 @@ def required_data_missing(
             or unscaled_proxy_ranges
         ):
             missing.add(f"prices:{asset['symbol']}")
-        dividend_end = effective_asset_end(asset, end)
+        dividend_end = price_end
         if asset.get("asset_type") != "money_fund" and dividend_fetch_start <= dividend_end and missing_coverage_ranges(
             conn, "dividends", asset["symbol"], dividend_fetch_start.isoformat(), dividend_end.isoformat()
         ):
@@ -665,7 +728,7 @@ def required_data_missing(
             if adjustment_gaps and not tail_is_tolerable:
                 missing.add(f"adj_factors:{asset['symbol']}")
 
-    cn_data_end = effective_price_end_for_market("CN", end)
+    cn_data_end = effective_price_end_for_market("CN", end, conn)
     cn_data_end_text = cn_data_end.isoformat()
     if parse_date(start) <= cn_data_end and _coverage_gap(conn, "prices", "symbol", "000300.SH", "trade_date", start, cn_data_end_text, require_start=True, end_tolerance_days=0):
         missing.add("prices:000300.SH")
@@ -3079,6 +3142,16 @@ def sync_all(
     assets = assets or DEFAULT_ASSETS
     warnings: list[str] = []
     missing_data: list[str] = []
+    calendar_count, calendar_warnings, calendar_missing = sync_trading_calendars(
+        conn, token, assets, start, end, allow_network=allow_network, should_cancel=should_cancel,
+    )
+    warnings.extend(calendar_warnings)
+    missing_data.extend(calendar_missing)
+    if calendar_count and missing_items is not None:
+        # The first preflight may have used unknown weekdays. Once the actual
+        # calendar is available, discard only those requested gaps it disproves.
+        remaining = set(required_data_missing(conn, start, end, assets, repo_symbol))
+        missing_items = [item for item in missing_items if item in remaining]
     plan = _sync_plan(missing_items, assets, repo_symbol)
     logger.info(
         "sync_all start range=%s..%s missing_items=%s plan_prices=%s plan_dividends=%s plan_adjustments=%s plan_index=%s plan_repo=%s plan_fx=%s",
@@ -3128,10 +3201,10 @@ def sync_all(
     if repo_symbol != "204001":
         conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'", ("204001", start, end))
 
-    inserted = {"prices": 0, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "fx_rates": 0}
+    inserted = {"prices": 0, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "fx_rates": 0, "trading_calendar": calendar_count}
     price_range_func = missing_date_ranges if plan["full"] else missing_tail_date_ranges
     rate_range_func = missing_date_ranges if plan["full"] else missing_edge_date_ranges
-    cn_data_end = effective_price_end_for_market("CN", end)
+    cn_data_end = effective_price_end_for_market("CN", end, conn)
     cn_data_end_text = cn_data_end.isoformat()
     asset_price_ranges: dict[str, list[tuple[str, str]]] = {}
     asset_dividend_ranges: dict[str, list[tuple[str, str]]] = {}
@@ -3140,8 +3213,8 @@ def sync_all(
         symbol = asset["symbol"]
         price_fetch_start_date = max(parse_date(start), parse_date(asset_price_start_date(asset, start)))
         dividend_fetch_start_date = max(parse_date(start), parse_date(asset_trade_start_date(asset, start)))
-        price_end = effective_price_end_for_asset(asset, end)
-        dividend_end = effective_asset_end(asset, end)
+        price_end = effective_price_end_for_asset(asset, end, conn)
+        dividend_end = price_end
         price_fetch_start = price_fetch_start_date.isoformat()
         dividend_fetch_start = dividend_fetch_start_date.isoformat()
         range_function = chinabond_price_sync_ranges if asset.get("asset_type") == "cn_bond_index" else price_range_func
@@ -3205,6 +3278,17 @@ def sync_all(
         | set(plan["asset_adjustments"])
     )
     sync_assets = [asset for asset in assets if asset["symbol"] in planned_asset_symbols]
+    # Worker threads must not access the parent thread's SQLite connection.
+    open_dates_by_symbol = {
+        asset["symbol"]: {
+            day.isoformat() for day in market_business_days(conn, asset.get("market", "CN"), start, end)
+        }
+        for asset in sync_assets
+    }
+
+    def expected_asset_dates(symbol, range_start, range_end):
+        return {day for day in open_dates_by_symbol[symbol] if range_start <= day <= range_end}
+
     existing_price_rows: dict[str, list[dict[str, Any]]] = {}
     for asset in sync_assets:
         rows = conn.execute(
@@ -3247,7 +3331,7 @@ def sync_all(
                 except SyncWarning as exc:
                     asset_warnings.append(str(exc))
             elif asset.get("market") == "CN":
-                expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+                expected_price_dates = expected_asset_dates(symbol, range_start, range_end)
                 cn_price_sources = [
                     ("tushare", lambda: fetch_cn_fund_prices(token, symbol, range_start, range_end)),
                     ("datasrc", lambda: fetch_datasrc_market_prices(symbol, range_start, range_end, "CNY")),
@@ -3277,7 +3361,7 @@ def sync_all(
                 )
                 asset_warnings.extend(quality_warnings)
             elif asset.get("market") == "HK":
-                expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+                expected_price_dates = expected_asset_dates(symbol, range_start, range_end)
                 hk_price_sources = [
                     ("datasrc", lambda: fetch_datasrc_market_prices(symbol, range_start, range_end, asset.get("currency", "HKD"))),
                     ("eastmoney-hk", lambda: fetch_eastmoney_prices(symbol, range_start, range_end, asset.get("currency", "HKD"), "eastmoney:hk_kline")),
@@ -3302,7 +3386,7 @@ def sync_all(
                         range_prices = merge_rows_by_trade_date(range_prices, source_rows)
                         logger.info("sync price source complete symbol=%s source=%s range=%s..%s rows=%d", symbol, source_name, range_start, range_end, len(source_rows))
             else:
-                expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+                expected_price_dates = expected_asset_dates(symbol, range_start, range_end)
                 us_price_sources = [
                     ("yahoo-chart", lambda: fetch_yahoo_prices(symbol, range_start, range_end, asset.get("currency", "USD"))),
                     ("nasdaq", lambda: fetch_nasdaq_prices(symbol, range_start, range_end, asset.get("currency", "USD"))),
@@ -3334,9 +3418,9 @@ def sync_all(
                 if authoritative_fallback and parse_date(range_start) <= fallback_end:
                     # These dates only trigger the fallback fetch.  Afterward,
                     # the returned official curve calendar becomes authoritative.
-                    expected_price_dates.update(day.isoformat() for day in business_days(range_start, fallback_end))
+                    expected_price_dates.update(expected_asset_dates(symbol, range_start, fallback_end.isoformat()))
             else:
-                expected_price_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+                expected_price_dates = expected_asset_dates(symbol, range_start, range_end)
             missing_price_dates = expected_price_dates - {row["trade_date"] for row in range_prices}
             if missing_price_dates and allow_network and asset.get("price_fallback"):
                 raise_if_cancelled(should_cancel)
@@ -3536,15 +3620,18 @@ def sync_all(
         for asset in assets:
             symbol = asset["symbol"]
             if (
-                symbol not in plan["asset_adjustments"]
+                symbol not in (plan["asset_adjustments"] | plan["asset_prices"])
                 or not asset.get("allow_adj_factor_tail_carry_forward")
             ):
                 continue
+            # Newly inserted closes can create a factor gap that did not exist
+            # at preflight. Apply this asset's existing explicit tail policy in
+            # the same sync instead of requiring a second user request.
             carry_rows = carry_forward_adjustment_factor_rows(
                 conn,
                 symbol,
                 asset_trade_start_date(asset, start),
-                effective_price_end_for_asset(asset, end).isoformat(),
+                effective_price_end_for_asset(asset, end, conn).isoformat(),
             )
             if carry_rows:
                 inserted["adj_factors"] += insert_many(conn, "adj_factors", carry_rows)
@@ -3684,7 +3771,7 @@ def sync_all(
             for range_start, range_end in ranges:
                 raise_if_cancelled(should_cancel)
                 range_fx_rows: list[dict[str, Any]] = []
-                expected_fx_dates = {day.isoformat() for day in business_days(range_start, range_end)}
+                expected_fx_dates = {day.isoformat() for day in market_business_days(conn, "CN", range_start, range_end)}
                 for source_name, fetch_fx_rates in fx_sources:
                     raise_if_cancelled(should_cancel)
                     remaining_dates = expected_fx_dates - {row["trade_date"] for row in range_fx_rows}

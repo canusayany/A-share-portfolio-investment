@@ -25,6 +25,7 @@ http://127.0.0.1:51327
 - 国债逆回购：优先 AKShare `bond_buy_back_hist_em`，失败后使用东方财富 K 线公开接口；全部失败则返回缺数据。
 - 汇率：按启用资产补齐 `USD/CNY`、`HKD/CNY` 等币种对，优先本地 DataSrc，失败后使用 Yahoo、Frankfurter、Stooq 和公开 currency API；全部失败则返回缺数据。
 - 数据同步失败不会静默伪装成功，状态表会显示 `source`，同步返回会包含 `warnings` 和 `missing_data`。生产同步不会生成 mock/估算行情。
+- 交易日历：通过 Tushare 的 `trade_cal`、`hk_tradecal`、`us_tradecal` 按市场、按年缓存到 SQLite，缺少年份时自动补齐。缺口检查和行情、逆回购、汇率同步均按实际开市日判断；周末和节假日沿用最近已发布交易日的数据。日历不完整时会明确报缺少交易日历，不会把没有行情的日子猜成休市，也不会放宽真实交易日的缺数检查。
 
 ## 费用口径
 

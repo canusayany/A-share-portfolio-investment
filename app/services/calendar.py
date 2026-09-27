@@ -30,6 +30,43 @@ def business_days(start: str | date, end: str | date) -> list[date]:
     return [day for day in daterange(start_date, end_date) if is_weekday(day)]
 
 
+def market_business_days(conn, market: str, start: str | date, end: str | date) -> list[date]:
+    """Use published exchange sessions, never infer a closure from missing quotes.
+
+    Unknown dates remain potential weekdays for conservative sync planning.
+    The preflight separately rejects incomplete calendars before a backtest runs.
+    """
+    start_date, end_date = parse_date(start), parse_date(end)
+    if conn is None:
+        return business_days(start_date, end_date)
+    rows = conn.execute(
+        "SELECT trade_date, is_open FROM trading_calendar WHERE market=? AND trade_date BETWEEN ? AND ?",
+        (market, start_date.isoformat(), end_date.isoformat()),
+    ).fetchall()
+    states = {row["trade_date"]: bool(row["is_open"]) for row in rows}
+    return [day for day in daterange(start_date, end_date) if states.get(day.isoformat(), is_weekday(day))]
+
+
+def market_day_on_or_before(conn, market: str, day: date) -> date:
+    days = market_business_days(conn, market, day - timedelta(days=31), day)
+    if not days:
+        raise ValueError(f"{market} 交易日历缺少 {day.isoformat()} 前的开市日")
+    return days[-1]
+
+
+def calendar_missing_years(conn, market: str, start: str | date, end: str | date) -> list[int]:
+    """Require an explicit open/closed entry for every natural day in range."""
+    start_date, end_date = parse_date(start), parse_date(end)
+    if start_date > end_date:
+        return []
+    rows = conn.execute(
+        "SELECT trade_date FROM trading_calendar WHERE market=? AND trade_date BETWEEN ? AND ? AND is_open IN (0,1)",
+        (market, start_date.isoformat(), end_date.isoformat()),
+    ).fetchall()
+    existing = {row["trade_date"] for row in rows}
+    return sorted({day.year for day in daterange(start_date, end_date) if day.isoformat() not in existing})
+
+
 def first_business_day_by_month(days: list[date]) -> set[date]:
     result: set[date] = set()
     seen: set[tuple[int, int]] = set()

@@ -15,6 +15,7 @@ MEASURED_FILES = [
     ROOT / "app" / "config.py",
     ROOT / "app" / "db.py",
     ROOT / "app" / "services" / "fees.py",
+    ROOT / "app" / "services" / "calendar.py",
     ROOT / "app" / "services" / "backtest_engine.py",
     ROOT / "app" / "services" / "data_sync.py",
 ]
@@ -107,6 +108,10 @@ def exercise_measured_helpers() -> None:
 
 def main() -> int:
     tracer = trace.Trace(count=True, trace=False, ignoredirs=[sys.base_prefix, sys.exec_prefix])
+    # trace caches ignored files by basename. stdlib calendar.py must not cause
+    # our app/services/calendar.py to disappear from coverage as well.
+    ignore_names = tracer.ignore.names
+    tracer.ignore.names = lambda filename, modulename: ignore_names(filename, filename or modulename)
     threading.settrace(tracer.globaltrace)
     def run_suite():
         suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import date
 import math
 import tempfile
 
 from app.config import asset_price_start_date, backtest_assets, normalize_config, repo_rate_symbol
 from app.db import db_session, init_db, insert_many, upsert_assets
-from app.services.calendar import business_days
+from app.services.calendar import business_days, daterange
 from app.services.data_sync import mark_sync_coverage
 
 
@@ -21,6 +22,16 @@ def build_synced_db(start: str = "2020-01-01", end: str = "2020-03-31") -> tuple
     with db_session(db_path) as conn:
         seed_fixture_data(conn, config, start, end)
     return db_path, config
+
+
+def seed_fixture_calendar(conn, start: str, end: str) -> None:
+    # Existing price fixtures intentionally use weekdays. Keep their matching
+    # calendar explicit; holiday regressions overwrite the relevant sessions.
+    days = daterange(date(int(start[:4]) - 1, 1, 1), date(int(end[:4]), 12, 31))
+    insert_many(conn, "trading_calendar", [
+        {"market": market, "trade_date": day.isoformat(), "is_open": int(day.weekday() < 5)}
+        for market in ("CN", "US", "HK") for day in days
+    ])
 
 
 def fixture_price_series(symbol: str, start: str, end: str, currency: str, seed: float) -> list[dict]:
@@ -100,6 +111,7 @@ def fixture_dividends(symbol: str, start: str, end: str, currency: str) -> list[
 
 
 def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
+    seed_fixture_calendar(conn, start, end)
     assets = backtest_assets(config)
     upsert_assets(conn, [{**asset, "source": "fixture"} for asset in assets])
     upsert_assets(

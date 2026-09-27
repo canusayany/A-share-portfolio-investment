@@ -266,7 +266,7 @@ class DbAndSyncTests(unittest.TestCase):
 
         self.assertEqual(effective_asset_end(asset, "2026-07-31").isoformat(), "2020-12-31")
         self.assertEqual(effective_price_end_for_asset(asset, "2026-07-31").isoformat(), "2020-12-31")
-        self.assertEqual(effective_price_end_for_asset(asset, "2020-12-20").isoformat(), "2020-12-20")
+        self.assertEqual(effective_price_end_for_asset(asset, "2020-12-20").isoformat(), "2020-12-18")
 
     def test_required_gold_proxy_scans_pre_inception_history(self) -> None:
         cfg = normalize_config({})
@@ -483,6 +483,7 @@ class DbAndSyncTests(unittest.TestCase):
         db_path, cfg = build_synced_db("2023-06-01", "2023-06-30")
         cfg["end_date"] = "2023-06-25"
         with db_session(db_path) as conn:
+            conn.execute("UPDATE trading_calendar SET is_open=0 WHERE market='CN' AND trade_date IN ('2023-06-22','2023-06-23')")
             conn.execute("DELETE FROM prices WHERE symbol='000300.SH' AND trade_date='2023-06-23'")
             conn.execute("DELETE FROM repo_rates WHERE symbol='204001' AND trade_date='2023-06-23'")
             missing = required_data_missing(conn, cfg["start_date"], cfg["end_date"], cfg["assets"])

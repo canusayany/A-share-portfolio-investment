@@ -363,6 +363,7 @@ function formatSource(value) {
 
 function describeMissing(item) {
   const [kind, symbol] = String(item || "").split(":");
+  if (kind === "calendar") return `${{ CN: "A股", HK: "港股", US: "美股" }[symbol] || symbol}交易日历`;
   if (kind === "fx_rates") return "美元兑人民币汇率";
   if (kind === "repo_rates") return "国债逆回购利率";
   const kindName = {
