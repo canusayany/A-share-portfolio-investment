@@ -291,9 +291,9 @@ class DbAndSyncTests(unittest.TestCase):
         finally:
             data_sync_module.missing_date_ranges = original_missing_dates
 
-        self.assertEqual(fallback_calls, [("2008-01-01", "2013-07-17")])
-        self.assertEqual(primary_calls, [("2013-07-18", "2020-12-31")])
-        self.assertEqual(ranges, [("2008-01-01", "2013-07-17")])
+        self.assertEqual(fallback_calls, [("2008-01-01", "2013-07-28")])
+        self.assertEqual(primary_calls, [("2013-07-29", "2020-12-31")])
+        self.assertEqual(ranges, [("2008-01-01", "2013-07-28")])
 
     def test_optional_a100_proxy_does_not_block_on_unavailable_pre_etf_history(self) -> None:
         cfg = normalize_config({})

@@ -2977,6 +2977,38 @@ def fetch_open_er_latest_fx_rates(start: str, end: str, pair: str = "USD/CNY") -
     ]
 
 
+def fetch_tushare_repo_rates(token: str, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
+    """Fetch exchange repo OHLC rates; repo_daily is limited to 2,000 rows."""
+    if len(symbol) != 6 or not symbol.isdigit() or not symbol.startswith(("204", "131")):
+        raise SyncWarning(f"unsupported exchange repo symbol {symbol}")
+    ts_code = f"{symbol}.{'SH' if symbol.startswith('204') else 'SZ'}"
+    rows = {}
+    for chunk_start, chunk_end in chunk_date_ranges(start, end, 365):
+        raw_rows = tushare_call(
+            token, "repo_daily",
+            {"ts_code": ts_code, "start_date": tushare_date(chunk_start), "end_date": tushare_date(chunk_end)},
+            "ts_code,trade_date,open,high,low,close,amount",
+        )
+        for item in raw_rows:
+            day = from_tushare_date(item.get("trade_date"))
+            if item.get("ts_code") != ts_code or not day or not chunk_start <= day <= chunk_end:
+                continue
+            try:
+                rates = {f"{field}_rate": float(item[field]) for field in ("open", "high", "low", "close")}
+                amount = float(item.get("amount") or 0)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SyncWarning(f"invalid Tushare repo quote for {symbol} on {day}") from exc
+            if not all(math.isfinite(value) for value in (*rates.values(), amount)):
+                raise SyncWarning(f"non-finite Tushare repo quote for {symbol} on {day}")
+            rows[day] = {
+                "symbol": symbol, "trade_date": day, **rates,
+                "volume": 0.0, "amount": amount, "source": "tushare:repo_daily",
+            }
+    if not rows:
+        raise SyncWarning(f"Tushare returned no repo_daily rows for {symbol}")
+    return [rows[day] for day in sorted(rows)]
+
+
 def fetch_akshare_repo_rates(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
     try:
         import akshare as ak  # type: ignore
@@ -3307,7 +3339,6 @@ def sync_all(
         price_ranges = asset_price_ranges[symbol]
         dividend_ranges = asset_dividend_ranges[symbol]
         prices: list[dict[str, Any]] = []
-        tushare_asset_available = True
         for range_start, range_end in price_ranges:
             raise_if_cancelled(should_cancel)
             range_prices: list[dict[str, Any]] = []
@@ -3336,8 +3367,6 @@ def sync_all(
                     try:
                         rows = [row for row in fetch_prices() if row["trade_date"] in expected_price_dates]
                     except SyncWarning as exc:
-                        if source_name == "tushare":
-                            tushare_asset_available = False
                         asset_warnings.append(str(exc))
                         continue
                     raise_if_cancelled(should_cancel)
@@ -3521,7 +3550,9 @@ def sync_all(
                 asset_warnings.append(str(exc))
                 asset_missing.append(f"dividends:{symbol}")
         if asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"} and asset_adjustment_ranges[symbol]:
-            if allow_network and tushare_asset_available:
+            # fund_daily can be empty for one suspension/listing gap while
+            # fund_adj still has valid historical factors for the same asset.
+            if allow_network:
                 for range_start, range_end in asset_adjustment_ranges[symbol]:
                     raise_if_cancelled(should_cancel)
                     try:
@@ -3529,7 +3560,7 @@ def sync_all(
                     except SyncWarning as exc:
                         asset_warnings.append(str(exc))
             else:
-                asset_warnings.append(f"skip Tushare adj for {symbol} because primary Tushare price source is unavailable")
+                asset_warnings.append(f"skip Tushare adj for {symbol}: network disabled for deterministic sync")
         return {
             "symbol": symbol,
             "prices": prices,
@@ -3687,6 +3718,12 @@ def sync_all(
             raise_if_cancelled(should_cancel)
             try:
                 rows = fetch_sohu_repo_rates(symbol, range_start, range_end)
+            except SyncWarning as exc:
+                warnings.append(str(exc))
+        if not rows:
+            raise_if_cancelled(should_cancel)
+            try:
+                rows = fetch_tushare_repo_rates(token, symbol, range_start, range_end)
             except SyncWarning as exc:
                 warnings.append(str(exc))
         if not rows:

@@ -279,6 +279,9 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "market": "CN",
         "asset_type": "cn_etf",
         "inception_date": "2013-07-18",
+        # Huaan's listing announcement: exchange trading began on 2013-07-29.
+        # Before listing, keep using the configured Au99.99 historical proxy.
+        "trade_start_date": "2013-07-29",
         "management_fee": 0.005,
         "custodian_fee": 0.001,
         "price_fallback": {
