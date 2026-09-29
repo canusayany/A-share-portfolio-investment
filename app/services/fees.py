@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+
+from app.services.calendar import repo_year_basis
 
 
 @dataclass(frozen=True)
@@ -183,5 +186,6 @@ def repo_fee(principal_cny: float, config: RepoFeeConfig) -> float:
     return round(commission, 2)
 
 
-def repo_interest(principal_cny: float, annual_rate_percent: float, actual_days: int) -> float:
-    return round(principal_cny * (annual_rate_percent / 100.0) * actual_days / 365.0, 2)
+def repo_interest(principal_cny: float, annual_rate_percent: float, actual_days: int, *, trade_day: date | None = None) -> float:
+    basis = repo_year_basis(trade_day) if trade_day else 365
+    return round(principal_cny * (annual_rate_percent / 100.0) * actual_days / basis, 2)

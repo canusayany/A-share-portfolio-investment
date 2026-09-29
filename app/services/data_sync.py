@@ -165,21 +165,22 @@ def _coverage_gap(
     expected_days = market_business_days(conn, series_market(conn, table, code), start, end)
     if not expected_days:
         return False
-    row = conn.execute(
+    rows = conn.execute(
         f"""
-        SELECT COUNT(*) AS count, MIN({date_col}) AS first_date, MAX({date_col}) AS last_date
+        SELECT {date_col} AS trade_date
         FROM {table}
         WHERE {code_col}=?
           AND {date_col} BETWEEN ? AND ?
           AND source NOT LIKE 'generated:%'
         """,
         (code, start, end),
-    ).fetchone()
-    if not row or not row["count"]:
+    ).fetchall()
+    existing = {row["trade_date"] for row in rows}
+    if not existing:
         return True
 
-    first_date = parse_date(row["first_date"])
-    last_date = parse_date(row["last_date"])
+    first_date = parse_date(min(existing))
+    last_date = parse_date(max(existing))
     required_start = expected_days[0]
     requested_end = expected_days[-1]
     check_end = min(requested_end, datetime.now(timezone.utc).date())
@@ -187,7 +188,9 @@ def _coverage_gap(
         return True
     if last_date < check_end - timedelta(days=end_tolerance_days):
         return True
-    return False
+    # Prefix allowances (such as a not-yet-listed repo tenor) and publication
+    # tail tolerances must never hide a hole inside an existing series.
+    return any(first_date <= day <= min(last_date, check_end) and day.isoformat() not in existing for day in expected_days)
 
 
 def _has_generated_rows(conn, table: str, code_col: str, codes: list[str], date_col: str, start: str, end: str) -> bool:
@@ -936,12 +939,7 @@ def asset_price_sync_ranges(
     ranges: list[tuple[str, str]] = []
     fallback_end = min(requested_end, primary_start - timedelta(days=1))
     if price_start <= fallback_end:
-        fallback_range_func = (
-            missing_tail_date_ranges
-            if fallback.get("kind") in {"sge_au9999", "chinabond_30y_yield_total_return"}
-            else missing_date_ranges
-        )
-        fallback_gaps = fallback_range_func(
+        fallback_gaps = missing_date_ranges(
             conn,
             "prices",
             "symbol",
@@ -980,14 +978,8 @@ def chinabond_price_sync_ranges(
     start: str,
     end: str,
 ) -> list[tuple[str, str]]:
-    """Return one initial fetch and then only a tail fetch for ChinaBond data.
-
-    The official series has its own bond-market calendar, so treating every
-    weekday as a missing price causes repeated refetches over public holidays.
-    The endpoint returns the complete series; the most recent official value is
-    therefore the only meaningful incremental coverage check.
-    """
-    return missing_tail_date_ranges(conn, "prices", "symbol", code, "trade_date", start, end)
+    """Repair every missing session, excluding published market holidays."""
+    return missing_date_ranges(conn, "prices", "symbol", code, "trade_date", start, end)
 
 
 def legacy_chinabond_modeled_overlap_ranges(
@@ -3202,8 +3194,8 @@ def sync_all(
         conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'", ("204001", start, end))
 
     inserted = {"prices": 0, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "fx_rates": 0, "trading_calendar": calendar_count}
-    price_range_func = missing_date_ranges if plan["full"] else missing_tail_date_ranges
-    rate_range_func = missing_date_ranges if plan["full"] else missing_edge_date_ranges
+    price_range_func = missing_date_ranges
+    rate_range_func = missing_date_ranges
     cn_data_end = effective_price_end_for_market("CN", end, conn)
     cn_data_end_text = cn_data_end.isoformat()
     asset_price_ranges: dict[str, list[tuple[str, str]]] = {}
@@ -3732,7 +3724,9 @@ def sync_all(
         for current_repo_symbol, ranges in repo_range_map.items():
             for range_start, range_end in ranges:
                 raise_if_cancelled(should_cancel)
-                repo_rows = merge_rows_by_trade_date(repo_rows, fetch_repo_bundle(current_repo_symbol, range_start, range_end))
+                # The table key includes the tenor symbol. Merging only by date
+                # would discard 204001 whenever another tenor is repaired too.
+                repo_rows.extend(fetch_repo_bundle(current_repo_symbol, range_start, range_end))
     inserted["repo_rates"] += insert_many(conn, "repo_rates", repo_rows)
     if repo_range_map:
         logger.info(

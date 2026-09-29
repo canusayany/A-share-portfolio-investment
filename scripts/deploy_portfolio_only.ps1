@@ -51,6 +51,12 @@ function Invoke-NativeProcess {
 }
 
 $sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$engineSource = Get-Content -LiteralPath (Join-Path $sourceRoot 'app/services/backtest_engine.py') -Raw -Encoding UTF8
+$engineVersionMatches = [regex]::Matches($engineSource, '(?m)^BACKTEST_ENGINE_VERSION = ([0-9]+)\r?$')
+if ($engineVersionMatches.Count -ne 1) {
+    throw 'Expected exactly one numeric BACKTEST_ENGINE_VERSION in the local source.'
+}
+$engineVersion = $engineVersionMatches[0].Groups[1].Value
 $config = Get-Content -LiteralPath $DeploymentConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $hostAddress = [string]$config.host.address
 $hostUser = [string]$config.host.user
@@ -170,6 +176,7 @@ try {
         "TARGET=$quotedTarget",
         "STAGE=$quotedStage",
         "PORT=$portfolioPort",
+        "ENGINE_VERSION=$engineVersion",
         'run_sudo() { sudo -S -p "" "$@" <<< "$SUDO_PASSWORD"; }',
         '[ "$TARGET" = "/opt/lucygetup-portfolio" ]',
         '[[ "$STAGE" == /tmp/blan-portfolio-deploy-* ]]',
@@ -191,10 +198,10 @@ try {
         'curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/health"',
         'curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/default-config" | grep -q ''"rebalance_to_target":false''',
         'curl -fsS --max-time 10 "http://127.0.0.1:$PORT/api/default-config" | grep -q ''"symbol":"511090.SH"''',
-        'grep -q ''BACKTEST_ENGINE_VERSION = 47'' "$TARGET/app/services/backtest_engine.py"',
+        'tr -d ''\r'' < "$TARGET/app/services/backtest_engine.py" | grep -x "BACKTEST_ENGINE_VERSION = $ENGINE_VERSION" >/dev/null',
         'after_db_identity="$(run_sudo stat -c ''%d:%i'' "$TARGET/data/backtest.sqlite3")"',
         '[ "$before_db_identity" = "$after_db_identity" ]',
-        'printf ''\nengine_version=47 database_file_preserved=true backup=%s\n'' "$backup_path"'
+        'printf ''\nengine_version=%s database_file_preserved=true backup=%s\n'' "$ENGINE_VERSION" "$backup_path"'
     )
     [System.IO.File]::WriteAllText($remoteScript, ($remoteLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
     $remoteScriptPath = "$remoteStage/deploy_remote.sh"

@@ -41,6 +41,7 @@ from app.services.backtest_engine import (
     run_backtest,
 )
 from app.services.data_sync import SyncCancelled, required_data_missing, sync_all
+from app.services.calendar import market_business_days, repo_actual_days, repo_year_basis
 from app.services.strategy_diagnostics import build_backtest_csv, strategy_diagnostics
 
 logger = logging.getLogger(__name__)
@@ -420,8 +421,10 @@ def repo_annualized_return_from_daily(conn, run_id: str) -> float:
     if len(rates) < 2:
         return 0.0
     benchmark_nav = 1.0
+    sessions = market_business_days(conn, "CN", row["start_date"], date.fromisoformat(row["end_date"]) + timedelta(days=33))
     for rate in rates:
-        benchmark_nav *= 1.0 + float(rate["close_rate"] or 0.0) / 100.0 / 365.0
+        day = date.fromisoformat(rate["trade_date"])
+        benchmark_nav *= 1.0 + float(rate["close_rate"] or 0.0) / 100.0 * repo_actual_days(day, 1, sessions) / repo_year_basis(day)
     years = max((datetime.fromisoformat(row["end_date"]) - datetime.fromisoformat(row["start_date"])).days / 365.25, 1 / 365.25)
     return benchmark_nav ** (1.0 / years) - 1.0
 
@@ -552,12 +555,11 @@ def _period_repo_annualized_return(conn, start_date: str, end_date: str) -> floa
         return 0.0
     period_end = date.fromisoformat(end_date)
     benchmark_nav = 1.0
-    for index, row in enumerate(rows):
+    sessions = market_business_days(conn, "CN", start_date, period_end + timedelta(days=33))
+    for row in rows:
         day = date.fromisoformat(row["trade_date"])
-        next_day = date.fromisoformat(rows[index + 1]["trade_date"]) if index + 1 < len(rows) else period_end + timedelta(days=1)
-        accrual_end = min(next_day, period_end + timedelta(days=1))
-        actual_days = max((accrual_end - day).days, 1)
-        benchmark_nav *= 1.0 + float(row["close_rate"] or 0.0) / 100.0 * actual_days / 365.0
+        actual_days = repo_actual_days(day, 1, sessions)
+        benchmark_nav *= 1.0 + float(row["close_rate"] or 0.0) / 100.0 * actual_days / repo_year_basis(day)
     years = max(((period_end - date.fromisoformat(start_date)).days + 1) / 365.25, 1 / 365.25)
     return benchmark_nav ** (1.0 / years) - 1.0
 
@@ -933,6 +935,12 @@ def execute_backtest_request(
                     should_cancel=should_cancel,
                 )
                 logger.info("backtest sync complete id=%s seconds=%.3f result=%s", request_id, time.perf_counter() - sync_started_at, sync_result)
+                inserted = (sync_result or {}).get("inserted", {})
+                cache_invalidated = any(item.startswith("generated:") for item in missing_before) or any(int(count or 0) > 0 for count in inserted.values())
+                if cache_invalidated:
+                    # Commit invalidation with the changed source data, even if
+                    # another source is still missing or the request is cancelled.
+                    conn.execute("UPDATE backtest_runs SET config_hash=NULL")
             raise_if_cancelled(should_cancel)
             with db_session(settings.db_path) as conn:
                 missing_after_started_at = time.perf_counter()
@@ -940,15 +948,9 @@ def execute_backtest_request(
                 logger.info("backtest post-sync data check id=%s seconds=%.3f missing=%s", request_id, time.perf_counter() - missing_after_started_at, missing_after)
             if missing_after:
                 raise BacktestError("自动补足数据后仍缺少：" + "、".join(missing_after))
-            inserted = (sync_result or {}).get("inserted", {})
-            cache_invalidated = any(item.startswith("generated:") for item in missing_before) or any(int(count or 0) > 0 for count in inserted.values())
 
         with db_session(settings.db_path) as conn:
             raise_if_cancelled(should_cancel)
-            if cache_invalidated:
-                invalidate_started_at = time.perf_counter()
-                conn.execute("UPDATE backtest_runs SET config_hash=NULL")
-                logger.info("backtest cache invalidated id=%s seconds=%.3f", request_id, time.perf_counter() - invalidate_started_at)
             run_started_at = time.perf_counter()
             needs_extended_analysis = defer_extended_analysis and extended_analysis_required(config)
             result = run_backtest(

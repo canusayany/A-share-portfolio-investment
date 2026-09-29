@@ -112,7 +112,7 @@ class CalendarAndConfigTests(unittest.TestCase):
         self.assertIn(date(2020, 1, 1), rebalance_days(days, "yearly"))
         self.assertEqual(rebalance_days(days, "yearly", 5), {date(2020, 1, 1), date(2020, 5, 1)})
         self.assertEqual(rebalance_days(days, "daily"), set(days))
-        self.assertEqual(repo_actual_days(date(2020, 1, 3)), 3)
+        self.assertEqual(repo_actual_days(date(2020, 1, 3)), 1)
         self.assertEqual(repo_maturity_day(date(2026, 7, 10), 7), date(2026, 7, 17))
         self.assertEqual(repo_actual_days(date(2026, 7, 10), 7), 7)
 

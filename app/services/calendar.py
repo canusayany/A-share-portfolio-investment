@@ -4,6 +4,8 @@ from bisect import bisect_left
 from datetime import date, timedelta
 from functools import lru_cache
 
+REPO_ACTUAL_DAY_RULE_START = date(2017, 5, 22)
+
 
 def parse_date(value: str | date) -> date:
     if isinstance(value, date):
@@ -131,7 +133,7 @@ def repo_maturity_day(
     tenor_days: int = 1,
     trading_days: list[date] | None = None,
 ) -> date:
-    """Return the repo settlement date using calendar-day tenor rules.
+    """Return the clearing date when repo proceeds become available for trading.
 
     Exchange repo tenors are calendar days.  If the contractual maturity is
     not a trading day, settlement rolls to the next trading day.  A supplied
@@ -154,5 +156,15 @@ def repo_actual_days(
     tenor_days: int = 1,
     trading_days: list[date] | None = None,
 ) -> int:
+    if trade_day < REPO_ACTUAL_DAY_RULE_START:
+        return max(int(tenor_days), 1)
     maturity = repo_maturity_day(trade_day, tenor_days, trading_days)
-    return max((maturity - trade_day).days, 1)
+    # Both legs settle on the trading day after clearing (T+1). The date
+    # proceeds can be reinvested is not the end of the interest period.
+    first_settlement = repo_maturity_day(trade_day, 1, trading_days)
+    final_settlement = repo_maturity_day(maturity, 1, trading_days)
+    return max((final_settlement - first_settlement).days, 1)
+
+
+def repo_year_basis(trade_day: date) -> int:
+    return 360 if trade_day < REPO_ACTUAL_DAY_RULE_START else 365

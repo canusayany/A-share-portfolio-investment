@@ -27,7 +27,7 @@ from app.config import (
     validate_config,
 )
 from app.db import insert_many, json_dumps, utc_now
-from app.services.calendar import add_business_days, business_days, first_business_day_by_month, parse_date, rebalance_days, repo_actual_days, repo_maturity_day
+from app.services.calendar import add_business_days, business_days, first_business_day_by_month, market_business_days, parse_date, rebalance_days, repo_actual_days, repo_maturity_day, repo_year_basis
 from app.services.fees import (
     CnEtfFeeConfig,
     FxFeeConfig,
@@ -50,7 +50,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 47
+BACKTEST_ENGINE_VERSION = 48
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -571,6 +571,63 @@ def load_dividend_events(
 def forward_value(values: dict[str, float], day: date, last: float | None) -> float | None:
     current = values.get(day.isoformat())
     return current if current is not None else last
+
+
+def reference_value_maps(maps: dict[str, dict[str, float]], days: list[date]) -> dict[str, dict[str, float]]:
+    """Carry the latest published value, including sessions between CN dates."""
+    result = {}
+    for symbol, values in maps.items():
+        ordered = sorted(values.items())
+        cursor = 0
+        last = None
+        aligned = {}
+        for day in days:
+            day_str = day.isoformat()
+            while cursor < len(ordered) and ordered[cursor][0] <= day_str:
+                last = ordered[cursor][1]
+                cursor += 1
+            if last is not None:
+                aligned[day_str] = last
+        result[symbol] = aligned
+    return result
+
+
+def align_dividend_events(
+    ex_events: dict[str, list[dict[str, Any]]],
+    days: list[date],
+    fx_maps: dict[str, dict[str, float]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Book events skipped by the CN valuation calendar before the next trade.
+
+    Holdings have not changed between these valuation dates. Preserve the
+    original ex-date FX and payment date, rather than using the next CN close.
+    """
+    aligned = {}
+    day_strings = [day.isoformat() for day in days]
+    fx_dates = {pair: sorted(values) for pair, values in fx_maps.items()}
+    for ex_date, events in sorted(ex_events.items()):
+        index = bisect_left(day_strings, ex_date)
+        if index >= len(day_strings):
+            continue
+        event_fx = {}
+        for pair, dates in fx_dates.items():
+            fx_index = bisect_right(dates, ex_date) - 1
+            if fx_index >= 0:
+                event_fx[pair] = fx_maps[pair][dates[fx_index]]
+        aligned.setdefault(day_strings[index], []).extend(
+            {**event, "ex_date_fx_rates": event_fx} for event in events
+        )
+    return aligned
+
+
+def rebalance_quotes_ready(
+    state: PortfolioState,
+    targets: dict[str, float],
+    execution_prices: dict[str, float | None],
+) -> bool:
+    required = {symbol for symbol, weight in targets.items() if symbol != "REPO" and weight > 0}
+    required.update(symbol for symbol, pos in state.positions.items() if pos.quantity > 1e-10)
+    return all(execution_prices.get(symbol) is not None and execution_prices[symbol] > 0 for symbol in required)
 
 
 def currency_to_cny_rate(currency: str, fx_rates: dict[str, float]) -> float:
@@ -1640,8 +1697,11 @@ def _repo_lot_value(lot: RepoLot, valuation_day: date | None) -> float:
 def _repo_lot_accrued_interest(lot: RepoLot, valuation_day: date | None) -> float:
     if lot.start_date is None or valuation_day is None:
         return lot.interest
-    elapsed_days = min(max((valuation_day - lot.start_date).days, 0), max(lot.actual_days, 1))
-    return lot.interest * elapsed_days / max(lot.actual_days, 1)
+    # Interest uses settlement-day counts, but economic accrual finishes when
+    # the proceeds become usable. These periods differ around weekends/holidays.
+    holding_days = max((lot.maturity_date - lot.start_date).days, 1)
+    elapsed_days = min(max((valuation_day - lot.start_date).days, 0), holding_days)
+    return lot.interest * elapsed_days / holding_days
 
 
 def _repo_cumulative_profit_cny(state: PortfolioState, valuation_day: date | None) -> float:
@@ -1944,7 +2004,7 @@ def _invest_idle_cash_in_repo(
     investable = math.floor(investable_cash / lot_size) * lot_size
     if investable >= lot_size:
         actual_days = repo_actual_days(day, tenor_days, trading_days)
-        interest = repo_interest(investable, repo_rate, actual_days)
+        interest = repo_interest(investable, repo_rate, actual_days, trade_day=day)
         if repo_fee_config is None:
             fallback_values = dict(fees["repo"])
             configured_rate = float(
@@ -2275,14 +2335,15 @@ def _apply_dividend_events(
             * float(event["div_cash"])
             * float(event.get("normalized_share_scale", 1.0) or 1.0)
         )
+        event_fx_rates = event.get("ex_date_fx_rates", fx_rates)
         if event["currency"] == "USD":
-            fx = currency_to_cny_rate("USD", fx_rates)
+            fx = currency_to_cny_rate("USD", event_fx_rates)
             tax_rate = float(fees["tax"].get("us_dividend_withholding_rate", 0.10))
             tax = dividend * tax_rate * fx
             state.total_withheld_tax_cny += tax
             net_dividend_cny = dividend * (1.0 - tax_rate) * fx
         elif event["currency"] == "HKD":
-            fx = currency_to_cny_rate("HKD", fx_rates)
+            fx = currency_to_cny_rate("HKD", event_fx_rates)
             tax_rate = float(fees["tax"].get("hk_dividend_withholding_rate", 0.0))
             tax = dividend * tax_rate * fx
             state.total_withheld_tax_cny += tax
@@ -2537,6 +2598,7 @@ def _simulate_comparison_series(
     monthly_spend_days: set[date],
     reb_days: set[date],
     should_cancel=None,
+    repo_trading_days: list[date] | None = None,
 ) -> dict[str, float]:
     assets = comparison_assets(config)
     comparison_config = {**config, "assets": assets, "repo_symbol": repo_rate_symbol(config)}
@@ -2545,7 +2607,8 @@ def _simulate_comparison_series(
     state = _initial_state(initial_capital_cny, sim_assets)
     symbols = [asset["symbol"] for asset in sim_assets]
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols}
-    latest_open_prices: dict[str, float | None] = {symbol: None for symbol in symbols}
+    valuation_price_maps = reference_value_maps(price_maps, days)
+    valuation_fx_maps = reference_value_maps(fx_maps, days)
     comparison_fx_pairs = required_fx_pairs_for_assets(assets)
     latest_fx_rates: dict[str, float | None] = {pair: None for pair in comparison_fx_pairs}
     latest_repo_rate: float | None = None
@@ -2566,12 +2629,10 @@ def _simulate_comparison_series(
         if idx % 64 == 0:
             raise_if_cancelled(should_cancel)
         day_str = day.isoformat()
-        for symbol in latest_open_prices:
-            latest_open_prices[symbol] = forward_value(open_price_maps.get(symbol, {}), day, latest_open_prices.get(symbol))
         for symbol in latest_prices:
-            latest_prices[symbol] = forward_value(price_maps.get(symbol, {}), day, latest_prices.get(symbol))
+            latest_prices[symbol] = forward_value(valuation_price_maps.get(symbol, {}), day, latest_prices.get(symbol))
         for pair in latest_fx_rates:
-            latest_fx_rates[pair] = forward_value(fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
+            latest_fx_rates[pair] = forward_value(valuation_fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
         repo_rate = repo_map.get(day_str)
         if repo_rate is not None:
             latest_repo_rate = repo_rate
@@ -2584,9 +2645,12 @@ def _simulate_comparison_series(
 
         _mature_repo_lots(state, day)
         _apply_dividend_events(state, day_str, ex_events, pay_events, fx_rates, config["fees"])
-        if pending_rebalance and pending_rebalance["execution_date"] == day_str:
+        execution_opens = {symbol: open_price_maps.get(symbol, {}).get(day_str) for symbol in latest_prices}
+        execution_closes = {symbol: price_maps.get(symbol, {}).get(day_str) for symbol in latest_prices}
+        if (pending_rebalance and pending_rebalance["execution_date"] <= day_str
+                and rebalance_quotes_ready(state, pending_rebalance["targets"], execution_opens)):
             open_prices = {
-                symbol: latest_open_prices.get(symbol) if latest_open_prices.get(symbol) is not None else latest_prices.get(symbol)
+                symbol: execution_opens[symbol] if execution_opens[symbol] is not None else latest_prices.get(symbol)
                 for symbol in latest_prices
             }
             open_total, open_values = _portfolio_value(state, open_prices, fx_rates, day)
@@ -2613,7 +2677,7 @@ def _simulate_comparison_series(
         if day in monthly_spend_days:
             spend = float(config["monthly_spend_cny"])
             if state.cash_cny < spend:
-                _cover_cash_shortfall(state, spend, day, latest_prices, fx_rates, config["fees"], trades)
+                _cover_cash_shortfall(state, spend, day, execution_closes, fx_rates, config["fees"], trades)
             actual_spend = min(spend, state.cash_cny)
             state.cash_cny -= actual_spend
             state.total_spend_cny += actual_spend
@@ -2628,7 +2692,7 @@ def _simulate_comparison_series(
             money_fund_asset=None,
         )
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
-        is_rebalance_day = not initial_rebalance_done
+        is_rebalance_day = not initial_rebalance_done and rebalance_quotes_ready(state, targets, execution_closes)
         if is_rebalance_day and should_rebalance(current_weights, targets, float(config["rebalance_band"])):
             _rebalance_state_to_band(
                 state,
@@ -2658,10 +2722,10 @@ def _simulate_comparison_series(
             monthly_spend_days,
             float(config["monthly_spend_cny"]),
             reb_days,
-            0.0,
+            state.cash_cny if pending_rebalance else 0.0,
             repo_fee_config,
             monthly_spend_ordinals,
-            days,
+            repo_trading_days or days,
             one_day_repo_fee_config,
         )
         total, _values = _portfolio_value(state, latest_prices, fx_rates, day)
@@ -2756,6 +2820,15 @@ def run_backtest(
     attach_proxy_price_maps(price_maps, all_assets)
     attach_proxy_price_maps(open_price_maps, all_assets)
     attach_nontradable_route_expense_drag(price_maps, all_assets)
+    sessions = {
+        market: {day.isoformat() for day in market_business_days(conn, market, start, end)}
+        for market in {"CN"} | {asset.get("market", "CN") for asset in sim_assets}
+    }
+    for asset in sim_assets + [{"symbol": benchmark_symbol, "market": "CN"}]:
+        symbol = asset["symbol"]
+        valid_dates = sessions[asset.get("market", "CN")]
+        for maps in (price_maps, open_price_maps):
+            maps[symbol] = {day: value for day, value in maps.get(symbol, {}).items() if day in valid_dates}
     needed_fx_pairs = required_fx_pairs_for_assets(all_assets)
     fx_maps = load_fx_maps(conn, needed_fx_pairs, start, end)
     repo_map = load_repo_map(conn, repo_symbol, start, end)
@@ -2773,6 +2846,13 @@ def run_backtest(
     )
     days = reference_trading_days(start, end, price_maps.get(benchmark_symbol, {}), repo_map)
     attach_prior_published_close_execution_maps(open_price_maps, price_maps, all_assets, days)
+    # Keep valuation carry-forward separate from prices eligible for execution.
+    valuation_price_maps = reference_value_maps(price_maps, days)
+    valuation_fx_maps = reference_value_maps(fx_maps, days)
+    ex_events = align_dividend_events(ex_events, days, fx_maps)
+    repo_trading_days = market_business_days(
+        conn, "CN", start, parse_date(end) + timedelta(days=repo_tenor_days(config) + 31),
+    )
     logger.info(
         "run_backtest data loaded days=%d price_rows=%d fx_rows=%d repo_rows=%d one_day_repo_rows=%d dividend_events=%d seconds=%.3f",
         len(days),
@@ -2813,7 +2893,6 @@ def run_backtest(
     monthly_spend_ordinals = sorted(day.toordinal() for day in monthly_spend_days)
     reb_days = rebalance_days(days, config["rebalance_frequency"], int(config["annual_rebalance_month"]))
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
-    latest_open_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
     latest_fx_rates: dict[str, float | None] = {pair: None for pair in needed_fx_pairs}
     latest_repo_rate: float | None = None
     latest_one_day_repo_rate: float | None = None
@@ -2877,12 +2956,10 @@ def run_backtest(
         daily_trade_start_index = len(trades)
         daily_dividends_by_symbol: dict[str, float] = {}
         daily_holding_fees_by_symbol: dict[str, float] = {}
-        for symbol in latest_open_prices:
-            latest_open_prices[symbol] = forward_value(open_price_maps.get(symbol, {}), day, latest_open_prices.get(symbol))
         for symbol in latest_prices:
-            latest_prices[symbol] = forward_value(price_maps.get(symbol, {}), day, latest_prices.get(symbol))
+            latest_prices[symbol] = forward_value(valuation_price_maps.get(symbol, {}), day, latest_prices.get(symbol))
         for pair in latest_fx_rates:
-            latest_fx_rates[pair] = forward_value(fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
+            latest_fx_rates[pair] = forward_value(valuation_fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
         repo_rate = repo_map.get(day_str)
         if repo_rate is not None:
             latest_repo_rate = repo_rate
@@ -2909,7 +2986,7 @@ def run_backtest(
             year_start_date = day_str
         benchmark_repo_rate = latest_repo_rate if latest_repo_rate is not None else latest_one_day_repo_rate
         if benchmark_repo_rate is not None:
-            repo_benchmark_nav *= 1.0 + (benchmark_repo_rate / 100.0) * repo_actual_days(day, 1, days) / 365.0
+            repo_benchmark_nav *= 1.0 + (benchmark_repo_rate / 100.0) * repo_actual_days(day, 1, repo_trading_days) / repo_year_basis(day)
 
         dip_buy_blackout_today = bool(
             dip_buy_active
@@ -2958,6 +3035,9 @@ def run_backtest(
         for switch in switches_today:
             old_symbol = str(switch["from_symbol"])
             new_symbol = str(switch["to_symbol"])
+            if pending_rebalance and old_symbol in pending_rebalance["targets"]:
+                weight = pending_rebalance["targets"].pop(old_symbol)
+                pending_rebalance["targets"][new_symbol] = pending_rebalance["targets"].get(new_symbol, 0.0) + weight
             pending_dip_buys = [order for order in pending_dip_buys if str(order["symbol"]) != old_symbol]
             pending_dip_recovery_sells = [
                 order for order in pending_dip_recovery_sells if str(order["symbol"]) != old_symbol
@@ -2980,10 +3060,12 @@ def run_backtest(
         for logical_symbol, physical_symbol in current_route_symbols.items():
             previous_route_symbols[logical_symbol] = physical_symbol
         open_prices = {
-            symbol: latest_open_prices.get(symbol) if latest_open_prices.get(symbol) is not None else latest_prices.get(symbol)
+            symbol: route_execution_prices[symbol] if route_execution_prices[symbol] is not None else latest_prices.get(symbol)
             for symbol in latest_prices
         }
-        if pending_rebalance and pending_rebalance.get("execution_date") == day_str:
+        close_execution_prices = {symbol: price_maps.get(symbol, {}).get(day_str) for symbol in latest_prices}
+        if (pending_rebalance and pending_rebalance["execution_date"] <= day_str
+                and rebalance_quotes_ready(state, pending_rebalance["targets"], route_execution_prices)):
             before_open_total, before_open_values = _portfolio_value(state, open_prices, fx_rates, day)
             open_weights = {key: (value / before_open_total if before_open_total else 0.0) for key, value in before_open_values.items()}
             # The prior close only schedules the order.  Re-evaluate against
@@ -3250,7 +3332,7 @@ def run_backtest(
         if day in monthly_spend_days:
             spend = float(config["monthly_spend_cny"])
             if state.cash_cny < spend:
-                _cover_cash_shortfall(state, spend, day, latest_prices, fx_rates, config["fees"], trades)
+                _cover_cash_shortfall(state, spend, day, close_execution_prices, fx_rates, config["fees"], trades)
             actual_spend = min(spend, state.cash_cny)
             state.cash_cny -= actual_spend
             state.total_spend_cny += actual_spend
@@ -3272,7 +3354,8 @@ def run_backtest(
         treasury_became_available = bool(money_fund and previous_treasury_target == "REPO" and treasury_target == money_fund["symbol"])
         current_weights = {key: (value / before_total if before_total else 0.0) for key, value in before_values.items()}
         is_rebalance_day = not initial_rebalance_done or treasury_became_available
-        should_record_rebalance = is_rebalance_day and has_investable_asset_target(targets)
+        should_record_rebalance = (is_rebalance_day and has_investable_asset_target(targets)
+                                   and rebalance_quotes_ready(state, targets, close_execution_prices))
         if should_record_rebalance:
             starts_dip_buy_cycle = not initial_rebalance_done
             rebalance_band = float(config["rebalance_band"])
@@ -3433,7 +3516,8 @@ def run_backtest(
                 deferred_dip_rechecks.clear()
         elif is_rebalance_day and not initial_rebalance_done and has_deferred_inception_target(config, day):
             initial_rebalance_done = True
-        previous_treasury_target = treasury_target
+        if not treasury_became_available or should_record_rebalance:
+            previous_treasury_target = treasury_target
 
         next_day = days[idx + 1] if idx + 1 < len(days) else None
         dip_buy_blackout_next_day = bool(
@@ -3684,10 +3768,10 @@ def run_backtest(
             monthly_spend_days,
             float(config["monthly_spend_cny"]),
             reb_days,
-            dip_buy_reserve_cny,
+            max(dip_buy_reserve_cny, state.cash_cny if pending_rebalance else 0.0),
             repo_fee_config,
             monthly_spend_ordinals,
-            days,
+            repo_trading_days,
             one_day_repo_fee_config,
         )
 
@@ -3919,6 +4003,7 @@ def run_backtest(
             set(monthly_spend_days),
             set(reb_days),
             should_cancel,
+            repo_trading_days=repo_trading_days,
         )
     for row, payload in zip(daily_rows, daily_payloads):
         if include_comparison and persist:

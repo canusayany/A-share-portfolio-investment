@@ -47,7 +47,7 @@ from app.services.data_sync import (
     upsert_dividend_rows,
     yahoo_period,
 )
-from tests.helpers import build_synced_db, fixture_dividends, fixture_fx_rates, fixture_price_series, fixture_repo_rates, temp_db_path
+from tests.helpers import build_synced_db, fixture_dividends, fixture_fx_rates, fixture_price_series, fixture_repo_rates, seed_fixture_calendar, temp_db_path
 
 
 def enable_assets(config: dict, *symbols: str) -> None:
@@ -110,18 +110,20 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertTrue(all(row["adj_factor"] == 2.0 for row in rows))
         self.assertTrue(all(row["source"] == "carry_forward:tushare:fund_adj" for row in rows))
 
-    def test_chinabond_sync_uses_tail_coverage_not_weekday_holiday_gaps(self) -> None:
+    def test_chinabond_sync_excludes_published_holidays_but_repairs_missing_session(self) -> None:
         cfg = normalize_config({})
         asset = next(item for item in cfg["assets"] if item["symbol"] == "CBA21801")
         db_path = temp_db_path()
         init_db(db_path)
         with db_session(db_path) as conn:
+            seed_fixture_calendar(conn, "2024-09-30", "2024-10-08")
+            conn.execute("UPDATE trading_calendar SET is_open=0 WHERE market='CN' AND trade_date BETWEEN '2024-10-01' AND '2024-10-07'")
             conn.execute(
                 "INSERT INTO prices(symbol,trade_date,open,high,low,close,adj_close,volume,amount,currency,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 ("CBA21801", "2024-10-08", 100, 100, 100, 100, 100, 0, 0, "CNY", "chinabond:index_total_return"),
             )
             ranges = chinabond_price_sync_ranges(conn, "prices", "symbol", asset["symbol"], "trade_date", "2024-09-30", "2024-10-08")
-        self.assertEqual(ranges, [])
+        self.assertEqual(ranges, [("2024-09-30", "2024-09-30")])
 
     def test_30y_sync_refetches_modeled_rows_that_overlap_official_history(self) -> None:
         cfg = normalize_config({})
@@ -273,7 +275,7 @@ class DbAndSyncTests(unittest.TestCase):
         asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "518880.SH")
         fallback_calls = []
         primary_calls = []
-        original_missing_tail = data_sync_module.missing_tail_date_ranges
+        original_missing_dates = data_sync_module.missing_date_ranges
 
         def fake_fallback_tail(*args):
             fallback_calls.append(args[5:])
@@ -284,10 +286,10 @@ class DbAndSyncTests(unittest.TestCase):
             return []
 
         try:
-            data_sync_module.missing_tail_date_ranges = fake_fallback_tail
+            data_sync_module.missing_date_ranges = fake_fallback_tail
             ranges = asset_price_sync_ranges(None, asset, "2008-01-01", "2020-12-31", fake_primary_tail)
         finally:
-            data_sync_module.missing_tail_date_ranges = original_missing_tail
+            data_sync_module.missing_date_ranges = original_missing_dates
 
         self.assertEqual(fallback_calls, [("2008-01-01", "2013-07-17")])
         self.assertEqual(primary_calls, [("2013-07-18", "2020-12-31")])
@@ -1129,7 +1131,7 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertIn("dividends:510300.SH", result["missing_data"])
         self.assertEqual(coverage, [])
 
-    def test_targeted_price_sync_uses_tail_ranges(self) -> None:
+    def test_targeted_price_sync_repairs_interior_and_tail_ranges(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         enable_assets(cfg, "VOO")
         original_fetch_prices = data_sync_module.fetch_yahoo_prices
@@ -1147,8 +1149,8 @@ class DbAndSyncTests(unittest.TestCase):
         finally:
             data_sync_module.fetch_yahoo_prices = original_fetch_prices
 
-        self.assertEqual(requested_ranges, [("2020-01-10", "2020-01-10")])
-        self.assertEqual(result["inserted"]["prices"], 1)
+        self.assertEqual(requested_ranges, [("2020-01-03", "2020-01-03"), ("2020-01-10", "2020-01-10")])
+        self.assertEqual(result["inserted"]["prices"], 2)
         self.assertNotIn("prices:VOO", result["missing_data"])
 
     def test_targeted_cn_price_sync_uses_configured_price_fallback(self) -> None:
