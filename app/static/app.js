@@ -802,17 +802,6 @@ function compactConfigForRequest(fullConfig) {
   };
 }
 
-function selectParameterStep(step) {
-  document.querySelectorAll("[data-parameter-tab]").forEach((button) => {
-    const active = button.dataset.parameterTab === step;
-    button.setAttribute("aria-selected", String(active));
-    button.tabIndex = active ? 0 : -1;
-  });
-  document.querySelectorAll("[data-parameter-panel]").forEach((panel) => {
-    panel.hidden = panel.dataset.parameterPanel !== step;
-  });
-}
-
 function configFingerprint(value) {
   if (!value) return "";
   // Compare editable values only; catalogue descriptions and server metadata
@@ -874,8 +863,6 @@ function setRunBusy(busy) {
 }
 
 function focusInvalidControl(input, message) {
-  const step = input?.closest("[data-parameter-panel]")?.dataset.parameterPanel;
-  if (step) selectParameterStep(step);
   if (isMobileLayout()) setParameterPanel(true);
   let parent = input?.parentElement;
   while (parent && parent !== $("parameterPanel")) {
@@ -903,7 +890,6 @@ function validateControls() {
   if (next.start_date > next.end_date) return focusInvalidControl($("endDate"), "结束日期不能早于开始日期");
   const total = next.assets.reduce((sum, asset) => sum + (asset.enabled ? asset.target_weight : 0), 0);
   if (next.repo_target_mode === "residual_weight" && total > 1 + 1e-8) {
-    selectParameterStep("allocation");
     return focusInvalidControl($("assetControls")?.querySelector('input[type="number"]'), `资产权重合计 ${fmtPct(total)}，不能超过 100%`);
   }
   return true;
@@ -3804,8 +3790,6 @@ function setupTabs(selector, dataKey, selectPanel) {
 function setupUiInteractions() {
   window.addEventListener("resize", syncDrawerAccessibility);
   setRunBusy(false);
-  setupTabs("[data-parameter-tab]", "parameterTab", selectParameterStep);
-  selectParameterStep("scope");
   $("parameterPanel")?.addEventListener("input", () => { if (config) updateResultContext(); });
   $("parameterPanel")?.addEventListener("change", () => { if (config) updateResultContext(); });
   $("identityKeyInput")?.addEventListener("input", (event) => event.target.setCustomValidity(""));

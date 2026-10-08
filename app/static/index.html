@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a55'/%3E%3Cpath d='M7 23l6-8 5 3 7-10' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="static/styles.css?v=20261008-rebalance-records-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20261008-continuous-settings-1" />
   </head>
   <body class="history-collapsed">
     <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
@@ -43,9 +43,8 @@
       <aside id="parameterPanel" class="controls" aria-label="回测参数">
         <div class="control-panel-header">
           <div>
-            <span class="eyebrow">永久投资策略</span>
-            <h1>设置回测</h1>
-            <p>按四步调整参数，随时运行查看结果</p>
+            <h1>永久投资策略</h1>
+            <p>设定组合与规则，查看长期收益和风险</p>
           </div>
           <button id="closeParameterPanel" class="icon-button close-parameters" type="button" aria-label="关闭参数面板">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -54,15 +53,15 @@
           </button>
         </div>
 
-        <nav class="parameter-steps" role="tablist" aria-label="参数设置步骤">
-          <button id="parameterTabScope" type="button" role="tab" aria-selected="true" aria-controls="parameterScope" tabindex="0" data-parameter-tab="scope"><span>1</span>区间资金</button>
-          <button id="parameterTabAllocation" type="button" role="tab" aria-selected="false" aria-controls="parameterAllocation" tabindex="-1" data-parameter-tab="allocation"><span>2</span>资产配置</button>
-          <button id="parameterTabRebalance" type="button" role="tab" aria-selected="false" aria-controls="parameterRebalance" tabindex="-1" data-parameter-tab="rebalance"><span>3</span>调仓规则</button>
-          <button id="parameterTabAdvanced" type="button" role="tab" aria-selected="false" aria-controls="parameterAdvanced" tabindex="-1" data-parameter-tab="advanced"><span>4</span>高级设置</button>
-        </nav>
         <div class="control-flow">
-          <section id="parameterScope" class="control-section" role="tabpanel" aria-labelledby="parameterTabScope" data-parameter-panel="scope">
-            <div class="section-heading"><span>1</span><div><h2>区间资金</h2><p>确定回测时间与每月提取</p></div></div>
+          <section class="control-section">
+            <div class="section-heading">
+              <span>1</span>
+              <div>
+                <h2>回测范围</h2>
+                <p>资金、时间与再平衡规则</p>
+              </div>
+            </div>
             <label>
               初始资金（元）
               <input id="initialCapital" type="number" min="10000" step="10000" inputmode="decimal" />
@@ -82,71 +81,28 @@
               <button type="button" data-date-preset="10">近10年</button>
               <button type="button" data-date-preset="all">全区间</button>
             </div>
-            <label>每月消费（元）
-              <input id="monthlySpend" type="number" min="0" step="500" inputmode="decimal" />
-              <small class="field-help">每月从组合提取的生活费；不提取时填 0。</small>
-            </label>
-          </section>
-          <section id="parameterAllocation" class="control-section" role="tabpanel" aria-labelledby="parameterTabAllocation" data-parameter-panel="allocation" hidden>
-            <div class="section-heading"><span>2</span><div><h2 id="assetWeightTitle">资产配置</h2><p>选择标的并分配组合权重</p></div></div>
-            <div class="default-allocation-preset">
-              <div><strong>默认稳健组合</strong><span>低波红利 25% · 30年国债 25% · 黄金 25% · 现金 25%</span></div>
-              <button id="restoreDefaultAllocation" type="button">恢复默认</button>
-            </div>
-            <div id="allocationSummary" class="allocation-summary"></div>
-            <div id="assetControls" class="asset-controls"></div>
-            <details class="optional-strategy cash-strategy" open>
-              <summary><span>现金与消费池</span><small>剩余资金的去向与生活费缓冲</small></summary>
-              <div class="optional-strategy-content">
-            <label class="visually-hidden">
-              国债目标模式
-              <select id="repoTargetMode">
-                <option value="residual_weight">按剩余权重</option>
-                <option value="fixed_bucket">固定消费池</option>
-              </select>
-            </label>
-            <div class="mode-tabs" aria-label="国债目标模式">
-              <button type="button" data-repo-mode="residual_weight">按剩余权重</button>
-              <button type="button" data-repo-mode="fixed_bucket">固定消费池</button>
-            </div>
-            <div id="repoFixedControls" class="repo-fixed-controls" hidden>
+            <div class="field-row">
               <label>
-                现金池固定金额（元）
-                <input id="repoFixedTarget" type="number" min="0" step="10000" inputmode="decimal" />
-              </label>
-              <label class="range-field">
-                <span>现金池固定比例 <strong id="repoFixedRatioValue"></strong></span>
-                <input id="repoFixedRatio" type="range" min="0" max="1" step="0.01" />
-              </label>
-            </div>
-            <label>
-              现金管理方式
-              <select id="repoSymbol"></select>
-              <small id="treasuryFallbackHint" class="field-help"></small>
-            </label>
-            <div class="repo-weight">
-              <span>当前现金池目标</span>
-              <strong id="repoWeight">0%</strong>
-            </div>
-              </div>
-            </details>
-          </section>
-          <section id="parameterRebalance" class="control-section" role="tabpanel" aria-labelledby="parameterTabRebalance" data-parameter-panel="rebalance" hidden>
-            <div class="section-heading"><span>3</span><div><h2>调仓规则</h2><p>检查频率、容忍带与补仓</p></div></div>
-            <p class="section-intro">先设检查频率，再设允许偏离。到达检查日且超出容忍带时才会买卖。</p>
-            <label>再平衡检查频率
-              <select id="rebalanceFrequency">
+                再平衡检查频率
+                <select id="rebalanceFrequency">
                   <option value="daily">每日</option>
                   <option value="weekly">每周</option>
                   <option value="monthly">每月</option>
                   <option value="quarterly">每季度</option>
-                  <option value="semiannual">每半年</option>
                   <option value="yearly">每年</option>
+                  <option value="semiannual">每半年</option>
                 </select>
-              <small id="rebalanceRuleHint" class="field-help">按所选周期检查权重；检查次数不等于成交次数。</small>
-            </label>
-            <label id="annualRebalanceMonthField">年度再平衡月份
-              <select id="annualRebalanceMonth">
+              </label>
+              <label>
+                每月消费（元）
+                <input id="monthlySpend" type="number" min="0" step="500" inputmode="decimal" />
+              </label>
+            </div>
+            <small id="rebalanceRuleHint" class="field-help">按所选周期检查权重；检查次数不等于成交次数。</small>
+            <div class="field-row">
+              <label id="annualRebalanceMonthField">
+                年度再平衡月份
+                <select id="annualRebalanceMonth">
                   <option value="1">1月</option>
                   <option value="2">2月</option>
                   <option value="3">3月</option>
@@ -160,6 +116,15 @@
                   <option value="11">11月</option>
                   <option value="12">12月</option>
                 </select>
+              </label>
+              <label>
+                滚动窗口（年）
+                <input id="rollingWindowYears" type="number" min="1" max="20" step="1" inputmode="numeric" />
+              </label>
+            </div>
+            <label id="rebalanceMonthAnalysisField" class="strategy-toggle">
+              <input id="rebalanceMonthAnalysisEnabled" type="checkbox" />
+              <span><strong>比较 1–12 月年度再平衡</strong><small>使用相同策略逐月重跑，给出各月份的年化收益与最大回撤；耗时会增加。</small></span>
             </label>
             <label class="range-field">
               <span>相对再平衡容忍带 <strong id="bandValue"></strong></span>
@@ -170,9 +135,6 @@
               <input id="rebalanceToTarget" type="checkbox" />
               <span><strong>超出容忍带后调回标准权重</strong><small>关闭时只调回容忍带以内以减少买卖；开启后，发生调仓时直接恢复到各标的设置权重。</small></span>
             </label>
-            <details class="optional-strategy" id="dipBuyDetails">
-              <summary><span>逢低补仓</span><small>年度再平衡的可选规则</small></summary>
-              <div class="optional-strategy-content">
             <label class="strategy-toggle">
               <input id="dipBuyEnabled" type="checkbox" />
               <span><strong>逢低补仓</strong><small id="dipBuyAvailabilityHint">仅年度再平衡生效。现金等价物超过剩余生活费安全垫后，宽基/低波红利/黄金/国债低于成本价达到阈值时，于下一交易日开盘补仓。</small></span>
@@ -237,20 +199,64 @@
               </label>
               <small class="field-help">仅用当日收盘价判断，下一交易日真实开盘价成交。每次年度再平衡按现金等价物减去 24 个月生活费确认 B；B 与每份金额在本周期内固定。</small>
             </div>
-              </div>
-            </details>
           </section>
-          <section id="parameterAdvanced" class="control-section" role="tabpanel" aria-labelledby="parameterTabAdvanced" data-parameter-panel="advanced" hidden>
-            <div class="section-heading"><span>4</span><div><h2>高级设置</h2><p>补充分析与费用假设</p></div></div>
-            <p class="section-intro">设置补充分析的范围，以及交易成本假设。</p>
-            <label>滚动窗口（年）
-              <input id="rollingWindowYears" type="number" min="1" max="20" step="1" inputmode="numeric" />
-              <small class="field-help">逐个区间重新建仓，观察不同入场时间的表现。</small>
+
+          <section class="control-section">
+            <div class="section-heading">
+              <span>2</span>
+              <div>
+                <h2>现金与消费池</h2>
+                <p>选择国债逆回购或货币基金，并设置现金缓冲</p>
+              </div>
+            </div>
+            <label class="visually-hidden">
+              国债目标模式
+              <select id="repoTargetMode">
+                <option value="residual_weight">按剩余权重</option>
+                <option value="fixed_bucket">固定消费池</option>
+              </select>
             </label>
-            <label id="rebalanceMonthAnalysisField" class="strategy-toggle">
-              <input id="rebalanceMonthAnalysisEnabled" type="checkbox" />
-              <span><strong>比较 1–12 月年度再平衡</strong><small>使用相同策略逐月重跑，给出各月份的年化收益与最大回撤；耗时会增加。</small></span>
+            <div class="mode-tabs" aria-label="国债目标模式">
+              <button type="button" data-repo-mode="residual_weight">按剩余权重</button>
+              <button type="button" data-repo-mode="fixed_bucket">固定消费池</button>
+            </div>
+            <div id="repoFixedControls" class="repo-fixed-controls" hidden>
+              <label>
+                现金池固定金额（元）
+                <input id="repoFixedTarget" type="number" min="0" step="10000" inputmode="decimal" />
+              </label>
+              <label class="range-field">
+                <span>现金池固定比例 <strong id="repoFixedRatioValue"></strong></span>
+                <input id="repoFixedRatio" type="range" min="0" max="1" step="0.01" />
+              </label>
+            </div>
+            <label>
+              现金管理方式
+              <select id="repoSymbol"></select>
+              <small id="treasuryFallbackHint" class="field-help"></small>
             </label>
+            <div class="repo-weight">
+              <span>当前现金池目标</span>
+              <strong id="repoWeight">0%</strong>
+            </div>
+          </section>
+
+          <section class="control-section">
+            <div class="section-heading">
+              <span>3</span>
+              <div>
+                <h2 id="assetWeightTitle">资产配置</h2>
+                <p>可同时配置 5 年、7-10 年与 30 年国债指数，并调整各自比例</p>
+              </div>
+            </div>
+            <div class="default-allocation-preset">
+              <div><strong>默认稳健组合</strong><span>低波红利 25% · 30年国债 25% · 黄金 25% · 现金 25%</span></div>
+              <button id="restoreDefaultAllocation" type="button">恢复默认</button>
+            </div>
+            <div id="allocationSummary" class="allocation-summary"></div>
+            <div id="assetControls" class="asset-controls"></div>
+          </section>
+
           <details class="control-details">
             <summary>
               <span>可调整费用假设</span>
@@ -280,7 +286,6 @@
             </summary>
             <div id="feeSummary" class="fee-summary details-content"></div>
           </details>
-          </section>
         </div>
 
         <div class="run-dock">
@@ -561,6 +566,6 @@
         </div>
       </form>
     </dialog>
-  <script src="static/app.js?v=20261008-rebalance-records-1"></script>
+  <script src="static/app.js?v=20261008-continuous-settings-1"></script>
   </body>
 </html>

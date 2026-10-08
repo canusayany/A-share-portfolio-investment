@@ -734,56 +734,6 @@ body.history-collapsed .close-history {
   font-weight: 650;
 }
 
-.parameter-steps {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  flex: 0 0 auto;
-  gap: 4px;
-  padding: 10px 12px;
-  background: var(--surface-subtle);
-  border-bottom: 1px solid var(--line);
-}
-
-.parameter-steps button {
-  display: grid;
-  justify-items: center;
-  align-content: center;
-  gap: 3px;
-  min-height: 64px;
-  min-width: 0;
-  padding: 7px 2px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--font-caption);
-  font-weight: 650;
-}
-
-.parameter-steps button span {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  font-size: var(--font-caption);
-}
-
-.parameter-steps button[aria-selected="true"] {
-  color: var(--accent-strong);
-  background: var(--surface);
-  border-color: #b9d9cd;
-  box-shadow: var(--shadow-sm);
-}
-
-.parameter-steps button[aria-selected="true"] span {
-  color: #fff;
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
 .section-intro {
   margin: -2px 0 18px;
   color: var(--ink-soft);
@@ -842,6 +792,10 @@ body.history-collapsed .close-history {
   position: relative;
   padding: 22px;
   min-width: 0;
+}
+
+.control-section + .control-section {
+  border-top: 1px solid var(--line);
 }
 
 .section-heading {
@@ -3126,8 +3080,6 @@ tbody tr:hover td {
   .control-panel-header { padding: max(14px, env(safe-area-inset-top)) 18px 14px; }
   .control-panel-header .eyebrow { display: none; }
   .control-panel-header h1 { font-size: 22px; }
-  .parameter-steps { padding-block: 8px; }
-  .parameter-steps button { min-height: 56px; }
 
   .controls input:not([type="checkbox"]):not([type="range"]),
   .controls select,
