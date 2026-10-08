@@ -856,7 +856,7 @@ function updateRebalanceExplanation() {
   const summary = currentSummary;
   host.hidden = !currentRunId;
   host.textContent = summary?.rebalance_check_count != null
-    ? `周期检查 ${summary.rebalance_check_count} 次 · 实际调仓 ${summary.rebalance_trade_count} 次 · 带内无需调仓 ${summary.rebalance_within_band_count ?? 0} 次 · 成交条件不足 ${summary.rebalance_constrained_count ?? 0} 次。首次建仓单独计算；逐次原因见调仓记录。`
+    ? `周期检查 ${summary.rebalance_check_count} 次 · 实际调仓 ${summary.rebalance_trade_count} 次 · 带内无需调仓 ${summary.rebalance_within_band_count ?? 0} 次 · 成交条件不足 ${summary.rebalance_constrained_count ?? 0} 次。首次建仓单独计算；带内无需调仓记录已隐藏。`
     : currentRunId ? "此历史版本未区分周期检查与实际成交，请重新运行以查看调仓原因。" : "运行后将分别显示周期检查与实际调仓次数。";
 }
 
@@ -3030,9 +3030,10 @@ function rebalanceCashEquivalentSymbols() {
 }
 
 function rebalanceDisplayRows(rows) {
+  const visibleRows = rows.filter((row) => rebalanceActionLabel(row.payload) !== "带内，无需调仓");
   const cashEquivalentSymbols = rebalanceCashEquivalentSymbols();
   const symbols = [];
-  for (const row of rows) {
+  for (const row of visibleRows) {
     for (const symbol of Object.keys(row.payload?.asset_performance || {})) {
       if (cashEquivalentSymbols.has(symbol)) continue;
       if (!symbols.includes(symbol)) symbols.push(symbol);
@@ -3044,7 +3045,7 @@ function rebalanceDisplayRows(rows) {
   }
   const baseColumns = ["执行日", "检查结果", "成交笔数", "成交金额", "决策日", "收益年度", "当年总资产", "当年收益（按上年度总资产）", "当年收益（按原始资金）", "当年盈亏", "当年最大回撤", "当年手续费"];
   const assetColumns = orderedSymbols.map(rebalanceAssetColumnName);
-  const displayRows = rows.map((row) => {
+  const displayRows = visibleRows.map((row) => {
     const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
     const item = {
       执行日: row.rebalance_date,
