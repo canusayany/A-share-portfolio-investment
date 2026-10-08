@@ -1,0 +1,12 @@
+{
+  "name": "portfolio-workbench-tests",
+  "private": true,
+  "scripts": {
+    "test:ui": "node --experimental-test-isolation=none --test tests/ui_*.test.cjs",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0"
+  }
+}

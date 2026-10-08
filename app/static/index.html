@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a55'/%3E%3Cpath d='M7 23l6-8 5 3 7-10' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="static/styles.css?v=20261008-continuous-settings-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20261008-research-1" />
   </head>
   <body class="history-collapsed">
     <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
@@ -98,6 +98,7 @@
                 <input id="monthlySpend" type="number" min="0" step="500" inputmode="decimal" />
               </label>
             </div>
+            <label>消费年增幅（%）<input id="monthlySpendAnnualGrowth" type="number" min="0" max="50" step="any" value="0" inputmode="decimal" /><small class="field-help">每满 12 个提取月份增加一次；0 表示每月消费金额不变。</small></label>
             <small id="rebalanceRuleHint" class="field-help">按所选周期检查权重；检查次数不等于成交次数。</small>
             <div class="field-row">
               <label id="annualRebalanceMonthField">
@@ -128,7 +129,7 @@
             </label>
             <label class="range-field">
               <span>相对再平衡容忍带 <strong id="bandValue"></strong></span>
-              <input id="rebalanceBand" type="range" min="0" max="1" step="0.01" />
+              <span class="range-number-pair"><input id="rebalanceBand" type="range" min="0" max="1" step="any" /><span class="percent-number"><input id="rebalanceBandPercent" type="number" min="0" max="100" step="any" inputmode="decimal" aria-label="相对容忍带百分比" required /><span>%</span></span></span>
               <small class="field-help">按目标权重的比例计算：目标 10%、容忍带 25%，允许区间为 7.5% 至 12.5%。</small>
             </label>
             <label class="strategy-toggle">
@@ -142,7 +143,7 @@
             <div id="dipBuySettings" class="dip-buy-settings">
               <label class="range-field">
                 <span>相对成本价下跌 Q <strong id="dipBuyDrawdownValue"></strong></span>
-                <input id="dipBuyDrawdown" type="range" min="0.01" max="0.30" step="0.01" />
+                <span class="range-number-pair"><input id="dipBuyDrawdown" type="range" min="0.01" max="0.30" step="any" /><span class="percent-number"><input id="dipBuyDrawdownPercent" type="number" min="1" max="30" step="any" inputmode="decimal" aria-label="补仓下跌阈值百分比" required /><span>%</span></span></span>
                 <small class="field-help">形成 Q、2Q、3Q…分档；每个资产的每一档在本年度周期内最多成交一次，不设冷却期。</small>
               </label>
               <div class="field-row">
@@ -191,7 +192,7 @@
               </label>
               <label id="dipBuyAssetCapField" class="range-field dip-buy-cap-field">
                 <span>最多为初始投入的 <strong id="dipBuyAssetCapRatioValue"></strong></span>
-                <input id="dipBuyAssetCapRatio" type="range" min="0.10" max="1.00" step="0.05" />
+                <span class="range-number-pair"><input id="dipBuyAssetCapRatio" type="range" min="0.10" max="1.00" step="any" /><span class="percent-number"><input id="dipBuyAssetCapRatioPercent" type="number" min="10" max="100" step="any" inputmode="decimal" aria-label="单资产补仓上限百分比" required /><span>%</span></span></span>
               </label>
               <label class="strategy-toggle strategy-toggle-compact">
                 <input id="dipBuyBlackoutEnabled" type="checkbox" />
@@ -227,7 +228,7 @@
               </label>
               <label class="range-field">
                 <span>现金池固定比例 <strong id="repoFixedRatioValue"></strong></span>
-                <input id="repoFixedRatio" type="range" min="0" max="1" step="0.01" />
+                <span class="range-number-pair"><input id="repoFixedRatio" type="range" min="0" max="1" step="any" /><span class="percent-number"><input id="repoFixedRatioPercent" type="number" min="0" max="100" step="any" inputmode="decimal" aria-label="现金池固定比例百分比" required /><span>%</span></span></span>
               </label>
             </div>
             <label>
@@ -320,12 +321,13 @@
           <p id="draftNotice" class="draft-notice" role="status" hidden>参数已修改，点击运行回测更新结果。</p>
           <details class="context-config"><summary>查看当前编辑参数</summary><div id="controlSummary" class="control-summary"></div></details>
         </section>
-        <nav class="result-navigation" aria-label="结果导航"><a href="#summaryGrid">结果概览</a><a href="#analysisSection">走势分析</a><a href="#recordsSection">数据记录</a><button id="openCsvExport" type="button" class="csv-export-button result-export">导出CSV</button></nav>
+        <nav class="result-navigation" aria-label="结果导航"><a href="#summaryGrid">结果概览</a><a href="#analysisSection">走势分析</a><a href="#recordsSection">数据记录</a><a id="openResearchSection" href="#researchSection">参数研究</a><button id="openCsvExport" type="button" class="csv-export-button result-export">导出CSV</button></nav>
 
         <section id="summaryGrid" class="summary-grid" aria-label="核心指标" aria-live="polite"></section>
 
         <p id="rebalanceExplanation" class="rebalance-explanation result-explanation" hidden>运行后查看检查次数、实际调仓和未触发原因。</p>
 
+        <section id="rebalanceEventDetail" class="event-detail" aria-live="polite" tabindex="-1" hidden></section>
         <section id="analysisSection" class="analysis-panel" aria-labelledby="analysisTitle">
           <div class="panel-heading">
             <div>
@@ -466,6 +468,37 @@
           <div id="riskInsightsContent" class="risk-insights-content" aria-live="polite"></div>
         </details>
 
+        <details id="researchSection" class="research-section">
+          <summary><span><strong>参数研究</strong><small>调仓频率与容忍带 · 消费压力测试</small></span></summary>
+          <div class="research-content">
+            <p id="researchBaseline" class="research-baseline">先运行或查看一份已保存结果，再开始研究。</p>
+            <p class="field-help">固定已保存方案逐场景真实计算，不使用待应用草稿；每项最多 24 个场景，结果不会加入回测历史。</p>
+            <section class="research-tool" aria-labelledby="rebalanceResearchTitle">
+              <h3 id="rebalanceResearchTitle">调仓频率 × 容忍带</h3>
+              <fieldset id="rebalanceResearchFrequencies"><legend>检查频率（可多选）</legend>
+                <label><input type="checkbox" value="daily" />每日</label><label><input type="checkbox" value="weekly" />每周</label><label><input type="checkbox" value="monthly" checked />每月</label><label><input type="checkbox" value="quarterly" checked />每季度</label><label><input type="checkbox" value="semiannual" />每半年</label><label><input type="checkbox" value="yearly" checked />每年</label>
+              </fieldset>
+              <label>相对容忍带（%，逗号分隔）<input id="rebalanceResearchBands" value="0, 10, 25" inputmode="decimal" aria-describedby="rebalanceResearchCount" /></label>
+              <p id="rebalanceResearchCount" class="field-help"></p>
+              <div class="research-actions"><button id="startRebalanceResearch" type="button" class="button button-secondary">运行调仓研究</button><button id="cancelRebalanceResearch" type="button" class="button button-secondary" hidden>取消任务</button><button id="resumeRebalanceResearch" type="button" class="button button-secondary" hidden>重试读取进度</button></div>
+              <p id="rebalanceResearchStatus" class="research-status" role="status">暂无研究结果</p><progress id="rebalanceResearchProgress" max="1" value="0" hidden aria-label="调仓研究进度"></progress>
+              <button id="rebalanceResearchExisting" type="button" class="button button-secondary" hidden>查看进行中的研究方案</button>
+              <button id="rebalanceResearchRebase" type="button" class="button button-secondary" hidden>将已保存基准载入编辑区</button>
+              <div id="rebalanceResearchMethodology" class="research-methodology"></div><div id="rebalanceResearchCards" class="research-cards"></div><div class="table-scroll"><table id="rebalanceResearchTable"></table></div>
+            </section>
+            <section class="research-tool" aria-labelledby="withdrawalResearchTitle">
+              <h3 id="withdrawalResearchTitle">消费压力研究</h3>
+              <div class="research-input-grid"><label>每月消费金额（元，逗号分隔）<input id="withdrawalResearchSpends" value="0, 2500, 5000" inputmode="decimal" /></label><label>消费年增幅（%，逗号分隔）<input id="withdrawalResearchGrowthRates" value="0, 3" inputmode="decimal" /></label><label>开始年份（逗号分隔）<input id="withdrawalResearchStartYears" inputmode="numeric" placeholder="查看结果后默认填入起始年份" /></label></div>
+              <p id="withdrawalResearchCount" class="field-help"></p>
+              <div class="research-actions"><button id="startWithdrawalResearch" type="button" class="button button-secondary">运行消费研究</button><button id="cancelWithdrawalResearch" type="button" class="button button-secondary" hidden>取消任务</button><button id="resumeWithdrawalResearch" type="button" class="button button-secondary" hidden>重试读取进度</button></div>
+              <p id="withdrawalResearchStatus" class="research-status" role="status">暂无研究结果</p><progress id="withdrawalResearchProgress" max="1" value="0" hidden aria-label="消费研究进度"></progress>
+              <button id="withdrawalResearchExisting" type="button" class="button button-secondary" hidden>查看进行中的研究方案</button>
+              <button id="withdrawalResearchRebase" type="button" class="button button-secondary" hidden>将已保存基准载入编辑区</button>
+              <div id="withdrawalResearchMethodology" class="research-methodology"></div><div id="withdrawalResearchCards" class="research-cards"></div><div class="table-scroll"><table id="withdrawalResearchTable"></table></div>
+            </section>
+          </div>
+        </details>
+
         <section id="recordsSection" class="records-panel" aria-labelledby="recordsTitle">
           <div class="panel-heading records-heading">
             <div>
@@ -496,7 +529,7 @@
             <div class="table-scroll"><table id="rebalanceTable"></table></div>
           </div>
           <div id="tradesPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabTrades" hidden>
-            <div class="table-scroll"><table id="tradesTable"></table></div>
+            <div id="tradeDateFilter" class="trade-date-filter" hidden><span id="tradeDateFilterLabel"></span><button id="clearTradeDateFilter" type="button" class="button button-secondary">清除日期筛选</button></div><div class="table-scroll"><table id="tradesTable"></table></div>
           </div>
           <div class="table-hint">表格可横向滚动查看完整字段</div>
         </section>
@@ -506,7 +539,7 @@
         <div class="history-panel-header">
           <div>
             <h2>回测记录与榜单</h2>
-            <p>数据库保存最近 20 组；超额年化至少 2% 才进入前 100 榜单</p>
+            <p>最近展示 20 组，收藏可查看更早记录；榜单独立评价</p>
           </div>
           <button id="closeHistoryPanel" class="icon-button close-history" type="button" aria-label="关闭回测记录面板">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
@@ -518,8 +551,9 @@
             <button id="historyRecentTab" type="button" role="tab" aria-selected="true" aria-controls="historyRecentSection" data-history-view="recent">最近回测</button>
             <button id="leaderboardTab" type="button" role="tab" aria-selected="false" aria-controls="leaderboardSection" data-history-view="leaderboard">全局榜单</button>
           </div>
+          <label class="favorites-filter"><input id="historyFavoritesOnly" type="checkbox" />只看收藏（包含较早记录）</label>
           <div class="history-filters">
-            <label><span class="visually-hidden">筛选回测记录</span><input id="historySearch" type="search" placeholder="筛选标的或日期" autocomplete="off" /></label>
+            <label><span class="visually-hidden">筛选回测记录</span><input id="historySearch" type="search" placeholder="筛选名称、备注、标的或日期" autocomplete="off" /></label>
             <label><span class="visually-hidden">回测记录排序</span><select id="historySort" aria-label="回测记录排序"></select></label>
           </div>
         </div>
@@ -548,6 +582,14 @@
         </div>
       </aside>
     </div>
+    <dialog id="metadataDialog" class="metadata-dialog" aria-labelledby="metadataTitle">
+      <form id="metadataForm"><div class="metadata-heading"><h2 id="metadataTitle">编辑方案信息</h2><button id="closeMetadata" type="button" class="icon-button" aria-label="关闭方案编辑">×</button></div>
+        <label>方案名称<input id="metadataName" type="text" maxlength="80" autocomplete="off" placeholder="留空使用资产名称" /></label>
+        <label>备注<textarea id="metadataNote" maxlength="1000" rows="4" placeholder="记录该方案的用途或观察"></textarea></label>
+        <label class="favorites-filter"><input id="metadataFavorite" type="checkbox" />收藏，方便以后查找</label>
+        <p id="metadataError" role="alert"></p><div class="metadata-actions"><button id="saveMetadata" type="submit" class="button button-primary">保存信息</button><button id="cancelMetadata" type="button" class="button button-secondary">取消</button></div>
+      </form>
+    </dialog>
     <dialog id="csvExportDialog" class="csv-export-dialog" aria-labelledby="csvExportTitle">
       <form method="dialog">
         <div class="csv-export-heading">
@@ -566,6 +608,6 @@
         </div>
       </form>
     </dialog>
-  <script src="static/app.js?v=20261008-continuous-settings-1"></script>
+  <script src="static/app.js?v=20261008-research-1"></script>
   </body>
 </html>

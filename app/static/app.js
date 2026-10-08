@@ -64,6 +64,22 @@ let exportRunId = null;
 let drawerReturnFocus = null;
 let identityReturnFocus = null;
 let pendingReplayRunId = null;
+let currentChartSeries = [];
+let currentRebalanceRecords = [];
+let currentTradeRecords = [];
+let selectedTradeDate = null;
+let eventFocusVersion = 0;
+let identityVersion = 0;
+let draftLoadVersion = 0;
+let favoritesOnly = false;
+let recentArchiveRequestVersion = 0;
+let metadataEditingRunId = null;
+let metadataReturnFocus = null;
+let commonComparison = null;
+let commonComparisonVersion = 0;
+const researchTasks = new Map();
+const PERCENT_CONTROL_IDS = ["rebalanceBand", "repoFixedRatio", "dipBuyDrawdown", "dipBuyAssetCapRatio"];
+
 
 function loadChartLibrary() {
   if (window.echarts) return Promise.resolve(window.echarts);
@@ -499,6 +515,7 @@ async function api(path, options = {}) {
         const message = data.error || response.statusText || `HTTP ${response.status}`;
         const error = new Error(message);
         error.status = response.status;
+        error.payload = data;
         throw error;
       }
       return data;
@@ -530,6 +547,21 @@ function updateIdentityButtons() {
 }
 
 function resetLeaderboardForIdentity() {
+  identityVersion += 1;
+  draftLoadVersion += 1;
+  recentArchiveRequestVersion += 1;
+  commonComparisonVersion += 1;
+  commonComparison = null;
+  researchTasks.clear();
+  runHistory = [];
+  comparisonRunId = null;
+  recentArchiveLoaded = false;
+  metadataEditingRunId = null;
+  $("metadataDialog")?.close();
+  favoritesOnly = false;
+  if ($("historyFavoritesOnly")) $("historyFavoritesOnly").checked = false;
+  renderRunHistory(); renderResearch();
+  refreshRecentArchive().catch((error) => console.warn("无法刷新新身份的记录", error));
   leaderboardRequestVersion += 1;
   leaderboardHistory = [];
   leaderboardArchiveLoaded = false;
@@ -744,6 +776,7 @@ function readConfig() {
   next.rebalance_band = Number($("rebalanceBand").value);
   next.rebalance_to_target = $("rebalanceToTarget").checked;
   next.monthly_spend_cny = Number($("monthlySpend").value);
+  next.monthly_spend_annual_growth = Number($("monthlySpendAnnualGrowth")?.value || 0) / 100;
   next.repo_target_mode = $("repoTargetMode").value;
   next.repo_fixed_target_cny = Number($("repoFixedTarget").value);
   next.repo_fixed_target_ratio = Number($("repoFixedRatio").value);
@@ -808,12 +841,13 @@ function configFingerprint(value) {
   // may change without changing a strategy.
   const scalarKeys = ["initial_capital_cny", "start_date", "end_date", "rebalance_frequency",
     "annual_rebalance_month", "rolling_window_years", "rebalance_month_analysis_enabled",
-    "rebalance_band", "rebalance_to_target", "monthly_spend_cny", "repo_target_mode",
+    "rebalance_band", "rebalance_to_target", "monthly_spend_cny", "monthly_spend_annual_growth", "repo_target_mode",
     "repo_fixed_target_cny", "repo_fixed_target_ratio", "repo_symbol", "dip_buy_enabled",
     "dip_buy_drawdown", "dip_buy_total_parts", "dip_buy_level_mode", "dip_buy_cost_basis_mode",
     "dip_buy_recovery_sell_enabled", "dip_buy_asset_cap_enabled", "dip_buy_asset_cap_ratio",
     "dip_buy_blackout_enabled", "dip_buy_blackout_months"];
   const normalized = Object.fromEntries(scalarKeys.map((key) => [key, value[key]]));
+  normalized.monthly_spend_annual_growth = Number(value.monthly_spend_annual_growth || 0);
   if (value.rebalance_frequency !== "yearly") {
     normalized.dip_buy_enabled = false;
     normalized.rebalance_month_analysis_enabled = false;
@@ -837,6 +871,7 @@ function updateResultContext() {
       : "设置资金与资产配置，运行后在这里查看结果。";
   }
   if ($("openCsvExport")) $("openCsvExport").disabled = !currentRunId;
+  renderResearch();
 }
 
 function updateRebalanceExplanation() {
@@ -875,15 +910,20 @@ function focusInvalidControl(input, message) {
 }
 
 function validateControls() {
+  for (const id of PERCENT_CONTROL_IDS) {
+    const input = $(`${id}Percent`);
+    if (input && !input.disabled && !($("repoFixedControls")?.hidden && id === "repoFixedRatio") && !validPercentInput(input)) return focusInvalidControl(input);
+  }
   for (const input of document.querySelectorAll('#parameterPanel input[type="number"], #parameterPanel input[type="date"]')) {
     input.setCustomValidity("");
     if (input.disabled) continue;
     if (input.closest("#repoFixedControls") && $("repoFixedControls")?.hidden) continue;
     const asset = input.closest(".asset-control");
     if (asset && !asset.querySelector('input[type="checkbox"]')?.checked) continue;
-    if (input.type === "number" && !input.value) {
+    if (input.type === "number" && (!input.value || !Number.isFinite(Number(input.value)))) {
       input.setCustomValidity("请输入数值；不启用的金额请填 0");
     }
+    if (input.type === "number" && input.value && ((input.min !== "" && Number(input.value) < Number(input.min)) || (input.max !== "" && Number(input.value) > Number(input.max)))) input.setCustomValidity("数值超出允许范围");
     if (!input.checkValidity()) return focusInvalidControl(input);
   }
   const next = readConfig();
@@ -1149,6 +1189,7 @@ function updateRepoWeight() {
   if ($("dipBuyAssetCapField")) $("dipBuyAssetCapField").setAttribute("aria-disabled", assetCapEnabled ? "false" : "true");
   if ($("dipBuyBlackoutMonths")) $("dipBuyBlackoutMonths").disabled = !dipBuyEnabled || !$("dipBuyBlackoutEnabled")?.checked;
   if ($("dipBuySettings")) $("dipBuySettings").hidden = !dipBuyEnabled;
+  PERCENT_CONTROL_IDS.forEach((id) => { if ($(`${id}Percent`)) $(`${id}Percent`).disabled = Boolean($(id)?.disabled); });
   if ($("dipBuyAvailabilityHint")) {
     $("dipBuyAvailabilityHint").textContent = yearly
       ? "仅年度再平衡生效。现金等价物超过剩余生活费安全垫后，宽基/低波红利/黄金/国债低于成本价达到阈值时，于下一交易日开盘补仓。"
@@ -1264,6 +1305,7 @@ function renderControls() {
   $("bandValue").textContent = fmtPct(config.rebalance_band);
   $("rebalanceToTarget").checked = Boolean(config.rebalance_to_target);
   $("monthlySpend").value = config.monthly_spend_cny;
+  if ($("monthlySpendAnnualGrowth")) $("monthlySpendAnnualGrowth").value = Number(config.monthly_spend_annual_growth || 0) * 100;
   $("repoTargetMode").value = config.repo_target_mode || "residual_weight";
   $("repoFixedTarget").value = config.repo_fixed_target_cny ?? 360000;
   $("repoFixedRatio").value = config.repo_fixed_target_ratio ?? 0;
@@ -1295,7 +1337,7 @@ function renderControls() {
     $(id).addEventListener("input", renderFeeSummary, listenerOptions);
   });
   $("ibkrPlan").addEventListener("change", renderFeeSummary, listenerOptions);
-  ["initialCapital", "startDate", "endDate", "monthlySpend", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "rebalanceToTarget", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled", "dipBuyDrawdown", "dipBuyTotalParts", "dipBuyLevelMode", "dipBuyCostBasisMode", "dipBuyRecoverySellEnabled", "dipBuyAssetCapEnabled", "dipBuyAssetCapRatio", "dipBuyBlackoutEnabled", "dipBuyBlackoutMonths"].forEach((id) => {
+  ["initialCapital", "startDate", "endDate", "monthlySpend", "monthlySpendAnnualGrowth", "rebalanceFrequency", "annualRebalanceMonth", "rollingWindowYears", "rebalanceMonthAnalysisEnabled", "rebalanceToTarget", "repoTargetMode", "repoFixedTarget", "repoFixedRatio", "dipBuyEnabled", "dipBuyDrawdown", "dipBuyTotalParts", "dipBuyLevelMode", "dipBuyCostBasisMode", "dipBuyRecoverySellEnabled", "dipBuyAssetCapEnabled", "dipBuyAssetCapRatio", "dipBuyBlackoutEnabled", "dipBuyBlackoutMonths"].forEach((id) => {
     $(id).addEventListener(["rebalanceFrequency", "repoTargetMode", "dipBuyLevelMode", "dipBuyCostBasisMode"].includes(id) ? "change" : "input", updateRepoWeight, listenerOptions);
   });
   document.querySelectorAll("[data-repo-mode]").forEach((button) => {
@@ -1341,6 +1383,7 @@ function renderControls() {
     $("bandValue").textContent = fmtPct($("rebalanceBand").value);
     updateRepoWeight();
   }, listenerOptions);
+  PERCENT_CONTROL_IDS.forEach((id) => bindPercentControl(id, listenerOptions));
   updateRepoWeight();
   renderFeeSummary();
 }
@@ -2716,6 +2759,7 @@ function portfolioSnapshotTooltip(series, metrics) {
 }
 
 function renderCharts(series) {
+  currentChartSeries = series;
   if (!series.length) return;
   $("analysisEmpty").hidden = true;
   if (!window.echarts) {
@@ -2931,6 +2975,7 @@ function renderTable(id, columns, rows, options = {}) {
     </tbody>
     ${remaining > 0 ? `<tfoot><tr><td colspan="${columns.length}"><button type="button" class="table-more">再显示 ${Math.min(pageSize, remaining)} 条（剩余 ${remaining} 条）</button></td></tr></tfoot>` : ""}
   `;
+  table.querySelectorAll("[data-rebalance-date]").forEach((button) => button.addEventListener("click", () => selectRebalanceEvent(button.dataset.rebalanceDate)));
   table.querySelectorAll("[data-table-sort]").forEach((button) => {
     button.addEventListener("click", () => {
       const column = button.dataset.tableSort;
@@ -2949,6 +2994,8 @@ function renderTable(id, columns, rows, options = {}) {
 }
 
 function formatCell(value) {
+  if (value && typeof value === "object" && value.kind === "event-date") return `<button type="button" class="event-date-button" data-rebalance-date="${escapeHtml(value.raw)}" aria-label="查看 ${escapeHtml(value.raw)} 调仓详情并定位图表">${escapeHtml(value.raw)}</button>`;
+  if (value && typeof value === "object" && value.kind === "money") return value.raw == null ? "—" : escapeHtml(`￥${fmtMoney(value.raw)}`);
   if (value && typeof value === "object" && value.kind === "number") {
     return escapeHtml(fmtNum(value.raw, value.decimals ?? 2));
   }
@@ -3034,7 +3081,7 @@ function rebalanceDisplayRows(rows) {
   const displayRows = visibleRows.map((row) => {
     const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
     const item = {
-      执行日: row.rebalance_date,
+      执行日: { kind: "event-date", raw: row.rebalance_date },
       检查结果: rebalanceActionLabel(row.payload),
       成交笔数: row.payload?.executed_trade_count ?? "—",
       成交金额: row.turnover_cny == null ? "—" : `￥${fmtMoney(row.turnover_cny)}`,
@@ -3074,7 +3121,7 @@ async function loadStatus() {
   renderStatus(data.status || []);
 }
 
-async function waitForBacktestJob(jobId) {
+async function waitForBacktestJob(jobId, onProgress = setMessage) {
   let pollCount = 0;
   let transientFailures = 0;
   while (true) {
@@ -3085,14 +3132,14 @@ async function waitForBacktestJob(jobId) {
     } catch (error) {
       transientFailures += 1;
       if (!isNetworkError(error) || transientFailures > 4) throw error;
-      setMessage("网络短暂波动，正在继续等待回测结果...");
+      onProgress("网络短暂波动，正在继续等待回测结果...");
       await sleep(Math.min(1500 * transientFailures, 6000));
       continue;
     }
     if (job.status === "completed") return job.result;
     if (job.status === "failed") throw new Error(job.error || job.message || "回测失败");
     if (job.status === "cancelled") throw new Error(job.error || job.message || "回测任务已取消");
-    setMessage(job.message || (job.status === "running" ? "正在运行回测..." : "回测任务排队中..."));
+    onProgress(job.message || (job.status === "running" ? "正在运行回测..." : "回测任务排队中..."));
     pollCount += 1;
     await sleep(Math.min(650 + pollCount * 100, 1500));
   }
@@ -3174,6 +3221,8 @@ async function watchBacktestAnalysis(runId, rebalance, trades) {
 }
 
 function renderBacktestRecords(summary, rebalance, trades) {
+  currentRebalanceRecords = rebalance.rebalance || [];
+  currentTradeRecords = trades.trades || [];
   const rollingPeriods = summary?.rolling_periods || [];
   const analysisConfig = currentRunConfig || config;
   const analysisEnabled = analysisConfig?.rebalance_frequency === "yearly" && analysisConfig?.rebalance_month_analysis_enabled;
@@ -3242,26 +3291,11 @@ function renderBacktestRecords(summary, rebalance, trades) {
   const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || []);
   renderTable("rebalanceTable", rebalanceTable.columns, rebalanceTable.rows, { pageSize: 200, newestFirst: true });
   $("recordTabRebalance").textContent = `再平衡记录（${rebalanceTable.rows.length}）`;
-  renderTable(
-    "tradesTable",
-    ["交易日期", "标的名称", "方向", "份额", "价格", "成交额", "费用", "币种", "原因"],
-    (trades.trades || []).map((row) => ({
-      交易日期: row.trade_date,
-      标的名称: tradeAssetName(row.symbol),
-      方向: SIDE_NAMES[row.side] || row.side,
-      份额: row.quantity,
-      价格: { kind: "number", raw: row.price, decimals: 4 },
-      成交额: row.gross_amount,
-      费用: row.fee,
-      币种: CURRENCY_NAMES[row.currency] || row.currency,
-      原因: REASON_NAMES[row.reason] || row.reason,
-    })),
-    { pageSize: 300, newestFirst: true },
-  );
-  $("recordTabTrades").textContent = `交易流水（${(trades.trades || []).length}）`;
+  renderTradeRecords();
 }
 
 function historyTitle(entry) {
+  if (entry.metadata?.name) return String(entry.metadata.name);
   const assets = (entry.config?.assets || []).filter((asset) => asset.enabled && Number(asset.target_weight) > 0);
   const names = assets.map((asset) => asset.choice_label || SHORT_NAMES[asset.symbol] || asset.name).filter(Boolean);
   return names.slice(0, 2).join(" + ") || "自定义组合";
@@ -3307,7 +3341,7 @@ function historyMetricMarkup(label, value, format, tone) {
 
 function archiveEntryMatches(entry) {
   if (!archiveFilter) return true;
-  const haystack = `${historyTitle(entry)} ${historyParams(entry)}`.toLocaleLowerCase("zh-CN");
+  const haystack = `${historyTitle(entry)} ${historyParams(entry)} ${entry.metadata?.note || ""} ${(entry.config?.assets || []).map((a) => a.name || a.symbol).join(" ")}`.toLocaleLowerCase("zh-CN");
   return haystack.includes(archiveFilter);
 }
 
@@ -3324,33 +3358,36 @@ function archiveSortValue(entry, mode) {
 
 function filteredArchiveEntries(entries, mode) {
   return entries
-    .filter(archiveEntryMatches)
+    .filter((entry) => (!favoritesOnly || entry.metadata?.favorite) && archiveEntryMatches(entry))
     .map((entry, index) => ({ entry, index }))
     .sort((left, right) => archiveSortValue(right.entry, mode) - archiveSortValue(left.entry, mode) || left.index - right.index)
     .map((item) => item.entry);
 }
 
+function comparisonEntries() {
+  const current = currentHistoryEntry() || (currentRunId && currentRunConfig ? { run_id: currentRunId, config: currentRunConfig, summary: currentSummary || {} } : null);
+  const compared = archiveEntries().find((entry) => entryRunId(entry) === comparisonRunId);
+  return [current, compared];
+}
+
 function renderHistoryComparison() {
   const host = $("historyComparison");
-  const periodComparison = activeArchiveView === "leaderboard" && leaderboardPeriodMetadata?.comparable;
-  const sourceEntries = periodComparison ? leaderboardHistory : archiveEntries();
-  const compared = sourceEntries.find((entry) => entryRunId(entry) === comparisonRunId);
-  const current = periodComparison
-    ? sourceEntries.find((entry) => entryRunId(entry) === currentRunId)
-    : currentHistoryEntry();
-  if (!host || !compared || !current || entryRunId(compared) === entryRunId(current)) {
-    if (host) host.hidden = true;
-    return;
-  }
-  const summary = current.period_metrics || current.summary || {};
-  const baseline = compared.period_metrics || compared.summary || {};
-  const annualDelta = Number(summary.annualized_return || 0) - Number(baseline.annualized_return || 0);
-  const currentRatio = annualReturnDrawdownRatio(summary);
-  const baselineRatio = annualReturnDrawdownRatio(baseline);
-  const ratioDelta = currentRatio == null || baselineRatio == null ? null : currentRatio - baselineRatio;
-  const drawdownDelta = Number(summary.max_drawdown || 0) - Number(baseline.max_drawdown || 0);
+  const [current, compared] = comparisonEntries();
+  if (!host || !current || !compared || currentRunId === comparisonRunId) { if (host) host.hidden = true; return; }
   host.hidden = false;
-  host.innerHTML = `<strong>当前结果 vs ${escapeHtml(historyTitle(compared))}</strong><span>${periodComparison ? "同期年化" : "年盈利率"} ${annualDelta >= 0 ? "+" : ""}${fmtPct(annualDelta)} · 年盈利/回撤比 ${ratioDelta == null ? "—" : `${ratioDelta >= 0 ? "+" : ""}${fmtRatio(ratioDelta)}`} · 回撤 ${drawdownDelta >= 0 ? "+" : ""}${fmtPct(drawdownDelta)}</span>`;
+  const key = `${entryRunId(current)}:${entryRunId(compared)}`;
+  const common = commonComparison?.key === key ? commonComparison : null;
+  const left = common?.entries?.[0] || current, right = common?.entries?.[1] || compared;
+  const dates = (entry) => [entry.summary?.start_date || entry.config?.start_date, entry.summary?.end_date || entry.config?.end_date];
+  const a = dates(left), b = dates(right), samePeriod = a[0] === b[0] && a[1] === b[1];
+  const overlap = commonDateRange(current, compared);
+  const s1 = left.summary || {}, s2 = right.summary || {};
+  const optionalPct = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : fmtPct(value);
+  const moneyCell = (v) => v == null ? "—" : `￥${fmtMoney(v)}`;
+  const count = (v) => v == null ? "—（旧结果未记录）" : String(v);
+  const rows = [["方案", historyTitle(current), historyTitle(compared)], ["实际区间", a.join(" 至 "), b.join(" 至 ")], ["年化收益", optionalPct(s1.annualized_return), optionalPct(s2.annualized_return)], ["累计收益", optionalPct(s1.total_return), optionalPct(s2.total_return)], ["最大回撤", optionalPct(s1.max_drawdown), optionalPct(s2.max_drawdown)], ["期末资产", moneyCell(s1.final_asset_cny), moneyCell(s2.final_asset_cny)], ["总费用", moneyCell(s1.total_fees_cny), moneyCell(s2.total_fees_cny)], ["实际调仓次数", count(s1.rebalance_trade_count), count(s2.rebalance_trade_count)], ["交易笔数", count(s1.trade_count), count(s2.trade_count)]];
+  host.innerHTML = `<strong>${common?.entries ? "按共同区间重跑的结果" : "当前结果与所选方案对比"}</strong><p class="comparison-warning">${samePeriod ? "实际区间一致。请同时查看以下参数差异。" : "区间不同，全程指标不能直接横向比较。"}</p><div class="comparison-grid">${rows.flatMap((row) => row.map((cell) => `<span>${escapeHtml(cell)}</span>`)).join("")}</div><details class="comparison-differences"><summary>查看参数差异</summary>${configDifferenceMarkup(current.config, compared.config)}</details><p>${escapeHtml(common?.message || (overlap ? `共同请求区间：${overlap.start_date} 至 ${overlap.end_date}。重新计算会保存两份回测，不修改编辑草稿。` : "两份方案没有重叠区间，不能进行同期比较。"))}</p><button type="button" class="button button-secondary" data-compare-common ${!overlap || common?.busy ? "disabled" : ""}>${common?.busy ? "同期回测中…" : "按共同区间重新计算两组"}</button>`;
+  host.querySelector("[data-compare-common]")?.addEventListener("click", runCommonComparison);
 }
 
 function renderRunHistory() {
@@ -3371,8 +3408,8 @@ function renderRunHistory() {
     return `<article class="history-item${isCurrent ? " is-current" : ""}">
       <div class="history-item-header"><strong>${escapeHtml(historyTitle(entry))}${isCurrent ? '<em class="current-badge">当前</em>' : ""}</strong><time>${escapeHtml(formatHistoryTime(entryTime(entry)))}</time></div>
       <div class="history-item-params">${escapeHtml(historyParams(entry))}</div>
-      <div class="history-item-metrics">${historyMetricMarkup("年盈利率", summary.annualized_return, "percent", annualReturnTone(summary.annualized_return))}${historyMetricMarkup("年盈利/回撤比", ratio, "ratio", ratioTone(ratio))}${historyMetricMarkup("最大回撤", summary.max_drawdown, "percent", drawdownTone(summary.max_drawdown))}</div>
-      <div class="history-item-actions"><button type="button" data-history-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-history-replay="${escapeHtml(runId)}">查看结果</button><button type="button" class="danger" data-history-delete="${escapeHtml(runId)}">删除</button></div>
+      ${historyMetadataMarkup(entry)}<div class="history-item-metrics">${historyMetricMarkup("年盈利率", summary.annualized_return, "percent", annualReturnTone(summary.annualized_return))}${historyMetricMarkup("年盈利/回撤比", ratio, "ratio", ratioTone(ratio))}${historyMetricMarkup("最大回撤", summary.max_drawdown, "percent", drawdownTone(summary.max_drawdown))}</div>
+      <div class="history-item-actions"><button type="button" data-history-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-history-replay="${escapeHtml(runId)}">查看结果</button>${historyMetadataActions(entry)}<button type="button" class="danger" data-history-delete="${escapeHtml(runId)}">删除</button></div>
     </article>`;
   }).join("");
   host.querySelectorAll("[data-history-compare]").forEach((button) => {
@@ -3388,6 +3425,7 @@ function renderRunHistory() {
   host.querySelectorAll("[data-history-delete]").forEach((button) => {
     button.addEventListener("click", () => deleteHistoryRun(button.dataset.historyDelete));
   });
+  bindHistoryMetadataActions(host);
   renderHistoryComparison();
 }
 
@@ -3417,9 +3455,9 @@ function renderLeaderboard(records) {
     return `<article class="history-item leaderboard-item${isCurrent ? " is-current" : ""}">
       <div class="history-item-header"><span class="leaderboard-rank">#${Number(entry.rank || 0)}</span><time>${escapeHtml(formatHistoryTime(entryTime(entry)))}</time></div>
       <div class="history-item-params"><strong>${escapeHtml(historyTitle(entry))}</strong><br>${escapeHtml(historyParams(entry))}</div>
-      <div class="leaderboard-metrics">${metricMarkup}</div>
+      ${historyMetadataMarkup(entry)}<div class="leaderboard-metrics">${metricMarkup}</div>
       <div class="leaderboard-score">${scoreMarkup}</div>
-      <div class="history-item-actions"><button type="button" data-leaderboard-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-leaderboard-replay="${escapeHtml(runId)}">查看结果</button><button type="button" class="danger" data-leaderboard-delete="${escapeHtml(runId)}">删除</button></div>
+      <div class="history-item-actions"><button type="button" data-leaderboard-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-leaderboard-replay="${escapeHtml(runId)}">查看结果</button>${historyMetadataActions(entry)}<button type="button" class="danger" data-leaderboard-delete="${escapeHtml(runId)}">删除</button></div>
     </article>`;
   }).join("");
   host.querySelectorAll("[data-leaderboard-compare]").forEach((button) => {
@@ -3435,6 +3473,7 @@ function renderLeaderboard(records) {
   host.querySelectorAll("[data-leaderboard-delete]").forEach((button) => {
     button.addEventListener("click", () => deleteHistoryRun(button.dataset.leaderboardDelete));
   });
+  bindHistoryMetadataActions(host);
   renderHistoryComparison();
 }
 
@@ -3512,13 +3551,16 @@ function selectArchiveView(view) {
 }
 
 async function refreshRecentArchive() {
-  const history = await api("/api/backtest/history");
-  const recentRecords = (history.records || []).slice(0, MAX_RUN_HISTORY);
+  const requestVersion = ++recentArchiveRequestVersion;
+  const onlyFavorites = favoritesOnly;
+  const history = await api(`/api/backtest/history${onlyFavorites ? "?favorites=1" : ""}`);
+  if (requestVersion !== recentArchiveRequestVersion || onlyFavorites !== favoritesOnly) return;
+  const recentRecords = onlyFavorites ? (history.records || []) : (history.records || []).slice(0, MAX_RUN_HISTORY);
   runHistory = recentRecords;
   recentArchiveLoaded = true;
   const historyRecentMeta = $("historyRecentMeta");
-  if (historyRecentMeta) historyRecentMeta.textContent = `数据库最近 ${recentRecords.length} / ${MAX_RUN_HISTORY} 组`;
-  if ($("historyRecentTab")) $("historyRecentTab").textContent = `最近回测 ${recentRecords.length}`;
+  if (historyRecentMeta) historyRecentMeta.textContent = onlyFavorites ? `全部收藏 ${recentRecords.length} 组（包含较早记录）` : `数据库最近 ${recentRecords.length} / ${MAX_RUN_HISTORY} 组`;
+  if ($("historyRecentTab")) $("historyRecentTab").textContent = `${onlyFavorites ? "收藏方案" : "最近回测"} ${recentRecords.length}`;
   renderRunHistory();
 }
 
@@ -3583,6 +3625,9 @@ async function deleteHistoryRun(runId) {
       currentRunId = null;
       currentSummary = null;
       currentRunConfig = null;
+      currentChartSeries = []; currentRebalanceRecords = []; currentTradeRecords = []; selectedTradeDate = null;
+      if ($("rebalanceEventDetail")) $("rebalanceEventDetail").hidden = true;
+      renderTradeRecords(); renderResearch();
       resetDailyPnlChart();
       resetStrategyDiagnostics();
       resetAssetComovementChart();
@@ -3620,9 +3665,9 @@ async function replayHistoryRun(runId) {
     const { series, rebalance, trades } = await loadBacktestResultSections(entry.run_id);
     await chartReady;
     if (requestVersion !== resultRequestVersion) return;
-    config = JSON.parse(JSON.stringify(entry.config));
     currentRunConfig = JSON.parse(JSON.stringify(entry.config));
-    renderControls();
+    selectedTradeDate = null;
+    if ($("rebalanceEventDetail")) $("rebalanceEventDetail").hidden = true;
     resetDailyPnlChart();
     resetStrategyDiagnostics();
     resetAssetComovementChart();
@@ -3649,6 +3694,7 @@ async function replayHistoryRun(runId) {
 
 async function runBacktest() {
   if (runInProgress || !config || !validateControls()) return;
+  draftLoadVersion += 1;
   const requestVersion = ++resultRequestVersion;
   pendingReplayRunId = null;
   activeAnalysisWatch += 1;
@@ -3675,6 +3721,8 @@ async function runBacktest() {
     resetStrategyDiagnostics();
     resetAssetComovementChart();
     currentRunId = result.run_id;
+    selectedTradeDate = null;
+    if ($("rebalanceEventDetail")) $("rebalanceEventDetail").hidden = true;
     currentRunConfig = JSON.parse(JSON.stringify(submittedFullConfig));
     if (result.status) renderStatus(result.status);
     const finalSummary = deriveSummary(result.summary, series);
@@ -3703,10 +3751,10 @@ async function runBacktest() {
   }
 }
 
-function setParameterPanel(open) {
+function setParameterPanel(open, invoker = null) {
   const wasOpen = document.body.classList.contains("parameters-open");
   if (open) setHistoryPanel(false);
-  if (open && !document.body.classList.contains("parameters-open")) drawerReturnFocus = document.activeElement;
+  if (open && !document.body.classList.contains("parameters-open")) drawerReturnFocus = invoker || $(isMobileLayout() ? "mobileParameterToggle" : "parameterToggle") || document.activeElement;
   document.body.classList.toggle("parameters-open", open);
   [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => {
     button.setAttribute("aria-expanded", open ? "true" : "false");
@@ -3716,9 +3764,9 @@ function setParameterPanel(open) {
   else if (wasOpen) drawerReturnFocus?.focus();
 }
 
-function setHistoryPanel(open) {
+function setHistoryPanel(open, invoker = null) {
   const wasOpen = isMobileLayout() ? document.body.classList.contains("history-open") : !document.body.classList.contains("history-collapsed");
-  if (open) drawerReturnFocus = document.activeElement;
+  if (open) drawerReturnFocus = invoker || $(isMobileLayout() ? "mobileHistoryToggle" : "historyToggle") || document.activeElement;
   if (open) {
     document.body.classList.remove("parameters-open");
     [$('parameterToggle'), $('mobileParameterToggle')].filter(Boolean).forEach((button) => button.setAttribute("aria-expanded", "false"));
@@ -3788,6 +3836,7 @@ function setupTabs(selector, dataKey, selectPanel) {
 }
 
 function setupUiInteractions() {
+  setupResearchInteractions();
   window.addEventListener("resize", syncDrawerAccessibility);
   setRunBusy(false);
   $("parameterPanel")?.addEventListener("input", () => { if (config) updateResultContext(); });
@@ -3806,12 +3855,12 @@ function setupUiInteractions() {
     if (!identityGateRequired) closeIdentityGate();
   });
   [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => {
-    button.addEventListener("click", () => setParameterPanel(true));
+    button.addEventListener("click", () => setParameterPanel(true, button));
   });
   $("closeParameterPanel")?.addEventListener("click", () => setParameterPanel(false));
   $("parameterBackdrop")?.addEventListener("click", () => setParameterPanel(false));
-  $("historyToggle")?.addEventListener("click", () => setHistoryPanel(document.body.classList.contains("history-collapsed")));
-  $("mobileHistoryToggle")?.addEventListener("click", () => setHistoryPanel(true));
+  $("historyToggle")?.addEventListener("click", (event) => setHistoryPanel(document.body.classList.contains("history-collapsed"), event.currentTarget));
+  $("mobileHistoryToggle")?.addEventListener("click", (event) => setHistoryPanel(true, event.currentTarget));
   $("closeHistoryPanel")?.addEventListener("click", () => setHistoryPanel(false));
   $("historyBackdrop")?.addEventListener("click", () => setHistoryPanel(false));
   document.querySelectorAll("[data-history-view]").forEach((button) => {
@@ -3855,7 +3904,7 @@ function setupUiInteractions() {
     refreshLeaderboardArchiveSafely();
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
+    if (event.key !== "Escape" || event.target?.closest?.("dialog[open]")) return;
     if (!$("identityGate")?.hidden) {
       if (!identityGateRequired) closeIdentityGate();
       return;
@@ -3895,6 +3944,554 @@ function setupUiInteractions() {
   selectRecordPanel("statusPanel");
   selectArchiveView(activeArchiveView);
   syncDrawerAccessibility();
+}
+
+
+// Percent editors retain invalid text for correction; only valid values update the strategy.
+function validPercentInput(input) {
+  const value = Number(input.value);
+  const valid = input.value.trim() !== "" && Number.isFinite(value) && value >= Number(input.min) && value <= Number(input.max);
+  input.setCustomValidity(valid ? "" : `请输入 ${input.min} 至 ${input.max} 之间的百分比`);
+  input.setAttribute("aria-invalid", valid ? "false" : "true");
+  return valid;
+}
+
+function bindPercentControl(id, options = {}) {
+  const range = $(id), input = $(`${id}Percent`);
+  if (!range || !input) return;
+  input.value = String(Math.round(Number(range.value) * 1e8) / 1e6);
+  input.setCustomValidity("");
+  input.disabled = range.disabled;
+  range.addEventListener("input", () => {
+    input.value = String(Math.round(Number(range.value) * 1e8) / 1e6);
+    input.setCustomValidity(""); input.setAttribute("aria-invalid", "false");
+    if (id === "rebalanceBand") $("bandValue").textContent = fmtPct(range.value);
+    updateRepoWeight();
+  }, options);
+  input.addEventListener("input", () => {
+    if (!validPercentInput(input)) return;
+    range.value = String(Number(input.value) / 100);
+    if (id === "rebalanceBand") $("bandValue").textContent = fmtPct(range.value);
+    updateRepoWeight();
+  }, options);
+}
+
+function renderTradeRecords() {
+  const rows = selectedTradeDate ? currentTradeRecords.filter((row) => row.trade_date === selectedTradeDate) : currentTradeRecords;
+  renderTable("tradesTable", ["交易日期", "标的名称", "方向", "份额", "价格", "成交额", "费用", "币种", "原因"], rows.map((row) => ({
+    交易日期: row.trade_date, 标的名称: tradeAssetName(row.symbol), 方向: SIDE_NAMES[row.side] || row.side,
+    份额: row.quantity, 价格: { kind: "number", raw: row.price, decimals: 4 }, 成交额: { kind: "number", raw: row.gross_amount, decimals: 2 },
+    费用: { kind: "number", raw: row.fee, decimals: 2 }, 币种: CURRENCY_NAMES[row.currency] || row.currency, 原因: REASON_NAMES[row.reason] || row.reason,
+  })), { pageSize: 300, newestFirst: true });
+  if ($("recordTabTrades")) $("recordTabTrades").textContent = `交易流水（${rows.length}${selectedTradeDate ? ` / ${currentTradeRecords.length}` : ""}）`;
+  if ($("tradeDateFilter")) $("tradeDateFilter").hidden = !selectedTradeDate;
+  if ($("tradeDateFilterLabel")) $("tradeDateFilterLabel").textContent = selectedTradeDate ? `仅显示 ${selectedTradeDate}：${rows.length} 笔` : "";
+}
+
+function eventWeightRows(event) {
+  const before = event.payload?.before_weights, after = event.payload?.after_weights;
+  if (!before || !after) return null;
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].map((symbol) => ({ symbol, before: Number(before[symbol] || 0), after: Number(after[symbol] || 0) })).filter((row) => Math.abs(row.before) > 1e-10 || Math.abs(row.after) > 1e-10);
+}
+
+function rebalanceEventReason(payload = {}) {
+  if (payload.event_type === "initial_allocation") return "首次配置建仓";
+  if (payload.event_type === "treasury_activation") return "现金管理标的开始可用";
+  const frequency = REBALANCE_FREQUENCY_NAMES[payload.rebalance_frequency] || REBALANCE_FREQUENCY_NAMES[currentRunConfig?.rebalance_frequency];
+  const threshold = payload.threshold_exceeded;
+  if (frequency && threshold === true) return `${frequency}检查，权重超出${payload.rebalance_band == null ? "" : fmtPct(payload.rebalance_band)}相对容忍带${payload.rebalance_reason === "trade_constraints" ? "，但成交条件不足" : ""}`;
+  const labels = { scheduled_open: "到达检查周期，按下一交易日开盘执行", outside_band: "资产权重超出容忍带", band_breach: "资产权重超出容忍带", trade_constraints: "触发规则，但成交条件不足", initial_allocation: "首次配置建仓", initial: "首次配置建仓", within_band: "权重处于容忍带内" };
+  return labels[payload.rebalance_reason] || REASON_NAMES[payload.rebalance_reason] || payload.rebalance_reason || "旧记录未保存详细触发原因";
+}
+
+function selectRebalanceEvent(date) {
+  const events = currentRebalanceRecords.filter((event) => event.rebalance_date === date && rebalanceActionLabel(event.payload) !== "带内，无需调仓");
+  if (!events.length) return;
+  selectedTradeDate = date;
+  renderTradeRecords();
+  const host = $("rebalanceEventDetail");
+  const trades = currentTradeRecords.filter((row) => row.trade_date === date);
+  // Trade amounts retain their original currencies; the event turnover and fees are CNY.
+  const amounts = new Map();
+  trades.forEach((trade) => {
+    const currency = trade.currency || "CNY";
+    const item = amounts.get(currency) || { buy: 0, sell: 0 };
+    const side = String(trade.side).toLowerCase();
+    if (side === "buy") item.buy += Number(trade.gross_amount || 0);
+    if (side === "sell") item.sell += Number(trade.gross_amount || 0);
+    amounts.set(currency, item);
+  });
+  const amountText = [...amounts].map(([currency, v]) => `${CURRENCY_NAMES[currency] || currency}：买入 ${fmtMoney(v.buy)} / 卖出 ${fmtMoney(v.sell)}`).join("；") || "当日没有可展示的逐笔成交";
+  host.hidden = false;
+  host.innerHTML = `<div class="event-detail-heading"><h3>${escapeHtml(date)} 调仓详情</h3><button type="button" class="button button-secondary" data-clear-event>清除事件与日期筛选</button></div><p>${escapeHtml(amountText)}</p>${events.map((event) => {
+    const weights = eventWeightRows(event);
+    return `<div class="event-detail-entry"><p><strong>${escapeHtml(rebalanceActionLabel(event.payload))}</strong> · 原因：${escapeHtml(rebalanceEventReason(event.payload))} · 决策日 ${escapeHtml(event.payload?.decision_date || date)}</p><p>成交金额 ￥${fmtMoney(event.turnover_cny)} · 手续费 ￥${fmtMoney(event.fee_cny)}</p>${weights ? `<details open><summary>成交前后权重</summary><div class="event-weight-grid"><span>标的</span><span>成交前</span><span>成交后</span>${weights.flatMap((row) => [assetName(row.symbol), fmtPct(row.before), fmtPct(row.after)]).map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div><small>现金与逆回购部分包含闲置现金、逆回购净值与应收股息，货币基金单独列出；按各时点组合总资产计算。</small></details>` : '<p class="field-help">旧记录未保存成交前后权重，重新运行该方案后可查看。此处不以收盘权重代替成交时点权重。</p>'}</div>`;
+  }).join("")}<button type="button" class="button button-secondary" data-show-event-trades>查看当天 ${trades.length} 笔交易</button><p id="eventChartPosition" class="field-help"></p>`;
+  host.querySelector("[data-clear-event]")?.addEventListener("click", clearRebalanceEvent);
+  host.querySelector("[data-show-event-trades]")?.addEventListener("click", () => { selectRecordPanel("tradesPanel"); $("tradesPanel")?.scrollIntoView({ block: "start", behavior: "smooth" }); });
+  const timedCharts = ["assetChart", "returnChart", "dailyReturnChart", "drawdownChart", "weightChart", "comparisonChart"];
+  const chartId = timedCharts.includes(activeChartId) ? activeChartId : "assetChart";
+  selectChart(chartId);
+  focusRebalanceChart(date, chartId);
+  host.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  host.focus?.({ preventScroll: true });
+}
+
+
+async function focusRebalanceChart(date, chartId) {
+  const version = ++eventFocusVersion, runId = currentRunId, resultVersion = resultRequestVersion;
+  const isCurrent = () => version === eventFocusVersion && runId === currentRunId && resultVersion === resultRequestVersion && selectedTradeDate === date;
+  if ($("eventChartPosition")) $("eventChartPosition").textContent = "正在定位调仓执行日…";
+  try {
+    if (!currentChartSeries.some((row) => row.trade_date === date)) {
+      const response = await api(`/api/backtest/${encodeURIComponent(runId)}/chart-series?focus_date=${encodeURIComponent(date)}`);
+      if (!isCurrent()) return;
+      const series = computeSeriesMetrics(expandChartSeries(response));
+      if (!series.some((row) => row.trade_date === date)) throw new Error("返回图表仍未包含该执行日，请重试");
+      renderCharts(series);
+    }
+    if (!window.echarts) {
+      await loadChartLibrary();
+      if (!isCurrent()) return;
+      renderCharts(currentChartSeries);
+    }
+    if (!isCurrent()) return;
+    window.requestAnimationFrame(() => {
+      if (!isCurrent()) return;
+      applyChartOption(chartId);
+      const dates = currentChartSeries.map((row) => row.trade_date), index = dates.indexOf(date), chart = charts[chartId];
+      if (!chart || index < 0) { showEventChartRetry(date, chartId, "图表尚未就绪，可重试精确定位。"); return; }
+      chart.dispatchAction({ type: "dataZoom", startValue: dates[Math.max(0, index - 15)], endValue: dates[Math.min(dates.length - 1, index + 15)] });
+      chart.setOption({ series: [{ markLine: { symbol: "none", label: { formatter: date }, data: [{ xAxis: date }], lineStyle: { color: "#a96b26", width: 2 } } }] });
+      chart.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: index });
+      if ($("eventChartPosition")) $("eventChartPosition").textContent = `图表已精确定位 ${date}；已筛选同一执行日的交易。`;
+    });
+  } catch (error) { if (isCurrent()) showEventChartRetry(date, chartId, `精确日期定位失败：${humanizeError(error.message)}。交易详情和日期筛选仍保留。`); }
+}
+
+function showEventChartRetry(date, chartId, message) {
+  const host = $("eventChartPosition");
+  if (!host) return;
+  host.innerHTML = `${escapeHtml(message)} <button type="button" class="button button-secondary" data-retry-event-focus>重试定位当天</button>`;
+  host.querySelector("[data-retry-event-focus]")?.addEventListener("click", () => focusRebalanceChart(date, chartId));
+}
+
+function clearRebalanceEvent() {
+  eventFocusVersion += 1;
+  selectedTradeDate = null;
+  if ($("rebalanceEventDetail")) $("rebalanceEventDetail").hidden = true;
+  Object.values(charts).forEach((chart) => { chart.setOption?.({ series: [{ markLine: { data: [] } }] }); chart.dispatchAction?.({ type: "hideTip" }); });
+  renderTradeRecords();
+}
+
+function historyMetadataMarkup(entry) {
+  const metadata = entry.metadata || {};
+  return `${metadata.favorite ? '<span class="favorite-badge">已收藏</span>' : ""}${metadata.note ? `<p class="history-note">${escapeHtml(metadata.note)}</p>` : ""}`;
+}
+
+function historyMetadataActions(entry) {
+  const id = escapeHtml(entryRunId(entry));
+  return `<button type="button" data-history-metadata="${id}">编辑名称 / 备注</button><button type="button" data-history-favorite="${id}" aria-pressed="${Boolean(entry.metadata?.favorite)}">${entry.metadata?.favorite ? "取消收藏" : "收藏"}</button><button type="button" data-history-copy="${id}">用此参数修改</button>`;
+}
+
+function bindHistoryMetadataActions(host) {
+  host.querySelectorAll("[data-history-metadata]").forEach((button) => button.addEventListener("click", () => openMetadataEditor(button.dataset.historyMetadata, button)));
+  host.querySelectorAll("[data-history-favorite]").forEach((button) => button.addEventListener("click", async () => {
+    const id = button.dataset.historyFavorite, entry = archiveEntries().find((item) => entryRunId(item) === id);
+    button.disabled = true;
+    try { await updateHistoryMetadata(id, { favorite: !entry?.metadata?.favorite }); }
+    catch (error) { setMessage(`收藏失败：${humanizeError(error.message)}`, true); button.disabled = false; }
+  }));
+  host.querySelectorAll("[data-history-copy]").forEach((button) => button.addEventListener("click", () => copySavedRunToDraft(button.dataset.historyCopy)));
+}
+
+async function updateHistoryMetadata(runId, changes) {
+  const identityAtRequest = identityVersion;
+  const result = await api(`/api/backtest/${encodeURIComponent(runId)}/metadata`, { method: "POST", body: JSON.stringify(changes) });
+  if (identityAtRequest !== identityVersion) return null;
+  [runHistory, leaderboardHistory].forEach((entries) => entries.forEach((entry) => { if (entryRunId(entry) === runId) entry.metadata = result.metadata; }));
+  renderRunHistory(); renderLeaderboard(leaderboardHistory);
+  return result.metadata;
+}
+
+function openMetadataEditor(runId, returnFocus) {
+  const entry = archiveEntries().find((item) => entryRunId(item) === runId);
+  if (!entry) return;
+  metadataEditingRunId = runId;
+  metadataReturnFocus = returnFocus || document.activeElement;
+  $("metadataName").value = entry.metadata?.name || "";
+  $("metadataNote").value = entry.metadata?.note || "";
+  $("metadataFavorite").checked = Boolean(entry.metadata?.favorite);
+  $("metadataError").textContent = "";
+  $("saveMetadata").disabled = false;
+  $("metadataDialog").showModal();
+  $("metadataName").focus();
+}
+
+function closeMetadataEditor() {
+  $("metadataDialog")?.close();
+  metadataEditingRunId = null;
+  // The edited card may have been re-rendered; keep keyboard focus in the archive.
+  if (metadataReturnFocus?.isConnected) metadataReturnFocus.focus();
+  else $("historySearch")?.focus();
+}
+
+async function saveMetadata(event) {
+  event?.preventDefault();
+  const runId = metadataEditingRunId;
+  if (!runId) return;
+  const changes = { name: $("metadataName").value.trim(), note: $("metadataNote").value.trim(), favorite: $("metadataFavorite").checked };
+  if (changes.name.length > 80 || changes.note.length > 1000) { $("metadataError").textContent = "名称最多 80 字，备注最多 1000 字。"; return; }
+  $("saveMetadata").disabled = true;
+  try {
+    await updateHistoryMetadata(runId, changes);
+    if (metadataEditingRunId === runId) { closeMetadataEditor(); showToast("方案信息已保存"); }
+  } catch (error) {
+    if (metadataEditingRunId === runId) $("metadataError").textContent = `保存失败：${humanizeError(error.message)}`;
+  } finally { if (metadataEditingRunId === runId) $("saveMetadata").disabled = false; }
+}
+
+async function copySavedRunToDraft(runId) {
+  if (runInProgress) { showToast("请等待当前回测完成后再替换草稿"); return; }
+  if (!window.confirm("将这份已保存方案载入编辑区？当前未运行的参数修改将被替换，显示结果保持不变。")) return;
+  const version = ++draftLoadVersion, identityAtRequest = identityVersion;
+  try {
+    const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`);
+    if (version !== draftLoadVersion || identityAtRequest !== identityVersion || runInProgress) return;
+    config = structuredClone(entry.config);
+    // Old saved configs can lack the public cash-option catalogue.
+    config.repo_options ||= defaultConfigSnapshot?.repo_options || [];
+    renderControls(); setHistoryPanel(false); setParameterPanel(true);
+    setMessage("已将保存参数载入编辑区。点击运行回测生成当前版本结果，再开始研究。");
+  } catch (error) { if (version === draftLoadVersion && identityAtRequest === identityVersion) setMessage(`载入参数失败：${humanizeError(error.message)}`, true); }
+}
+
+function commonDateRange(a, b) {
+  const start = [a.config?.start_date, b.config?.start_date].filter(Boolean).sort().at(-1);
+  const end = [a.config?.end_date, b.config?.end_date].filter(Boolean).sort()[0];
+  return start && end && start < end ? { start_date: start, end_date: end } : null;
+}
+
+function comparisonNumber(value) {
+  return Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 8 });
+}
+
+// Keep fee comparisons at the leaf level so a single changed rate stays readable.
+const FEE_DIFFERENCE_FIELDS = {
+  "cn_etf.commission_rate": ["境内基金佣金率", "percent", "% / 边"],
+  "cn_etf.min_commission_cny": ["境内基金最低佣金", "number", "元 / 笔"],
+  "cn_etf.exchange_handling_rate": ["境内基金交易经手费率", "percent", "% / 边"],
+  "cn_etf.include_exchange_in_commission": ["佣金是否包含交易经手费", "boolean"],
+  "cn_etf.stamp_tax_rate": ["境内基金印花税率", "percent", "%"],
+  "cn_etf.transfer_fee_rate": ["境内基金过户费率", "percent", "%"],
+  "repo.investor_commission_rate": ["逆回购佣金率", "percent", "%"],
+  "repo.fee_cap_cny": ["逆回购固定费用上限", "cap", "元"],
+  "repo.lot_size_cny": ["逆回购最小交易金额", "number", "元"],
+  "ibkr_us_etf.plan": ["美国券商费率类型", "plan"],
+  "ibkr_us_etf.fixed_per_share_usd": ["美股固定佣金（每股）", "number", "美元 / 股"],
+  "ibkr_us_etf.fixed_min_usd": ["美股固定最低佣金", "number", "美元 / 笔"],
+  "ibkr_us_etf.fixed_max_trade_pct": ["美股固定佣金占成交额上限", "percent", "%"],
+  "ibkr_us_etf.tiered_per_share_usd": ["美股阶梯佣金（每股）", "number", "美元 / 股"],
+  "ibkr_us_etf.tiered_min_usd": ["美股阶梯最低佣金", "number", "美元 / 笔"],
+  "ibkr_us_etf.lite_commission_usd": ["美股免佣类型的佣金", "number", "美元 / 笔"],
+  "ibkr_us_etf.sec_transaction_fee_rate": ["美股卖出 SEC 交易费率", "percent", "%"],
+  "ibkr_us_etf.finra_taf_per_share_usd": ["美股卖出 FINRA 活动费（每股）", "number", "美元 / 股"],
+  "ibkr_us_etf.finra_taf_cap_usd": ["美股卖出 FINRA 活动费上限", "number", "美元 / 笔"],
+  "fx.bank_out_spread_bps": ["出金购汇点差", "number", "基点"],
+  "fx.bank_in_spread_bps": ["入金结汇点差", "number", "基点"],
+  "fx.outbound_wire_fee_cny": ["出境汇款费", "number", "元 / 笔"],
+  "fx.inbound_wire_fee_cny": ["入境汇款费", "number", "元 / 笔"],
+  "fx.ibkr_auto_fx_markup": ["美国券商自动换汇加价", "percent", "%"],
+  "fx.use_ibkr_auto_fx": ["使用美国券商自动换汇", "boolean"],
+  "hk_connect_etf.broker_commission_rate": ["港股通佣金率", "percent", "% / 边"],
+  "hk_connect_etf.min_broker_commission_hkd": ["港股通最低佣金", "number", "港元 / 笔"],
+  "hk_connect_etf.trading_fee_rate": ["港股通交易费率", "percent", "% / 边"],
+  "hk_connect_etf.transaction_levy_rate": ["港股通交易征费率", "percent", "% / 边"],
+  "hk_connect_etf.afrc_transaction_levy_rate": ["港股通会财局征费率", "percent", "% / 边"],
+  "hk_connect_etf.stock_settlement_fee_rate": ["港股通股份交收费率", "percent", "% / 边"],
+  "hk_connect_etf.min_stock_settlement_fee_hkd": ["港股通最低股份交收费", "number", "港元 / 笔"],
+  "hk_connect_etf.max_stock_settlement_fee_hkd": ["港股通股份交收费上限", "number", "港元 / 笔"],
+  "hk_connect_etf.stamp_duty_rate": ["港股通印花税率", "percent", "%"],
+  "hk_connect_etf.portfolio_fee_annual_rate": ["港股通组合费年率", "percent", "% / 年"],
+  "hk_connect_etf.fx_spread_bps": ["港股通汇兑点差", "number", "基点"],
+  "hk_connect_etf.lot_size": ["港股通每手股数", "number", "股 / 手"],
+  "tax.cn_fund_dividend_tax_rate": ["境内基金分红税率", "percent", "%"],
+  "tax.us_dividend_withholding_rate": ["美国分红预扣税率", "percent", "%"],
+  "tax.hk_dividend_withholding_rate": ["港股分红预扣税率", "percent", "%"],
+  "tax.us_capital_gain_tax_rate": ["美国资本利得税率", "percent", "%"],
+};
+
+function feeDifferenceRows(left = {}, right = {}) {
+  const flatten = (object, prefix = "", result = {}) => {
+    for (const [key, value] of Object.entries(object || {})) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (value && typeof value === "object") flatten(value, path, result);
+      else result[path] = value;
+    }
+    return result;
+  };
+  const a = flatten(left), b = flatten(right);
+  const format = (value, type, unit = "") => {
+    if (value == null) return "未保存";
+    if (type === "plan") return ibkrPlanLabel(value);
+    if (type === "boolean" || typeof value === "boolean") return value ? "是" : "否";
+    if (type === "cap" && Number(value) === 0) return "不设固定金额上限";
+    if (type === "percent") return `${comparisonNumber(Number(value) * 100)}${unit}`;
+    if (["number", "cap"].includes(type)) return `${comparisonNumber(value)} ${unit}`;
+    return String(value);
+  };
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((key) => a[key] !== b[key]).map((key) => {
+    const [label, type, unit] = FEE_DIFFERENCE_FIELDS[key] || [`其他费用 · ${key}`, "text", ""];
+    return [label, format(a[key], type, unit), format(b[key], type, unit)];
+  });
+}
+
+function configDifferenceMarkup(left = {}, right = {}) {
+  const labels = { rolling_window_years: "滚动窗口年数", rebalance_month_analysis_enabled: "年度月份研究", allow_fractional_us_shares: "允许美股碎股", initial_capital_cny: "初始资金", start_date: "请求开始日期", end_date: "请求结束日期", rebalance_frequency: "检查频率", annual_rebalance_month: "年度月份", rebalance_band: "相对容忍带", rebalance_to_target: "恢复目标权重", monthly_spend_cny: "月消费", monthly_spend_annual_growth: "消费年增幅", repo_target_mode: "现金目标模式", repo_fixed_target_cny: "固定现金金额", repo_fixed_target_ratio: "固定现金比例", repo_symbol: "现金品种", dip_buy_enabled: "补仓开启", dip_buy_drawdown: "补仓下跌阈值", dip_buy_total_parts: "补仓份数", dip_buy_level_mode: "补仓档位方式", dip_buy_cost_basis_mode: "补仓成本基准", dip_buy_recovery_sell_enabled: "回本卖出", dip_buy_asset_cap_enabled: "单资产额度上限", dip_buy_asset_cap_ratio: "补仓上限比例", dip_buy_blackout_enabled: "补仓静默期", dip_buy_blackout_months: "静默月数" };
+  const value = (key, item) => {
+    if (item == null) return "未保存";
+    if (typeof item === "boolean") return item ? "是" : "否";
+    if (key === "rebalance_frequency") return REBALANCE_FREQUENCY_NAMES[item] || item;
+    if (key === "repo_target_mode") return ["fixed_bucket", "residual_weight"].includes(item) ? repoModeLabel(item) : item;
+    if (key === "dip_buy_level_mode") return { fixed: "每档补 1 份", multiplier: "第 N 档补 N 份" }[item] || item;
+    if (key === "dip_buy_cost_basis_mode") return { current_average: "目前持仓成本", initial: "最初成本" }[item] || item;
+    if (key === "repo_symbol") {
+      const options = [...(left.repo_options || []), ...(right.repo_options || []), ...(defaultConfigSnapshot?.repo_options || []), ...(config?.repo_options || [])];
+      const option = options.find((entry) => entry.symbol === item);
+      return option ? `${option.name}（${item}）` : assetName(item);
+    }
+    if (/ratio|band|drawdown|annual_growth/.test(key)) return fmtPct(item);
+    if (["initial_capital_cny", "monthly_spend_cny", "repo_fixed_target_cny"].includes(key)) return `${comparisonNumber(item)} 元`;
+    if (key === "rolling_window_years") return `${item} 年`;
+    if (key === "annual_rebalance_month") return `${item} 月`;
+    if (key === "dip_buy_blackout_months") return `${item} 个月`;
+    if (key === "dip_buy_total_parts") return `${item} 份`;
+    return String(item);
+  };
+  const rows = Object.entries(labels).filter(([key]) => (left[key] ?? (key === "monthly_spend_annual_growth" ? 0 : null)) !== (right[key] ?? (key === "monthly_spend_annual_growth" ? 0 : null))).map(([key, label]) => [label, value(key, left[key]), value(key, right[key])]);
+  const assets = (cfg) => (cfg.assets || []).filter((a) => a.enabled).map((a) => `${a.name || a.symbol || a.key} ${fmtPct(a.target_weight)}`).join(" / ") || "仅现金";
+  if (assets(left) !== assets(right)) rows.push(["资产配置", assets(left), assets(right)]);
+  rows.push(...feeDifferenceRows(left.fees, right.fees));
+  return rows.length ? `<div class="comparison-grid">${rows.flatMap((row) => row.map((item) => `<span>${escapeHtml(item)}</span>`)).join("")}</div>` : '<p>两份记录没有主策略参数差异。</p>';
+}
+
+async function runCommonComparison() {
+  const [left, right] = comparisonEntries();
+  if (!left || !right || currentRunId === comparisonRunId) return;
+  const range = commonDateRange(left, right);
+  if (!range) return;
+  const key = `${entryRunId(left)}:${entryRunId(right)}`;
+  if (commonComparison?.busy) { showToast("同期比较正在执行，请等待完成"); return; }
+  const version = ++commonComparisonVersion, identityAtRequest = identityVersion;
+  commonComparison = { key, busy: true, message: "正在读取两份保存参数…" }; renderHistoryComparison();
+  try {
+    const entries = [];
+    for (const [index, original] of [left, right].entries()) {
+      const saved = await api(`/api/backtest/${encodeURIComponent(entryRunId(original))}`);
+      if (version !== commonComparisonVersion || identityAtRequest !== identityVersion) return;
+      const fixedConfig = { ...saved.config, ...range, rebalance_month_analysis_enabled: false };
+      commonComparison.message = `正在计算第 ${index + 1} / 2 组：${range.start_date} 至 ${range.end_date}`; renderHistoryComparison();
+      const job = await api("/api/backtest/start", { method: "POST", body: JSON.stringify({ config: compactConfigForRequest(fixedConfig), client_request_id: createClientRequestId() }), retry: true });
+      if (version !== commonComparisonVersion || identityAtRequest !== identityVersion) return;
+      const result = await waitForBacktestJob(job.job_id, (message) => {
+        if (version !== commonComparisonVersion || identityAtRequest !== identityVersion || commonComparison?.key !== key) return;
+        commonComparison.message = `第 ${index + 1} / 2 组 · ${message}`;
+        renderHistoryComparison();
+      });
+      if (version !== commonComparisonVersion || identityAtRequest !== identityVersion) return;
+      entries.push({ run_id: result.run_id, config: fixedConfig, summary: result.summary, metadata: original.metadata });
+    }
+    if (version !== commonComparisonVersion) return;
+    commonComparison = { key, busy: false, entries, message: "两组同期回测已完成并保存。实际交易区间见表格；编辑草稿与当前图表保持不变。" };
+    scheduleArchiveRefresh({ includeLeaderboard: false });
+  } catch (error) {
+    if (version === commonComparisonVersion) commonComparison = { key, busy: false, message: `同期计算未完成：${humanizeError(error.message)}。可重试；已完成的回测仍保留在历史中。` };
+  }
+  renderHistoryComparison();
+}
+
+const RESEARCH_UI = {
+  rebalance_grid: { prefix: "rebalanceResearch", start: "startRebalanceResearch", cancel: "cancelRebalanceResearch", resume: "resumeRebalanceResearch", name: "调仓研究" },
+  withdrawal_stress: { prefix: "withdrawalResearch", start: "startWithdrawalResearch", cancel: "cancelWithdrawalResearch", resume: "resumeWithdrawalResearch", name: "消费研究" },
+};
+function researchKey(runId, kind) { return `${runId}:${kind}`; }
+function researchActive(task) { return ["starting", "queued", "running"].includes(task?.status); }
+function parseResearchNumbers(text, label, { min = 0, max = Infinity, integer = false, scale = 1 } = {}) {
+  const tokens = String(text || "").trim().split(/[,，;；\s]+/).filter(Boolean);
+  if (!tokens.length) throw new Error(`请填写${label}`);
+  const values = tokens.map((token) => Number(token));
+  if (values.some((value) => !Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value)))) throw new Error(`${label}须为 ${min} 至 ${Number.isFinite(max) ? max : "有效上限"} 之间${integer ? "的整数" : "的数字"}`);
+  return [...new Set(values)].map((value) => value * scale);
+}
+function buildResearchRequest(kind, runId = currentRunId) {
+  if (!runId) throw new Error("请先运行或查看一份已保存的结果");
+  let request, count;
+  if (kind === "rebalance_grid") {
+    const frequencies = [...document.querySelectorAll('#rebalanceResearchFrequencies input:checked')].map((input) => input.value);
+    if (!frequencies.length) throw new Error("请至少选择一种检查频率");
+    const bands = parseResearchNumbers($("rebalanceResearchBands").value, "容忍带", { max: 100, scale: .01 });
+    count = frequencies.length * bands.length;
+    request = { run_id: runId, kind, frequencies, bands };
+  } else {
+    const monthly_spends = parseResearchNumbers($("withdrawalResearchSpends").value, "月消费金额", { max: 1e9 });
+    const annual_growth_rates = parseResearchNumbers($("withdrawalResearchGrowthRates").value, "消费年增幅", { max: 50, scale: .01 });
+    const start_years = parseResearchNumbers($("withdrawalResearchStartYears").value, "开始年份", { min: 1900, max: 2100, integer: true });
+    count = monthly_spends.length * annual_growth_rates.length * start_years.length;
+    request = { run_id: runId, kind, monthly_spends, annual_growth_rates, start_years };
+  }
+  if (count > 24) throw new Error(`共 ${count} 个场景，超过 24 个；请减少选项`);
+  return { request, count };
+}
+
+function updateResearchCounts() {
+  for (const [kind, ui] of Object.entries(RESEARCH_UI)) {
+    if (!$(ui.prefix + "Count")) continue;
+    try { const { count } = buildResearchRequest(kind, currentRunId || "preview"); $(ui.prefix + "Count").textContent = `${count} 个场景 / 最多 24 个`; }
+    catch (error) { $(ui.prefix + "Count").textContent = error.message; }
+  }
+}
+
+function renderResearch() {
+  const baseline = $("researchBaseline");
+  if (!baseline) return;
+  baseline.textContent = currentRunId && currentRunConfig ? `基准：已保存结果 ${currentRunId.slice(0, 8)} · ${currentRunConfig.start_date} 至 ${currentRunConfig.end_date} · ${REBALANCE_FREQUENCY_NAMES[currentRunConfig.rebalance_frequency] || currentRunConfig.rebalance_frequency}检查 · 当前编辑区的修改不参与本次研究。` : "先运行或查看一份已保存结果，再开始研究。";
+  if (currentRunConfig && $("withdrawalResearchStartYears") && !$("withdrawalResearchStartYears").value) $("withdrawalResearchStartYears").value = String(currentRunConfig.start_date || "").slice(0, 4);
+  for (const [kind, ui] of Object.entries(RESEARCH_UI)) {
+    const task = researchTasks.get(researchKey(currentRunId, kind));
+    const active = researchActive(task);
+    if ($(ui.start)) $(ui.start).disabled = !currentRunId || active;
+    if ($(ui.cancel)) { $(ui.cancel).hidden = !task?.job_id || !active; $(ui.cancel).disabled = Boolean(task?.cancelling); }
+    if ($(ui.resume)) $(ui.resume).hidden = !task?.requestError || !task?.job_id || !active;
+    const status = $(ui.prefix + "Status");
+    if (status) {
+      const labels = { starting: "正在提交", queued: "排队中", running: "计算中", completed: "已完成", failed: "失败", cancelled: "已取消", idle: "等待可用" };
+      status.textContent = task ? `${labels[task.status] || task.status} · ${task.completed || 0} / ${task.total || 0} 个场景${task.requestError ? ` · ${task.requestError}` : task.error ? ` · ${humanizeError(task.error)}` : ""}${task.rows?.length ? ` · 成功 ${task.rows.filter((row) => row.status === "success").length} / 失败 ${task.rows.filter((row) => row.status === "failed").length}` : ""}` : "当前保存方案尚无研究结果。选择场景后运行。";
+    }
+    const progress = $(ui.prefix + "Progress");
+    if (progress) { progress.hidden = !task; progress.max = Math.max(task?.total || 1, 1); progress.value = task?.completed || 0; }
+    if ($(ui.prefix + "Rebase")) $(ui.prefix + "Rebase").hidden = !task?.needsRebase;
+    if ($(ui.prefix + "Existing")) $(ui.prefix + "Existing").hidden = !task?.existingRunId;
+    const metric = (raw) => ({ kind: "metric", raw, format: "percent" });
+    const money = (raw) => ({ kind: "money", raw });
+    const rows = (task?.rows || []).map((row, index) => ({
+      场景: kind === "rebalance_grid" ? `${REBALANCE_FREQUENCY_NAMES[row.inputs?.rebalance_frequency] || "—"} · ${fmtPct(row.inputs?.rebalance_band)}` : `${fmtMoney(row.inputs?.monthly_spend_cny)}元/月 · ${fmtPct(row.inputs?.monthly_spend_annual_growth)}年增 · ${row.inputs?.start_year}起`, 状态: row.status === "success" ? "完成" : "失败", 检查频率: REBALANCE_FREQUENCY_NAMES[row.inputs?.rebalance_frequency] || "—", 容忍带: metric(row.inputs?.rebalance_band), 月消费: money(row.inputs?.monthly_spend_cny), 消费年增幅: metric(row.inputs?.monthly_spend_annual_growth), 开始年份: row.inputs?.start_year == null ? "—" : { kind: "number", raw: row.inputs.start_year, decimals: 0 },
+      实际区间: row.start_date && row.end_date ? `${row.start_date} 至 ${row.end_date}` : "—", 年化收益: metric(row.annualized_return), 最大回撤: metric(row.max_drawdown), 总费用: money(row.total_fees_cny), 实际调仓次数: row.rebalance_trade_count == null ? "—" : { kind: "number", raw: row.rebalance_trade_count, decimals: 0 }, 期末资产: money(row.final_asset_cny), 计划提取: money(row.total_planned_spend_cny), 实际提取: money(row.total_spend_cny), 提取缺口: money(row.total_spend_shortfall_cny), 首次不足: row.first_spend_shortfall_date || (row.status === "success" ? "未发生" : "—"), 不足次数: row.spend_shortfall_count == null ? "—" : { kind: "number", raw: row.spend_shortfall_count, decimals: 0 }, 补仓适用性: row.dip_buy_applicability_note || (row.dip_buy_active ? "启用" : "未启用"), 说明: row.error || "",
+    }));
+    renderResearchSupplement(kind, task);
+    const columns = kind === "rebalance_grid" ? ["场景", "年化收益", "最大回撤", "总费用", "实际调仓次数", "期末资产", "实际区间", "状态", "补仓适用性", "说明"] : ["场景", "首次不足", "期末资产", "提取缺口", "不足次数", "计划提取", "实际提取", "年化收益", "最大回撤", "总费用", "实际区间", "状态", "说明"];
+    if ($(ui.prefix + "Table")) renderTable(ui.prefix + "Table", rows.length ? columns : [], rows, { pageSize: 24, sortableColumns: columns });
+  }
+  updateResearchCounts();
+}
+
+
+function renderResearchSupplement(kind, task) {
+  const ui = RESEARCH_UI[kind], method = $(ui.prefix + "Methodology"), cards = $(ui.prefix + "Cards");
+  if (method) {
+    const fields = kind === "rebalance_grid" ? ["fixed_conditions", "annual_only_rules"] : ["fixed_conditions", "withdrawal_growth", "start_dates", "returns"];
+    const notes = typeof task?.methodology === "string" ? [task.methodology] : fields.map((key) => task?.methodology?.[key]).filter(Boolean);
+    method.innerHTML = notes.length ? `<details><summary>计算方法与适用范围</summary>${notes.map((note) => `<p>${escapeHtml(note)}</p>`).join("")}</details>` : "";
+  }
+  if (!cards) return;
+  const pct = (value) => value == null ? "—" : fmtPct(value), money = (value) => value == null ? "—" : `￥${fmtMoney(value)}`;
+  cards.innerHTML = (task?.rows || []).map((row) => {
+    const input = row.inputs || {};
+    const title = kind === "rebalance_grid" ? `${REBALANCE_FREQUENCY_NAMES[input.rebalance_frequency] || "—"} · 容忍带 ${pct(input.rebalance_band)}` : `每月 ${fmtMoney(input.monthly_spend_cny)} 元 · 年增 ${pct(input.monthly_spend_annual_growth)} · ${input.start_year} 起`;
+    if (row.status !== "success") return `<article class="research-card"><h4>${escapeHtml(title)}</h4><p class="negative">此场景失败：${escapeHtml(row.error || "未知错误")}</p></article>`;
+    const metrics = kind === "rebalance_grid" ? [["年化收益",pct(row.annualized_return)],["最大回撤",pct(row.max_drawdown)],["总费用",money(row.total_fees_cny)],["实际调仓",`${row.rebalance_trade_count ?? "—"} 次`]] : [["首次不足",row.first_spend_shortfall_date || "未发生"],["期末资产",money(row.final_asset_cny)],["提取缺口",money(row.total_spend_shortfall_cny)],["不足次数",`${row.spend_shortfall_count ?? "—"} 次`]];
+    return `<article class="research-card"><h4>${escapeHtml(title)}</h4><div class="research-card-metrics">${metrics.map(([label,value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div><small>${escapeHtml(row.start_date || "—")} 至 ${escapeHtml(row.end_date || "—")}</small></article>`;
+  }).join("");
+}
+
+async function startResearch(kind) {
+  const runId = currentRunId;
+  const ui = RESEARCH_UI[kind];
+  if (researchActive(researchTasks.get(researchKey(runId, kind)))) return;
+  let built;
+  try { built = buildResearchRequest(kind, runId); }
+  catch (error) { $(ui.prefix + "Status").textContent = error.message; return; }
+  const task = { identityVersion, run_id: runId, kind, status: "starting", total: built.count, completed: 0, rows: [], request: built.request, baseline: structuredClone(currentRunConfig) };
+  researchTasks.set(researchKey(runId, kind), task); renderResearch();
+  try {
+    const job = await api("/api/research/start", { method: "POST", body: JSON.stringify(built.request) });
+    if (task.identityVersion !== identityVersion) return;
+    Object.assign(task, job);
+    if (currentRunId === runId) renderResearch();
+    await pollResearchTask(task);
+  } catch (error) {
+    if (task.identityVersion !== identityVersion) return;
+    if (error.status === 429 && error.payload?.job_id) {
+      try {
+        const existing = await api(`/api/research/jobs/${encodeURIComponent(error.payload.job_id)}`);
+        if (task.identityVersion !== identityVersion) return;
+        if (["cancelled", "completed", "failed"].includes(existing.status)) {
+          task.status = "idle"; task.error = "上一计算正在退出，请稍后再次点击运行。";
+        } else if (existing.run_id === runId && existing.kind === kind) {
+          Object.assign(task, existing); task.requestError = "已恢复这份基准的进行中任务";
+          renderResearch(); await pollResearchTask(task); return;
+        } else {
+          const prior = { ...existing, identityVersion };
+          researchTasks.set(researchKey(existing.run_id, existing.kind), prior);
+          task.status = "idle"; task.error = "已有其他研究正在计算，可查看对应保存方案的进度或取消后再运行。"; task.existingRunId = existing.run_id;
+          pollResearchTask(prior);
+        }
+        if (currentRunId === runId) renderResearch();
+        return;
+      } catch (lookupError) { task.requestError = `已有任务状态暂不可读取：${humanizeError(lookupError.message)}`; }
+    }
+    task.status = "failed"; task.needsRebase = error.status === 409;
+    task.error = task.needsRebase ? "请先用已保存基准参数重新运行回测，再开展研究。可将基准载入编辑区后点击运行。" : humanizeError(error.message);
+    if (currentRunId === runId) renderResearch();
+  }
+}
+
+async function pollResearchTask(task) {
+  if (task.polling || !task.job_id) return;
+  task.polling = true; task.requestError = "";
+  try {
+    while (researchActive(task) && researchTasks.get(researchKey(task.run_id, task.kind)) === task) {
+      await sleep(900);
+      if ((task.identityVersion != null && task.identityVersion !== identityVersion) || researchTasks.get(researchKey(task.run_id, task.kind)) !== task) break;
+      try {
+        const response = await api(`/api/research/jobs/${encodeURIComponent(task.job_id)}`, { attempts: 2 });
+        // A cancel response is authoritative; a GET started before cancellation cannot revive it.
+        if (task.status === "cancelled" || (task.identityVersion != null && task.identityVersion !== identityVersion) || researchTasks.get(researchKey(task.run_id, task.kind)) !== task) break;
+        Object.assign(task, response);
+      } catch (error) { task.requestError = `进度读取失败：${humanizeError(error.message)}；可重试读取或取消。`; break; }
+      if (currentRunId === task.run_id) renderResearch();
+    }
+  } finally { task.polling = false; if (currentRunId === task.run_id) renderResearch(); }
+}
+
+async function cancelResearch(kind) {
+  const task = researchTasks.get(researchKey(currentRunId, kind));
+  if (!task?.job_id || !researchActive(task) || task.cancelling) return;
+  task.cancelling = true; renderResearch();
+  try { const response = await api(`/api/research/jobs/${encodeURIComponent(task.job_id)}/cancel`, { method: "POST" }); if (task.identityVersion != null && task.identityVersion !== identityVersion) return; Object.assign(task, response); task.requestError = ""; }
+  catch (error) { task.requestError = `取消失败：${humanizeError(error.message)}；请重试。`; }
+  finally { task.cancelling = false; if (currentRunId === task.run_id) renderResearch(); }
+}
+
+function setupResearchInteractions() {
+  $("openResearchSection")?.addEventListener("click", () => { if ($("researchSection")) $("researchSection").open = true; });
+  for (const [kind, ui] of Object.entries(RESEARCH_UI)) {
+    $(ui.start)?.addEventListener("click", () => startResearch(kind));
+    $(ui.cancel)?.addEventListener("click", () => cancelResearch(kind));
+    $(ui.resume)?.addEventListener("click", () => { const task = researchTasks.get(researchKey(currentRunId, kind)); if (task) pollResearchTask(task); });
+    $(ui.prefix + "Rebase")?.addEventListener("click", () => copySavedRunToDraft(currentRunId));
+    $(ui.prefix + "Existing")?.addEventListener("click", async () => { const task = researchTasks.get(researchKey(currentRunId, kind)); if (!task?.existingRunId) return; await replayHistoryRun(task.existingRunId); if ($("researchSection")) { $("researchSection").open = true; $("researchSection").scrollIntoView?.({ block: "start" }); } });
+  }
+  $("researchSection")?.addEventListener("input", updateResearchCounts);
+  $("clearTradeDateFilter")?.addEventListener("click", () => { selectedTradeDate = null; renderTradeRecords(); });
+  $("historyFavoritesOnly")?.addEventListener("change", async (event) => {
+    favoritesOnly = event.target.checked;
+    renderRunHistory(); renderLeaderboard(leaderboardHistory);
+    try { await refreshRecentArchive(); } catch (error) { setMessage(`收藏列表读取失败：${humanizeError(error.message)}`, true); }
+  });
+  $("metadataForm")?.addEventListener("submit", saveMetadata);
+  $("closeMetadata")?.addEventListener("click", closeMetadataEditor);
+  $("cancelMetadata")?.addEventListener("click", closeMetadataEditor);
+  $("metadataDialog")?.addEventListener("cancel", (event) => { event.preventDefault(); closeMetadataEditor(); });
 }
 
 let backgroundRecoveryTimer = null;

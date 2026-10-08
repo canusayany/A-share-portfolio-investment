@@ -53,7 +53,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 51
+BACKTEST_ENGINE_VERSION = 52
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -1081,6 +1081,27 @@ def dip_buy_assets(
     ]
 
 
+def monthly_spend_amount(config: dict[str, Any], day: date) -> float:
+    """Escalate at months 13, 25, ... relative to the configured start month."""
+    start = parse_date(config["start_date"])
+    elapsed_months = max((day.year - start.year) * 12 + day.month - start.month, 0)
+    return float(config["monthly_spend_cny"]) * (1.0 + float(config.get("monthly_spend_annual_growth", 0.0))) ** (elapsed_months // 12)
+
+
+def living_expense_reserve(
+    config: dict[str, Any], day: date, months: int = DIP_BUY_CASH_BUFFER_MONTHS,
+    *, include_current_month: bool = False,
+) -> float:
+    """Reserve the next unpaid monthly withdrawals, including scheduled growth."""
+    if not float(config.get("monthly_spend_annual_growth", 0.0)):
+        return months * float(config["monthly_spend_cny"])
+    first_month = day.year * 12 + day.month - 1 + (0 if include_current_month else 1)
+    return sum(
+        monthly_spend_amount(config, date((first_month + offset) // 12, (first_month + offset) % 12 + 1, 1))
+        for offset in range(months)
+    )
+
+
 def dip_buy_cash_buffer_cny(monthly_spend_cny: float) -> float:
     """Return the fixed 24-month living-expense reserve for an annual cycle."""
     return DIP_BUY_CASH_BUFFER_MONTHS * max(float(monthly_spend_cny), 0.0)
@@ -1090,10 +1111,12 @@ def dip_buy_annual_budget(
     cash_equivalent_cny: float,
     monthly_spend_cny: float,
     total_parts: int,
+    *,
+    cash_buffer_cny: float | None = None,
 ) -> tuple[float, float, float, int]:
     """Lock the annual reserve, pool B, piece value and usable part count."""
     part_count = max(int(total_parts), 1)
-    cash_buffer_cny = dip_buy_cash_buffer_cny(monthly_spend_cny)
+    cash_buffer_cny = dip_buy_cash_buffer_cny(monthly_spend_cny) if cash_buffer_cny is None else max(float(cash_buffer_cny), 0.0)
     pool_cny = max(float(cash_equivalent_cny) - cash_buffer_cny, 0.0)
     piece_cny = pool_cny / part_count
     remaining_parts = part_count if pool_cny > 0 else 0
@@ -2017,8 +2040,11 @@ def _repo_spend_reserve(
     monthly_spend_cny: float,
     spend_day_ordinals: list[int] | None = None,
     trading_days: list[date] | None = None,
+    spend_amounts: dict[date, float] | None = None,
 ) -> float:
     maturity = repo_maturity_day(day, tenor_days, trading_days)
+    if spend_amounts is not None:
+        return sum(amount for spend_day, amount in spend_amounts.items() if day < spend_day < maturity)
     if spend_day_ordinals is None:
         spend_count = sum(1 for spend_day in monthly_spend_days if day < spend_day < maturity)
     else:
@@ -2073,9 +2099,14 @@ def _invest_idle_cash_in_repo(
         )
 
 
-def _next_spend_reserve(day: date, monthly_spend_days: set[date], monthly_spend_cny: float) -> float:
+def _next_spend_reserve(
+    day: date, monthly_spend_days: set[date], monthly_spend_cny: float,
+    spend_amounts: dict[date, float] | None = None,
+) -> float:
     next_day = add_business_days(day, 1)
-    return monthly_spend_cny if next_day in monthly_spend_days else 0.0
+    if next_day not in monthly_spend_days:
+        return 0.0
+    return spend_amounts.get(next_day, monthly_spend_cny) if spend_amounts is not None else monthly_spend_cny
 
 
 def _invest_repo_cash(
@@ -2093,6 +2124,7 @@ def _invest_repo_cash(
     spend_day_ordinals: list[int] | None = None,
     trading_days: list[date] | None = None,
     one_day_repo_fee_config: RepoFeeConfig | None = None,
+    spend_amounts: dict[date, float] | None = None,
 ) -> None:
     reserve_cny = _repo_spend_reserve(
         day,
@@ -2101,6 +2133,7 @@ def _invest_repo_cash(
         monthly_spend_cny,
         spend_day_ordinals,
         trading_days,
+        spend_amounts,
     ) + max(extra_reserve_cny, 0.0)
     maturity = repo_maturity_day(day, selected_tenor_days, trading_days)
     crosses_rebalance = any(day < rebalance_day < maturity for rebalance_day in (rebalance_days_set or set()))
@@ -2115,7 +2148,7 @@ def _invest_repo_cash(
         repo_fee_config,
         trading_days,
     )
-    overnight_reserve_cny = _next_spend_reserve(day, monthly_spend_days, monthly_spend_cny) + max(extra_reserve_cny, 0.0)
+    overnight_reserve_cny = _next_spend_reserve(day, monthly_spend_days, monthly_spend_cny, spend_amounts) + max(extra_reserve_cny, 0.0)
     _invest_idle_cash_in_repo(
         state,
         day,
@@ -2710,6 +2743,9 @@ def _simulate_comparison_series(
     one_day_repo_fee_config = repo_fee_config_for_tenor(config, 1)
     prepared_routes = prepare_active_asset_routes(comparison_config)
     monthly_spend_ordinals = sorted(day.toordinal() for day in monthly_spend_days)
+    spending_config = {**config, "start_date": min(monthly_spend_days).isoformat()}
+    spend_amounts = {day: monthly_spend_amount(spending_config, day) for day in monthly_spend_days}
+    repo_spend_amounts = spend_amounts if float(config.get("monthly_spend_annual_growth", 0.0)) else None
     totals: dict[str, float] = {}
     trades: list[dict[str, Any]] = []
     initial_rebalance_done = False
@@ -2773,7 +2809,7 @@ def _simulate_comparison_series(
         previous_fee_day = day
 
         if day in monthly_spend_days:
-            spend = float(config["monthly_spend_cny"])
+            spend = spend_amounts[day]
             if state.cash_cny < spend:
                 _cover_cash_shortfall(state, spend, day, execution_closes, fx_rates, config["fees"], trades, False)
             actual_spend = min(spend, max(state.cash_cny, 0.0))
@@ -2827,6 +2863,7 @@ def _simulate_comparison_series(
             monthly_spend_ordinals,
             repo_trading_days or days,
             one_day_repo_fee_config,
+            repo_spend_amounts,
         )
         total, _values = _portfolio_value(state, latest_prices, fx_rates, day)
         next_day = days[idx + 1] if idx + 1 < len(days) else None
@@ -2993,6 +3030,9 @@ def run_backtest(
 
     monthly_spend_days = first_business_day_by_month(days)
     monthly_spend_ordinals = sorted(day.toordinal() for day in monthly_spend_days)
+    spending_config = {**config, "start_date": min(monthly_spend_days).isoformat()}
+    spend_amounts = {day: monthly_spend_amount(spending_config, day) for day in monthly_spend_days}
+    repo_spend_amounts = spend_amounts if float(config.get("monthly_spend_annual_growth", 0.0)) else None
     reb_days = rebalance_days(days, config["rebalance_frequency"], int(config["annual_rebalance_month"]))
     latest_prices: dict[str, float | None] = {symbol: None for symbol in symbols + [benchmark_symbol]}
     latest_fx_rates: dict[str, float | None] = {pair: None for pair in needed_fx_pairs}
@@ -3245,6 +3285,9 @@ def run_backtest(
                 "targets": pending_rebalance["targets"],
                 "event_type": "scheduled",
                 "current_weights": open_weights,
+                "before_weights": open_weights,
+                "after_weights": {key: value / after_rebalance if after_rebalance else 0.0 for key, value in after_values.items()},
+                "weight_basis": "total_portfolio_cny; REPO=cash+repo_net_accrual+dividend_receivables; money_fund=separate_symbol",
                 "rebalance_frequency": config["rebalance_frequency"],
                 "rebalance_band": float(config["rebalance_band"]),
                 "threshold_exceeded": rebalance_needed,
@@ -3290,6 +3333,7 @@ def run_backtest(
                     dip_buy_confirmed_cash_equivalent_cny,
                     float(config["monthly_spend_cny"]),
                     int(config.get("dip_buy_total_parts", 10)),
+                    cash_buffer_cny=living_expense_reserve(spending_config, day, include_current_month=day in monthly_spend_days),
                 )
             else:
                 dip_buy_confirmed_cash_equivalent_cny = 0.0
@@ -3471,7 +3515,7 @@ def run_backtest(
         previous_fee_day = day
 
         if day in monthly_spend_days:
-            spend = float(config["monthly_spend_cny"])
+            spend = spend_amounts[day]
             if state.cash_cny < spend:
                 _cover_cash_shortfall(state, spend, day, close_execution_prices, fx_rates, config["fees"], trades, bool(config.get("allow_fractional_us_shares", True)))
             actual_spend = min(spend, max(state.cash_cny, 0.0))
@@ -3592,6 +3636,9 @@ def run_backtest(
                             "asset_performance_version": 3,
                             "event_type": "initial_allocation" if starts_dip_buy_cycle else "treasury_activation",
                             "current_weights": current_weights,
+                            "before_weights": current_weights,
+                            "after_weights": {key: value / after_rebalance if after_rebalance else 0.0 for key, value in after_values.items()},
+                            "weight_basis": "total_portfolio_cny; REPO=cash+repo_net_accrual+dividend_receivables; money_fund=separate_symbol",
                             "rebalance_frequency": config["rebalance_frequency"],
                             "rebalance_band": rebalance_band,
                             "rebalance_to_target": rebalance_to_target,
@@ -3670,6 +3717,7 @@ def run_backtest(
                         dip_buy_confirmed_cash_equivalent_cny,
                         float(config["monthly_spend_cny"]),
                         int(config.get("dip_buy_total_parts", 10)),
+                        cash_buffer_cny=living_expense_reserve(spending_config, day),
                     )
                 else:
                     dip_buy_confirmed_cash_equivalent_cny = 0.0
@@ -3946,6 +3994,7 @@ def run_backtest(
             monthly_spend_ordinals,
             repo_trading_days,
             one_day_repo_fee_config,
+            repo_spend_amounts,
         )
 
         total, values = _portfolio_value(state, latest_prices, fx_rates, day)
@@ -4283,6 +4332,8 @@ def run_backtest(
         "volatility": volatility,
         "total_fees_cny": state.total_fees_cny,
         "total_spend_cny": state.total_spend_cny,
+        "monthly_spend_annual_growth": float(config.get("monthly_spend_annual_growth", 0.0)),
+        "monthly_spend_growth_basis": "every_12_months_from_first_withdrawal_month",
         "total_planned_spend_cny": total_planned_spend_cny,
         "total_spend_shortfall_cny": total_spend_shortfall_cny,
         "spend_shortfall_count": spend_shortfall_count,

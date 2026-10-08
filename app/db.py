@@ -199,6 +199,21 @@ def init_db(db_path: str | Path) -> None:
 def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS run_metadata (
+          key_id TEXT NOT NULL,
+          run_id TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+          name TEXT NOT NULL DEFAULT '' CHECK(length(name) <= 80),
+          note TEXT NOT NULL DEFAULT '' CHECK(length(note) <= 1000),
+          favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0, 1)),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (key_id, run_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_run_metadata_favorites ON run_metadata(key_id, favorite, updated_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_run_metadata_run_id ON run_metadata(run_id)")
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS sync_coverage (
           kind TEXT NOT NULL,
           symbol TEXT NOT NULL,
@@ -273,6 +288,32 @@ def add_leaderboard_membership(conn: sqlite3.Connection, key_id: str, run_id: st
         """,
         (key_id, run_id, utc_now()),
     )
+
+
+def get_run_metadata(conn: sqlite3.Connection, key_id: str, run_id: str) -> dict:
+    row = conn.execute(
+        "SELECT name,note,favorite FROM run_metadata WHERE key_id=? AND run_id=?", (key_id, run_id)
+    ).fetchone()
+    return {"name": row["name"] if row else "", "note": row["note"] if row else "", "favorite": bool(row["favorite"]) if row else False}
+
+
+def update_run_metadata(conn: sqlite3.Connection, key_id: str, run_id: str, patch: dict) -> dict:
+    if not patch or set(patch) - {"name", "note", "favorite"}:
+        raise ValueError("metadata must contain name, note or favorite only")
+    for field, limit in (("name", 80), ("note", 1000)):
+        if field in patch and (not isinstance(patch[field], str) or len(patch[field]) > limit):
+            raise ValueError(f"{field} must be a string of at most {limit} characters")
+    if "favorite" in patch and not isinstance(patch["favorite"], bool):
+        raise ValueError("favorite must be a boolean")
+    metadata = {**get_run_metadata(conn, key_id, run_id), **patch}
+    metadata["name"] = metadata["name"].strip()
+    conn.execute(
+        """INSERT INTO run_metadata(key_id,run_id,name,note,favorite,updated_at) VALUES(?,?,?,?,?,?)
+           ON CONFLICT(key_id,run_id) DO UPDATE SET name=excluded.name,note=excluded.note,
+             favorite=excluded.favorite,updated_at=excluded.updated_at""",
+        (key_id, run_id, metadata["name"], metadata["note"], int(metadata["favorite"]), utc_now()),
+    )
+    return metadata
 
 
 def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:

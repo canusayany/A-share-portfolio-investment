@@ -11,3 +11,5 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+node_modules/
+output/playwright/

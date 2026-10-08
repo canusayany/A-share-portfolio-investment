@@ -367,6 +367,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # True restores every sleeve to its configured target after a breach.
     "rebalance_to_target": False,
     "monthly_spend_cny": 5_000.0,
+    "monthly_spend_annual_growth": 0.0,
     "monthly_spend_day": "first_cn_trade_day",
     "repo_target_mode": "residual_weight",
     "repo_fixed_target_cny": 360_000.0,
@@ -721,6 +722,13 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             errors.append("monthly_spend_cny must be non-negative")
     except (TypeError, ValueError):
         errors.append("monthly_spend_cny must be numeric")
+    try:
+        growth = config.get("monthly_spend_annual_growth", 0.0)
+        numeric_growth = float(growth)
+        if isinstance(growth, bool) or not math.isfinite(numeric_growth) or not 0 <= numeric_growth <= 0.5:
+            errors.append("monthly_spend_annual_growth must be between 0 and 0.5")
+    except (TypeError, ValueError, OverflowError):
+        errors.append("monthly_spend_annual_growth must be numeric")
     try:
         dip_buy_drawdown = float(config.get("dip_buy_drawdown", 0.05))
         if not math.isfinite(dip_buy_drawdown) or not 0 < dip_buy_drawdown < 1:

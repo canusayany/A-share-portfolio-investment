@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from email.utils import format_datetime
 import gc
@@ -22,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 import uuid
 
 from app.config import backtest_assets, repo_rate_symbol, STATIC_DIR, default_config, get_settings, normalize_config, validate_config
-from app.db import add_leaderboard_membership, data_status, db_session, init_db, json_dumps, json_loads, rows_to_dicts
+from app.db import add_leaderboard_membership, data_status, db_session, get_run_metadata, init_db, json_dumps, json_loads, rows_to_dicts, update_run_metadata
 from app.identity import (
     DEFAULT_LEADERBOARD_KEY_ID,
     IDENTITY_COOKIE_MAX_AGE_SECONDS,
@@ -45,6 +46,7 @@ from app.services.backtest_engine import (
 from app.services.data_sync import SyncCancelled, required_data_missing, sync_all
 from app.services.calendar import market_business_days, repo_actual_days, repo_year_basis
 from app.services.strategy_diagnostics import build_backtest_csv, strategy_diagnostics
+from app.services.research import run_research, validate_research_request
 
 logger = logging.getLogger(__name__)
 MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -54,6 +56,7 @@ JOB_CLEANUP_INTERVAL_SECONDS = 5.0
 CANCELLED_JOB_MESSAGE = "任务已取消：页面没有继续请求结果"
 TIME_RANKING_VERSION = 1
 TIME_RANKING_MIN_OBSERVATIONS = 5
+MAX_RESEARCH_PENDING_JOBS = 8
 
 
 class SingleFileSizeHandler(logging.FileHandler):
@@ -132,11 +135,13 @@ def _chart_sample_indices(rows: list[dict], payloads: list[dict], max_points: in
     return sorted(selected)
 
 
-def columnar_chart_payload(rows: list[dict], max_points: int = 1000) -> dict:
+def columnar_chart_payload(rows: list[dict], max_points: int = 1000, required_dates: set[str] | None = None) -> dict:
     """Return compact chart arrays while retaining route changes and extrema."""
     source_points = len(rows)
     all_payloads = [json_loads(row.get("payload_json"), {}) for row in rows]
     indices = _chart_sample_indices(rows, all_payloads, max_points)
+    if required_dates:
+        indices = sorted(set(indices) | {index for index, row in enumerate(rows) if row["trade_date"] in required_dates})
     sampled_rows = [rows[index] for index in indices]
     parsed_payloads = [all_payloads[index] for index in indices]
     chart = {
@@ -332,6 +337,11 @@ def rebalance_display_payload(payload: dict) -> dict:
             "rebalance_band",
             "rebalance_to_target",
             "current_weights",
+            "before_weights",
+            "after_weights",
+            "weight_basis",
+            "targets",
+            "desired_weights",
             "decision_date",
             "year_label",
             "year_start_date",
@@ -359,6 +369,14 @@ def rebalance_display_payload(payload: dict) -> dict:
 
 def archive_config_payload(config: dict) -> dict:
     return {
+        **{key: config[key] for key in (
+            "initial_capital_cny", "monthly_spend_cny", "monthly_spend_annual_growth",
+            "repo_target_mode", "repo_fixed_target_cny", "repo_fixed_target_ratio", "repo_symbol",
+            "rolling_window_years", "rebalance_month_analysis_enabled", "fees", "allow_fractional_us_shares",
+            "dip_buy_enabled", "dip_buy_drawdown", "dip_buy_total_parts", "dip_buy_level_mode",
+            "dip_buy_cost_basis_mode", "dip_buy_recovery_sell_enabled", "dip_buy_asset_cap_enabled",
+            "dip_buy_asset_cap_ratio", "dip_buy_blackout_enabled", "dip_buy_blackout_months",
+        ) if key in config},
         "start_date": config.get("start_date"),
         "end_date": config.get("end_date"),
         "rebalance_frequency": config.get("rebalance_frequency"),
@@ -368,7 +386,7 @@ def archive_config_payload(config: dict) -> dict:
         "assets": [
             {
                 key: asset.get(key)
-                for key in ("symbol", "name", "choice_label", "enabled", "target_weight")
+                for key in ("key", "symbol", "name", "choice_label", "enabled", "target_weight", "market", "currency", "asset_type")
                 if key in asset
             }
             for asset in config.get("assets", [])
@@ -397,6 +415,28 @@ def archive_summary_payload(summary: dict) -> dict:
             "rebalance_check_count",
             "rebalance_trade_count",
             "rebalance_no_trade_count",
+            "rebalance_within_band_count",
+            "rebalance_constrained_count",
+            "initial_allocation_count",
+            "treasury_activation_count",
+            "initial_capital_cny",
+            "final_asset_cny",
+            "total_return",
+            "total_fees_cny",
+            "total_spend_cny",
+            "total_planned_spend_cny",
+            "total_spend_shortfall_cny",
+            "first_spend_shortfall_date",
+            "spend_shortfall_count",
+            "trade_count",
+            "rebalance_count",
+            "total_dividend_cny",
+            "total_dividend_tax_cny",
+            "withheld_tax_cny",
+            "net_profit_cny",
+            "original_capital_return",
+            "original_capital_annualized_return",
+            "final_unrealized_pnl_cny",
     )
     return {
         **{key: summary[key] for key in fields if key in summary},
@@ -470,6 +510,7 @@ def backtest_archive_entries(
     limit: int,
     leaderboard: bool = False,
     leaderboard_key_id: str | None = None,
+    favorites_key_id: str | None = None,
 ) -> list[dict]:
     if leaderboard:
         membership_join = ""
@@ -497,6 +538,14 @@ def backtest_archive_entries(
                 query_params,
             )
         )
+    elif favorites_key_id is not None:
+        rows = rows_to_dicts(conn.execute(
+            """SELECT br.run_id,br.created_at,br.config_json,br.summary_json
+               FROM backtest_runs br JOIN run_metadata rm ON rm.run_id=br.run_id
+               WHERE rm.key_id=? AND rm.favorite=1
+               ORDER BY rm.updated_at DESC,br.created_at DESC,br.run_id DESC""",
+            (favorites_key_id,),
+        ))
     else:
         rows = rows_to_dicts(
             conn.execute(
@@ -527,6 +576,14 @@ def backtest_archive_entries(
     if leaderboard:
         for rank, entry in enumerate(entries, start=1):
             entry["rank"] = rank
+    return entries
+
+
+def add_archive_metadata(conn, entries: list[dict], key_id: str) -> list[dict]:
+    metadata = {row["run_id"]: {"name": row["name"], "note": row["note"], "favorite": bool(row["favorite"])}
+                for row in conn.execute("SELECT run_id,name,note,favorite FROM run_metadata WHERE key_id=?", (key_id,))}
+    for entry in entries:
+        entry["metadata"] = metadata.get(entry["run_id"], {"name": "", "note": "", "favorite": False})
     return entries
 
 
@@ -1036,6 +1093,13 @@ class PortfolioServer(ThreadingHTTPServer):
         monitor = getattr(self, "job_monitor_thread", None)
         if monitor is not None:
             monitor.join(timeout=2)
+        if hasattr(self, "research_jobs_lock"):
+            with self.research_jobs_lock:
+                self.research_closing = True
+                research_ids = list(self.research_jobs)
+            for job_id in research_ids:
+                cancel_research_job(self, job_id, "研究已取消：服务正在关闭")
+            self.research_executor.shutdown(wait=False, cancel_futures=True)
         executor = getattr(self, "job_executor", None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -1122,6 +1186,88 @@ def monitor_jobs(server) -> None:
     stop_event = server.job_monitor_stop  # type: ignore[attr-defined]
     while not stop_event.wait(JOB_CLEANUP_INTERVAL_SECONDS):
         cleanup_jobs(server)
+        cleanup_research_jobs(server)
+
+
+def research_job_payload(job: dict) -> dict:
+    return deepcopy({key: value for key, value in job.items() if not key.startswith("_")})
+
+
+def cancel_research_job(server, job_id: str, reason: str = "研究已取消") -> None:
+    with server.research_jobs_lock:
+        job = server.research_jobs.get(job_id)
+        if not job or job["status"] not in {"queued", "running"}:
+            return
+        server.research_cancel_events[job_id].set()
+        job.update(status="cancelled", error=reason, updated_at=iso_now())
+        future = server.research_futures.get(job_id)
+        if future is not None and future.cancel():
+            job["_active"] = False
+        server.research_activity[job_id] = time.monotonic()
+
+
+def cleanup_research_jobs(server) -> None:
+    if not hasattr(server, "research_jobs_lock"):
+        return
+    now = time.monotonic()
+    to_cancel = []
+    with server.research_jobs_lock:
+        for job_id, job in list(server.research_jobs.items()):
+            elapsed = now - server.research_activity.get(job_id, now)
+            if job["status"] in {"queued", "running"} and elapsed > server.job_abandoned_seconds:
+                to_cancel.append(job_id)
+            elif not job["_active"] and elapsed > server.job_retention_seconds:
+                server.research_jobs.pop(job_id, None)
+                server.research_activity.pop(job_id, None)
+                server.research_cancel_events.pop(job_id, None)
+                server.research_futures.pop(job_id, None)
+    for job_id in to_cancel:
+        cancel_research_job(server, job_id, "研究已取消：页面没有继续请求进度")
+
+
+def run_research_job(server, job_id: str, base_config: dict, payload: dict) -> None:
+    with server.research_jobs_lock:
+        job = server.research_jobs[job_id]
+        cancelled = server.research_cancel_events[job_id]
+        if job["status"] == "cancelled":
+            job["_active"] = False
+            return
+        job.update(status="running", updated_at=iso_now())
+
+    def on_progress(completed, total, rows):
+        with server.research_jobs_lock:
+            if not cancelled.is_set():
+                server.research_jobs[job_id].update(
+                    completed=completed, total=total, rows=deepcopy(rows), updated_at=iso_now(),
+                )
+
+    try:
+        with db_session(server.settings.db_path) as conn:
+            # Research consumes saved market data. Enforce its non-persistent
+            # contract even if a future engine change accidentally writes.
+            conn.execute("PRAGMA query_only=ON")
+            # WAL keeps every scenario on the same market-data snapshot even
+            # when another request syncs prices while this research is running.
+            conn.execute("BEGIN")
+            result = run_research(conn, base_config, payload, should_cancel=cancelled.is_set, on_progress=on_progress)
+        with server.research_jobs_lock:
+            if not cancelled.is_set():
+                server.research_jobs[job_id].update(
+                    status="completed", completed=result["completed"], total=result["total"],
+                    rows=deepcopy(result["rows"]), methodology=result.get("methodology", {}), updated_at=iso_now(),
+                )
+    except BacktestCancelled:
+        with server.research_jobs_lock:
+            server.research_jobs[job_id].update(status="cancelled", error="研究已取消", updated_at=iso_now())
+    except Exception as exc:
+        logger.exception("research failed job_id=%s", job_id)
+        with server.research_jobs_lock:
+            if not cancelled.is_set():
+                server.research_jobs[job_id].update(status="failed", error=str(exc), updated_at=iso_now())
+    finally:
+        with server.research_jobs_lock:
+            server.research_jobs[job_id]["_active"] = False
+            server.research_activity[job_id] = time.monotonic()
 
 
 def update_deferred_analysis_status(server, run_id: str, status: str, error: str | None = None) -> None:
@@ -1519,7 +1665,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.OK, {"status": data_status(conn)})
             elif path == "/api/backtest/history":
                 with db_session(self.settings.db_path) as conn:
-                    self.send_json(HTTPStatus.OK, {"records": backtest_archive_entries(conn, limit=20)})
+                    key_id = self.current_leaderboard_key_id()
+                    favorites = (parse_qs(parsed.query).get("favorites") or ["0"])[0] == "1"
+                    records = backtest_archive_entries(conn, limit=20, favorites_key_id=key_id if favorites else None)
+                    self.send_json(HTTPStatus.OK, {"records": add_archive_metadata(conn, records, key_id)})
             elif path == "/api/backtest/leaderboard":
                 with db_session(self.settings.db_path) as conn:
                     try:
@@ -1528,10 +1677,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                             parse_qs(parsed.query),
                             leaderboard_key_id=self.current_leaderboard_key_id(),
                         )
+                        add_archive_metadata(conn, payload["records"], self.current_leaderboard_key_id())
                     except ValueError as exc:
                         self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                         return
                     self.send_json(HTTPStatus.OK, payload)
+            elif path.startswith("/api/research/jobs/"):
+                self.handle_research_job(path)
             elif path.startswith("/api/backtest/jobs/"):
                 self.handle_backtest_job(path)
             elif path.startswith("/api/backtest/"):
@@ -1564,6 +1716,23 @@ class ApiHandler(BaseHTTPRequestHandler):
                     {"configured": True, "key_hint": key_id[:8]},
                     headers={"Set-Cookie": self.identity_cookie_header(key_id)},
                 )
+            elif path == "/api/research/start":
+                self.handle_research_start(payload)
+            elif path.startswith("/api/research/jobs/") and path.endswith("/cancel"):
+                self.handle_research_job(path, cancel=True)
+            elif path.startswith("/api/backtest/") and path.endswith("/metadata"):
+                parts = path.strip("/").split("/")
+                if len(parts) != 4:
+                    self.send_error_json(HTTPStatus.NOT_FOUND, "unknown API endpoint")
+                    return
+                run_id = parts[2]
+                with self.write_lock:
+                    with db_session(self.settings.db_path) as conn:
+                        if not conn.execute("SELECT 1 FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone():
+                            self.send_error_json(HTTPStatus.NOT_FOUND, "run not found")
+                            return
+                        metadata = update_run_metadata(conn, self.current_leaderboard_key_id(), run_id, payload)
+                self.send_json(HTTPStatus.OK, {"run_id": run_id, "metadata": metadata})
             elif path == "/api/data/sync":
                 config = normalize_config(payload.get("config") or payload)
                 errors = validate_config(config)
@@ -1705,6 +1874,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     conn.execute("DELETE FROM trades WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM rebalance_events WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM leaderboard_memberships WHERE run_id=?", (run_id,))
+                    conn.execute("DELETE FROM run_metadata WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM backtest_runs WHERE run_id=?", (run_id,))
             with self.server.diagnostics_cache_lock:  # type: ignore[attr-defined]
                 for key in list(self.server.diagnostics_cache):  # type: ignore[attr-defined]
@@ -1746,6 +1916,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "run_id": run_id,
                         "created_at": run["created_at"],
                         "config": saved_config,
+                        "metadata": get_run_metadata(conn, self.current_leaderboard_key_id(), run_id),
                         "summary": {
                             **saved_summary,
                             "requires_recalculation": int(saved_summary.get("engine_version") or 0) < BACKTEST_ENGINE_VERSION,
@@ -1768,6 +1939,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                     row["payload"] = json_loads(row.pop("payload_json"), {})
                 self.send_json(HTTPStatus.OK, {"series": rows})
             elif section == "chart-series":
+                focus_dates = parse_qs(urlparse(self.path).query, keep_blank_values=True).get("focus_date")
+                if focus_dates is not None:
+                    if len(focus_dates) != 1 or len(focus_dates[0]) != 10:
+                        raise ValueError("focus_date must be a single date in YYYY-MM-DD format")
+                    try:
+                        valid_date = date.fromisoformat(focus_dates[0]).isoformat() == focus_dates[0]
+                    except ValueError:
+                        valid_date = False
+                    if not valid_date:
+                        raise ValueError("focus_date must be a valid date in YYYY-MM-DD format")
                 rows = rows_to_dicts(
                     conn.execute(
                         """
@@ -1778,7 +1959,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                         (run_id,),
                     )
                 )
-                self.send_json(HTTPStatus.OK, {"chart": columnar_chart_payload(rows)})
+                if focus_dates and not any(row["trade_date"] == focus_dates[0] for row in rows):
+                    self.send_error_json(HTTPStatus.NOT_FOUND, "focus_date is not a trading date in this backtest")
+                    return
+                self.send_json(HTTPStatus.OK, {"chart": columnar_chart_payload(rows, required_dates=set(focus_dates or []))})
             elif section == "daily-pnl":
                 rows = rows_to_dicts(
                     conn.execute(
@@ -1886,6 +2070,78 @@ class ApiHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error_json(HTTPStatus.NOT_FOUND, "unknown backtest section")
 
+    def handle_research_start(self, payload: dict) -> None:
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must identify a saved backtest")
+        with db_session(self.settings.db_path) as conn:
+            row = conn.execute("SELECT config_json,summary_json FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not row:
+                self.send_error_json(HTTPStatus.NOT_FOUND, "run not found")
+                return
+            base_config = json_loads(row["config_json"], {})
+            summary = json_loads(row["summary_json"], {})
+        if int(summary.get("engine_version") or 0) != BACKTEST_ENGINE_VERSION:
+            self.send_error_json(HTTPStatus.CONFLICT, "此历史记录使用旧版计算逻辑，请重新运行回测后研究")
+            return
+        normalized = validate_research_request(base_config, payload)
+        key_id = self.current_leaderboard_key_id()
+        cleanup_research_jobs(self.server)
+        with self.server.research_jobs_lock:
+            if self.server.research_closing:
+                self.send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, "研究服务正在关闭，请稍后重试")
+                return
+            active = [job for job in self.server.research_jobs.values() if job["_active"]]
+            owned = next((job for job in active if job["_owner_key_id"] == key_id), None)
+            if owned:
+                self.send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "当前 Key 已有研究任务，请等待结束或取消", "job_id": owned["job_id"]})
+                return
+            if len(active) >= self.server.research_max_pending:
+                self.send_error_json(HTTPStatus.TOO_MANY_REQUESTS, "研究队列已满，请稍后重试")
+                return
+            job_id = str(uuid.uuid4())
+            job = {
+                "job_id": job_id, "run_id": run_id, "kind": normalized["kind"], "status": "queued",
+                "completed": 0, "total": normalized["total"], "rows": [], "created_at": iso_now(), "updated_at": iso_now(),
+                "_owner_key_id": key_id, "_active": True,
+            }
+            self.server.research_jobs[job_id] = job
+            self.server.research_activity[job_id] = time.monotonic()
+            self.server.research_cancel_events[job_id] = Event()
+            try:
+                # Register the future while holding the lock so cancellation
+                # cannot miss a submitted-but-unregistered queued job.
+                self.server.research_futures[job_id] = self.server.research_executor.submit(
+                    run_research_job, self.server, job_id, deepcopy(base_config), deepcopy(normalized),
+                )
+            except RuntimeError:
+                self.server.research_jobs.pop(job_id, None)
+                self.server.research_activity.pop(job_id, None)
+                self.server.research_cancel_events.pop(job_id, None)
+                self.send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, "研究服务正在关闭，请稍后重试")
+                return
+            response = research_job_payload(job)
+        self.send_json(HTTPStatus.ACCEPTED, response)
+
+    def handle_research_job(self, path: str, cancel: bool = False) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != (5 if cancel else 4):
+            self.send_error_json(HTTPStatus.NOT_FOUND, "unknown research endpoint")
+            return
+        job_id = parts[3]
+        cleanup_research_jobs(self.server)
+        with self.server.research_jobs_lock:
+            job = self.server.research_jobs.get(job_id)
+            if not job or job["_owner_key_id"] != self.current_leaderboard_key_id():
+                self.send_error_json(HTTPStatus.NOT_FOUND, "research job not found")
+                return
+            self.server.research_activity[job_id] = time.monotonic()
+        if cancel:
+            cancel_research_job(self.server, job_id)
+        with self.server.research_jobs_lock:
+            response = research_job_payload(self.server.research_jobs[job_id])
+        self.send_json(HTTPStatus.OK, response)
+
     def handle_backtest_job(self, path: str) -> None:
         parts = [part for part in path.split("/") if part]
         if len(parts) != 4:
@@ -1919,6 +2175,14 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | Path
     server.job_request_index = {}  # type: ignore[attr-defined]
     server.analysis_lock = Lock()  # type: ignore[attr-defined]
     server.analysis_futures = {}  # type: ignore[attr-defined]
+    server.research_jobs_lock = Lock()  # type: ignore[attr-defined]
+    server.research_closing = False  # type: ignore[attr-defined]
+    server.research_jobs = {}  # type: ignore[attr-defined]
+    server.research_activity = {}  # type: ignore[attr-defined]
+    server.research_cancel_events = {}  # type: ignore[attr-defined]
+    server.research_futures = {}  # type: ignore[attr-defined]
+    server.research_max_pending = MAX_RESEARCH_PENDING_JOBS  # type: ignore[attr-defined]
+    server.research_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="research")  # type: ignore[attr-defined]
     server.static_cache_lock = Lock()  # type: ignore[attr-defined]
     server.static_cache = {}  # type: ignore[attr-defined]
     server.diagnostics_cache_lock = Lock()  # type: ignore[attr-defined]

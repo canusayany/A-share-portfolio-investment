@@ -17,6 +17,7 @@ MEASURED_FILES = [
     ROOT / "app" / "services" / "fees.py",
     ROOT / "app" / "services" / "calendar.py",
     ROOT / "app" / "services" / "backtest_engine.py",
+    ROOT / "app" / "services" / "research.py",
     ROOT / "app" / "services" / "data_sync.py",
 ]
 
