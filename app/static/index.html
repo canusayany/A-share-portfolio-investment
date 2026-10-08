@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a55'/%3E%3Cpath d='M7 23l6-8 5 3 7-10' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="static/styles.css?v=20261008-research-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20261008-clarity-1" />
   </head>
   <body class="history-collapsed">
     <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
@@ -460,8 +460,8 @@
         <details class="risk-insights" id="riskDetails" aria-labelledby="riskInsightsTitle">
           <summary class="risk-insights-heading">
             <div>
-              <h2 id="riskInsightsTitle">风险与行情捕获</h2>
-              <p>快速识别最差阶段、回撤修复速度，以及相对沪深300的涨跌参与程度</p>
+              <h2 id="riskInsightsTitle">风险与行情表现</h2>
+              <p>查看最差阶段、回撤恢复，以及大盘涨跌时的组合收益</p>
             </div>
             <span class="disclosure-label">展开明细</span>
           </summary>
@@ -502,20 +502,16 @@
         <section id="recordsSection" class="records-panel" aria-labelledby="recordsTitle">
           <div class="panel-heading records-heading">
             <div>
-              <h2 id="recordsTitle">数据与记录</h2>
-              <p>核对数据覆盖、滚动窗口与月份对比，再追踪再平衡和每笔交易</p>
+              <h2 id="recordsTitle">回测记录</h2>
+              <p>追踪再平衡和每笔交易，查看滚动窗口与月份对比</p>
             </div>
           </div>
           <div class="analysis-status"><span id="analysisMessage" role="status">补充分析在主回测后生成</span><button id="retryAnalysisBtn" class="button button-secondary" type="button" hidden>重试补充分析</button></div>
-          <div class="tab-strip record-tabs" role="tablist" aria-label="数据与记录">
-            <button id="recordTabStatus" type="button" role="tab" aria-selected="true" aria-controls="statusPanel" data-record-tab="statusPanel">数据状态</button>
+          <div class="tab-strip record-tabs" role="tablist" aria-label="回测记录">
+            <button id="recordTabRebalance" type="button" role="tab" aria-selected="true" aria-controls="rebalancePanel" data-record-tab="rebalancePanel">再平衡记录</button>
+            <button id="recordTabTrades" type="button" role="tab" aria-selected="false" aria-controls="tradesPanel" data-record-tab="tradesPanel">交易流水</button>
             <button id="recordTabRolling" type="button" role="tab" aria-selected="false" aria-controls="rollingPanel" data-record-tab="rollingPanel">滚动窗口</button>
             <button id="recordTabMonths" type="button" role="tab" aria-selected="false" aria-controls="monthsPanel" data-record-tab="monthsPanel">月份对比</button>
-            <button id="recordTabRebalance" type="button" role="tab" aria-selected="false" aria-controls="rebalancePanel" data-record-tab="rebalancePanel">再平衡记录</button>
-            <button id="recordTabTrades" type="button" role="tab" aria-selected="false" aria-controls="tradesPanel" data-record-tab="tradesPanel">交易流水</button>
-          </div>
-          <div id="statusPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabStatus">
-            <div class="table-scroll"><table id="statusTable"></table></div>
           </div>
           <div id="rollingPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRolling" hidden>
             <div class="table-context"><span>每个窗口都会按当前配置重新建仓</span><small>默认按年盈利/回撤比排序，点击表头可切换</small></div>
@@ -525,7 +521,7 @@
             <div class="table-context"><span>绿色更优，黄色居中，红色需关注</span><small>默认按年盈利/回撤比排序，点击表头可切换</small></div>
             <div class="table-scroll"><table id="monthsTable"></table></div>
           </div>
-          <div id="rebalancePanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRebalance" hidden>
+          <div id="rebalancePanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRebalance">
             <div class="table-scroll"><table id="rebalanceTable"></table></div>
           </div>
           <div id="tradesPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabTrades" hidden>
@@ -608,6 +604,6 @@
         </div>
       </form>
     </dialog>
-  <script src="static/app.js?v=20261008-research-1"></script>
+  <script src="static/app.js?v=20261008-clarity-1"></script>
   </body>
 </html>

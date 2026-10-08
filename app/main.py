@@ -40,6 +40,7 @@ from app.services.backtest_engine import (
     ranking_metrics,
     canonical_config_hash,
     get_cached_backtest_run,
+    market_capture_metrics,
     rolling_window_ranges,
     run_backtest,
 )
@@ -392,6 +393,45 @@ def archive_config_payload(config: dict) -> dict:
             for asset in config.get("assets", [])
         ],
     }
+
+
+def backfill_market_capture_metrics(conn, run_id: str, summary: dict) -> dict:
+    """Enrich old responses from every daily observation without changing the run."""
+    monthly_fields = (
+        "up_market_strategy_monthly_return", "up_market_benchmark_monthly_return",
+        "down_market_strategy_monthly_return", "down_market_benchmark_monthly_return",
+    )
+    if all(field in summary for field in monthly_fields):
+        return dict(summary)
+    rows = conn.execute(
+        "SELECT trade_date,daily_return,benchmark_return,payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date",
+        (run_id,),
+    ).fetchall()
+    payloads = [json_loads(row["payload_json"], {}) for row in rows]
+
+    def positive_number(value) -> float | None:
+        try:
+            number = float(value) if value is not None else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if number is not None and math.isfinite(number) and number > 0 else None
+
+    if any("benchmark_value" in payload for payload in payloads):
+        # The stored prices include explicit nulls before benchmark coverage.
+        # Do not turn their legacy cumulative-return placeholders into prices,
+        # or mix price levels with normalized values from a different scale.
+        benchmark_values = [positive_number(payload.get("benchmark_value")) for payload in payloads]
+    else:
+        benchmark_values = [
+            positive_number(1.0 + float(row["benchmark_return"])) if row["benchmark_return"] is not None else None
+            for row in rows
+        ]
+    metrics = market_capture_metrics(
+        [row["trade_date"] for row in rows],
+        [row["daily_return"] for row in rows],
+        benchmark_values,
+    )
+    return {**summary, **metrics}
 
 
 def archive_summary_payload(summary: dict) -> dict:
@@ -1014,6 +1054,9 @@ def execute_backtest_request(
                         and cached_status not in {"completed", "not_required"}
                     )
                     cached["data_sync"] = {"triggered": False, "missing_before": [], "result": None}
+                    # Enrich only the response, after any existing analysis
+                    # status persistence, so cached snapshots stay unchanged.
+                    cached["summary"] = backfill_market_capture_metrics(conn, cached["run_id"], cached["summary"])
                     logger.info("backtest cache hit id=%s seconds=%.3f total_seconds=%.3f", request_id, time.perf_counter() - cache_started_at, time.perf_counter() - started_at)
                     return cached
                 logger.info("backtest cache miss id=%s seconds=%.3f", request_id, time.perf_counter() - cache_started_at)
@@ -1078,6 +1121,7 @@ def execute_backtest_request(
                 result["status"] = data_status(conn)
                 logger.info("backtest status complete id=%s seconds=%.3f rows=%d", request_id, time.perf_counter() - status_started_at, len(result["status"]))
             logger.info("backtest request complete id=%s total_seconds=%.3f", request_id, time.perf_counter() - started_at)
+            result["summary"] = backfill_market_capture_metrics(conn, result["run_id"], result["summary"])
             return result
 
 
@@ -1902,6 +1946,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             if not section:
                 saved_config = json_loads(run["config_json"], {})
                 saved_summary = json_loads(run["summary_json"], {})
+                saved_summary = backfill_market_capture_metrics(conn, run_id, saved_summary)
                 if (
                     saved_summary.get("analysis_status") in {"pending", "running"}
                     and int(saved_summary.get("engine_version") or 0) == BACKTEST_ENGINE_VERSION

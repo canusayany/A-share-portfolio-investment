@@ -7,6 +7,40 @@ const vm = require("node:vm");
 const appSource = fs.readFileSync(path.join(__dirname, "../app/static/app.js"), "utf8")
   .replace(/^init\(\)\.catch\([^\n]+\);\s*$/m, "");
 
+test("capture scenarios explain opposite directions using actual monthly returns", () => {
+  const h = harness();
+  const summary = { up_market_months: 5, up_market_strategy_monthly_return: -0.0123, up_market_benchmark_monthly_return: 0.042, upside_capture_ratio: -0.2949,
+    down_market_months: 3, down_market_strategy_monthly_return: 0.003, down_market_benchmark_monthly_return: -0.04, downside_capture_ratio: -0.07 };
+  h.context.__captureSummary = summary;
+  const up = h.evaluate('captureScenarioMarkup("up", __captureSummary)');
+  const down = h.evaluate('captureScenarioMarkup("down", __captureSummary)');
+  assert.match(up, /大盘涨，组合反而下跌/);
+  assert.match(up, /−1.23%/);
+  assert.match(up, /\+4.20%/);
+  assert.match(up, /样本少于 12/);
+  assert.doesNotMatch(up, /capture-fill|29.49%/);
+  assert.match(down, /大盘跌，组合仍上涨/);
+  assert.match(down, /\+0.30%/);
+});
+
+test("capture distinguishes unavailable, zero and very small negative returns", () => {
+  const h = harness();
+  assert.match(h.evaluate('captureReturnMarkup(null)'), /—/);
+  assert.match(h.evaluate('captureReturnMarkup(0)'), /0.00%/);
+  assert.match(h.evaluate('captureReturnMarkup(-0.000002)'), /−0.0002%/);
+  assert.doesNotMatch(h.evaluate('captureReturnMarkup(-0.000002)'), /−0.00%/);
+  assert.match(h.evaluate('captureScenarioMarkup("down", {down_market_months: 0})'), /暂无可比较/);
+  assert.match(h.evaluate('captureScenarioMarkup("down", {down_market_months: 3, down_market_strategy_monthly_return: -0.000002, down_market_benchmark_monthly_return: -0.04})'), /组合跌得比大盘少/);
+});
+
+test("sampled chart points never replace authoritative unavailable capture values", () => {
+  const h = harness();
+  const result = h.evaluate('deriveSummary({upside_capture_ratio: null, up_market_months: 0}, [{trade_date:"2020-01-31",daily_return:0,benchmark_return:0}, {trade_date:"2020-02-28",daily_return:0.05,benchmark_return:0.1}])');
+  assert.equal(result.upside_capture_ratio, null);
+  assert.equal(result.up_market_months, 0);
+  assert.equal(result.downside_capture_ratio, undefined);
+});
+
 function deferred() {
   let resolve;
   let reject;

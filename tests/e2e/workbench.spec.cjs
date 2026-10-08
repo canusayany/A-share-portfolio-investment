@@ -36,6 +36,77 @@ async function openResearch(page) {
   await expect(page.locator('#researchBaseline')).toContainText('2019');
 }
 
+
+async function expandArchiveActions(item) {
+  const toggle = item.locator('.history-more-toggle');
+  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(item.locator('.history-item-secondary')).toBeVisible();
+}
+
+async function assertArchiveActionHierarchy(page, item) {
+  const actions = item.locator('.history-item-actions');
+  const toggle = item.locator('.history-more-toggle');
+  const secondary = item.locator('.history-item-secondary');
+  await item.scrollIntoViewIfNeeded();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(secondary).toBeHidden();
+  const primary = actions.locator('button:visible');
+  await expect(primary).toHaveCount(3);
+  await expect(primary.nth(0)).toHaveText('查看结果');
+  await expect(primary.nth(1)).toHaveText('对比');
+  await expect(primary.nth(2)).toContainText('更多');
+  const boxes = await primary.evaluateAll(buttons => buttons.map(button => {
+    const { x, y, width, height } = button.getBoundingClientRect();
+    return { x, y, width, height };
+  }));
+  for (const box of boxes) {
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(Math.abs(box.y - boxes[0].y), 'primary buttons must remain on one line').toBeLessThanOrEqual(1);
+  }
+  expect(boxes[0].x + boxes[0].width).toBeLessThanOrEqual(boxes[1].x + 1);
+  expect(boxes[1].x + boxes[1].width).toBeLessThanOrEqual(boxes[2].x + 1);
+
+  await expandArchiveActions(item);
+  const items = secondary.locator('button:visible');
+  await expect(items).toHaveCount(4);
+  const grid = await items.evaluateAll(buttons => buttons.map(button => {
+    const { x, y, height } = button.getBoundingClientRect();
+    return { x, y, height };
+  }));
+  expect(Math.abs(grid[0].y - grid[1].y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(grid[2].y - grid[3].y)).toBeLessThanOrEqual(1);
+  expect(grid[2].y).toBeGreaterThan(grid[0].y);
+  expect(Math.abs(grid[0].x - grid[2].x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(grid[1].x - grid[3].x)).toBeLessThanOrEqual(1);
+  expect(grid.every(box => box.height >= 44)).toBe(true);
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(secondary).toBeHidden();
+  await expandArchiveActions(item);
+  await items.first().focus();
+  await page.keyboard.press('Escape');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(secondary).toBeHidden();
+  await expect(toggle).toBeFocused();
+  await expect(page.locator('#historyPanel')).not.toHaveAttribute('inert', '');
+  await expect(primary).toHaveCount(3);
+}
+
+async function selectSeededLeaderboard(page, testInfo) {
+  await page.locator('#closeHistoryPanel').click();
+  await page.locator(testInfo.project.name === 'desktop' ? '#identityKeyButton' : '#mobileIdentityKeyButton').click();
+  // This identity is pre-populated only in the disposable E2E database.
+  await page.locator('#identityKeyInput').fill('e2e-test');
+  await page.locator('#identitySubmit').click();
+  await expect(page.locator('#identityGate')).toBeHidden();
+  await openHistory(page);
+  await page.locator('#leaderboardTab').click();
+  await expect(page.locator('#leaderboardSection')).toBeVisible();
+}
+
 test.beforeEach(async ({ page }, testInfo) => {
   browserErrors.set(page, []);
   page.on('pageerror', error => browserErrors.get(page).push(error.message));
@@ -127,7 +198,9 @@ test('rebalance date links chart, actual weights and same-day transactions', asy
 test('names, notes and favorites persist through reload with safe text rendering', async ({ page }, testInfo) => {
   await openHistory(page);
   const item = page.locator('.history-item').filter({ has: page.locator(`[data-history-replay="${fixtures()[0].run_id}"]`) });
-  await item.getByRole('button', { name: /编辑|命名/ }).click();
+  await item.locator('.history-more-toggle').click();
+  await expect(item.locator('.history-item-secondary')).toBeVisible();
+  await item.locator('[data-history-metadata]').click();
   await expect(page.locator('#metadataDialog')).toBeVisible();
   const name = `生活费方案 ${testInfo.project.name}`;
   const note = '<b>保留低频，观察消费缺口</b>';
@@ -240,7 +313,86 @@ test('research validates input, cancels computation and permits another run', as
   await expect(page.locator('#rebalanceResearchStatus')).toContainText('取消', { timeout: 80_000 });
   await expect(page.locator('#startRebalanceResearch')).toBeEnabled();
   await page.locator('#rebalanceResearchBands').fill('25');
-  await page.locator('#startRebalanceResearch').click();
+  let accepted = false;
+  for (let retry = 0; retry <= 5; retry += 1) {
+    if (retry > 0) {
+      // Cancellation can finish before the worker releases its computation slot.
+      await expect(page.locator('#rebalanceResearchStatus')).toContainText('上一计算正在退出，请稍后再次点击运行');
+      await expect(page.locator('#startRebalanceResearch')).toBeEnabled();
+      await page.waitForTimeout(500);
+    }
+    const starting = page.waitForResponse(response => response.url().endsWith('/api/research/start') && response.request().method() === 'POST');
+    await page.locator('#startRebalanceResearch').click();
+    const response = await starting;
+    if (response.status() !== 429) {
+      expect(response.status()).toBe(202);
+      accepted = true;
+      break;
+    }
+    await expect(page.locator('#rebalanceResearchStatus')).toContainText('上一计算正在退出，请稍后再次点击运行');
+  }
+  expect(accepted, 'research should restart after at most five worker-exit retries').toBe(true);
   await expect(page.locator('#rebalanceResearchStatus')).toContainText('完成', { timeout: 80_000 });
   await expect(page.locator('#rebalanceResearchTable tbody tr')).toHaveCount(3);
 });
+
+
+for (const archive of ['history', 'leaderboard']) {
+  test(`${archive} cards keep actions in one primary row with accessible inline details`, async ({ page }, testInfo) => {
+    await openHistory(page);
+    if (archive === 'leaderboard') await selectSeededLeaderboard(page, testInfo);
+    const runId = fixtures()[1].run_id;
+    const list = page.locator(archive === 'history' ? '#historyList' : '#leaderboardList');
+    const item = list.locator('.history-item').filter({ has: page.locator(`[data-${archive}-replay="${runId}"]`) });
+    await expect(item).toHaveCount(1);
+    await assertArchiveActionHierarchy(page, item);
+
+    // Primary comparison remains directly accessible without opening secondary actions.
+    await item.locator(`[data-${archive}-compare]`).click();
+    await expect(page.locator('#historyComparison')).toBeVisible();
+    await expect(item.locator(`[data-${archive}-compare]`)).toContainText('取消对比');
+    await item.locator(`[data-${archive}-compare]`).click();
+    await expect(page.locator('#historyComparison')).toBeHidden();
+
+    await expandArchiveActions(item);
+    await item.locator('[data-history-metadata]').click();
+    await expect(page.locator('#metadataDialog')).toBeVisible();
+    await page.locator('#cancelMetadata').click();
+    await expect(page.locator('#metadataDialog')).toBeHidden();
+
+    // The secondary favorite action still writes the same record and can be undone.
+    const initial = await (await page.request.get(`/api/backtest/${runId}`)).json();
+    const wasFavorite = Boolean(initial.metadata.favorite);
+    for (const desired of [!wasFavorite, wasFavorite]) {
+      await expandArchiveActions(item);
+      const saved = page.waitForResponse(response => response.url().endsWith(`/api/backtest/${runId}/metadata`) && response.request().method() === 'POST');
+      await item.locator('[data-history-favorite]').click();
+      const result = await (await saved).json();
+      expect(result.metadata.favorite).toBe(desired);
+    }
+
+    await expandArchiveActions(item);
+    let deletionPrompt = '';
+    page.once('dialog', async dialog => { deletionPrompt = dialog.message(); await dialog.dismiss(); });
+    await item.locator(`[data-${archive}-delete]`).click();
+    expect(deletionPrompt).toContain('删除');
+    await expect(item).toHaveCount(1);
+
+    await expandArchiveActions(item);
+    await item.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`${archive}-action-hierarchy.png`) });
+    const resultBefore = await page.locator('#resultConfigSummary').innerText();
+    page.once('dialog', dialog => dialog.accept());
+    await item.locator('[data-history-copy]').click();
+    await expect(page.locator('#rebalanceFrequency')).toHaveValue(fixtures()[1].config.rebalance_frequency);
+    await expect(page.locator('#startDate')).toHaveValue(fixtures()[1].config.start_date);
+    await expect(page.locator('#resultConfigSummary')).toHaveText(resultBefore);
+    if (testInfo.project.name !== 'desktop') await page.locator('#closeParameterPanel').click();
+
+    // Replay remains a primary action after the card is rendered again.
+    await openHistory(page);
+    await item.locator(`[data-${archive}-replay]`).click();
+    await expect(page.locator('#workspaceMessage')).toContainText('已回放');
+    await expect(page.locator('#resultConfigSummary')).toContainText('2020');
+  });
+}

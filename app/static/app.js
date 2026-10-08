@@ -1451,15 +1451,6 @@ function renderSp500Control(host) {
 }
 
 function renderStatus(rows) {
-  const displayRows = rows.map((row) => ({
-    数据类型: DATA_KIND_NAMES[row.kind] || row.kind,
-    标的名称: assetName(row.symbol),
-    开始日期: row.start_date,
-    结束日期: row.end_date,
-    记录数: Number(row.rows || 0).toLocaleString("zh-CN"),
-    数据来源: formatSource(row.sources),
-  }));
-  renderTable("statusTable", ["数据类型", "标的名称", "开始日期", "结束日期", "记录数", "数据来源"], displayRows);
   updateDataStatus(rows);
 }
 
@@ -1538,31 +1529,34 @@ function recoveryMarkup(summary = {}) {
   return `<article class="risk-stat-card is-${tone}"><span>回撤恢复时间</span><strong>${days} 天</strong><small>${escapeHtml(detail)}</small></article>`;
 }
 
-function captureTone(side, value) {
-  if (value == null || !Number.isFinite(Number(value))) return "muted";
-  const ratio = Number(value);
-  if (side === "up") {
-    if (ratio >= 1) return "good";
-    if (ratio >= 0.7) return "warning";
-    return "bad";
-  }
-  if (ratio <= 0.5) return "good";
-  if (ratio <= 1) return "warning";
-  return "bad";
+function captureReturnMarkup(value) {
+  if (value == null || !Number.isFinite(Number(value))) return '<strong class="is-unavailable">—</strong>';
+  const number = Number(value);
+  const tone = number > 0 ? "gain" : number < 0 ? "loss" : "flat";
+  const amount = Math.abs(number) * 100;
+  const text = amount > 0 && amount < 0.0001 ? "<0.0001" : amount.toFixed(amount > 0 && amount < 0.01 ? 4 : 2);
+  return `<strong class="is-${tone}">${number > 0 ? "+" : number < 0 ? "−" : ""}${text}%</strong>`;
 }
 
-function captureBarMarkup(label, side, value, months) {
-  const available = value != null && Number.isFinite(Number(value));
-  const tone = captureTone(side, value);
-  const width = available ? Math.min(Math.abs(Number(value)), 1.5) / 1.5 * 100 : 0;
-  const guidance = side === "up" ? "越高代表上涨参与越充分" : "越低代表下跌防守越好";
-  return `<div class="capture-item is-${tone}">
-    <div class="capture-label"><span>${label}</span><strong>${available ? fmtPct(value) : "—"}</strong></div>
-    <div class="capture-track" aria-label="${label} ${available ? fmtPct(value) : "暂无数据"}">
-      <i class="capture-fill" style="width:${width.toFixed(2)}%"></i><b class="capture-benchmark" title="沪深300基准 100%"></b>
-    </div>
-    <small>${available ? `${Number(months || 0)} 个基准${side === "up" ? "上涨" : "下跌"}月 · ${guidance}` : "有效月份不足"}</small>
-  </div>`;
+function captureScenarioMarkup(side, summary) {
+  const strategy = summary[`${side}_market_strategy_monthly_return`];
+  const benchmark = summary[`${side}_market_benchmark_monthly_return`];
+  const months = Number(summary[`${side}_market_months`] || 0);
+  const available = months > 0 && strategy != null && benchmark != null && Number.isFinite(Number(strategy)) && Number.isFinite(Number(benchmark));
+  const rising = side === "up";
+  let conclusion = months > 0 ? "该组收益明细暂不可用" : "暂无可比较的月度区间";
+  if (available) {
+    const s = Number(strategy), b = Number(benchmark);
+    if (Math.abs(s) <= 1e-12) conclusion = rising ? "大盘涨，组合基本持平" : "大盘跌，组合基本持平";
+    else if (rising) conclusion = s < 0 ? "大盘涨，组合反而下跌" : Math.abs(s - b) <= 1e-12 ? "上涨幅度与大盘一致" : s > b ? "上涨幅度超过大盘" : "组合跟涨，幅度小于大盘";
+    else conclusion = s > 0 ? "大盘跌，组合仍上涨" : Math.abs(s - b) <= 1e-12 ? "跌幅与大盘一致" : s > b ? "组合跌得比大盘少" : "组合跌得比大盘多";
+  }
+  return `<section class="capture-item" aria-label="沪深300${rising ? "上涨" : "下跌"}时">
+    <div class="capture-scenario-heading"><h3>沪深300${rising ? "上涨" : "下跌"}时</h3><span>${months} 个区间</span></div>
+    <p class="capture-conclusion">${conclusion}</p>
+    <div class="capture-returns"><div><span>组合月均收益</span>${captureReturnMarkup(available ? strategy : null)}</div><div><span>沪深300月均收益</span>${captureReturnMarkup(available ? benchmark : null)}</div></div>
+    ${months > 0 && months < 12 ? '<small class="capture-sample-note">样本少于 12 个区间，仅供参考</small>' : ""}
+  </section>`;
 }
 
 function renderRiskInsights(summary = {}) {
@@ -1575,11 +1569,18 @@ function renderRiskInsights(summary = {}) {
       ${recoveryMarkup(summary)}
     </div>
     <article class="capture-card">
-      <div class="capture-card-heading"><div><span>行情捕获率</span><small>按沪深300月度涨跌区间计算</small></div><em>基准线 100%</em></div>
+      <div class="capture-card-heading"><div><span>大盘涨跌时，组合表现如何？</span><small>按沪深300涨跌月份分组，比较月均收益（几何平均）</small></div></div>
       <div class="capture-grid">
-        ${captureBarMarkup("上涨行情捕获率", "up", summary.upside_capture_ratio, summary.up_market_months)}
-        ${captureBarMarkup("下跌行情捕获率", "down", summary.downside_capture_ratio, summary.down_market_months)}
+        ${captureScenarioMarkup("up", summary)}
+        ${captureScenarioMarkup("down", summary)}
       </div>
+      <details class="capture-methodology"><summary>查看捕获率与计算说明</summary>
+        <dl><div><dt>上涨捕获率</dt><dd>${summary.upside_capture_ratio == null ? "—" : fmtPct(summary.upside_capture_ratio)}</dd></div><div><dt>下跌捕获率</dt><dd>${summary.downside_capture_ratio == null ? "—" : fmtPct(summary.downside_capture_ratio)}</dd></div></dl>
+        <p>月均收益：将同组各月按复利合并，再折算为平均每月收益。月份可能不连续，各月表现也可能不同，这不是整个回测的累计收益。</p>
+        <p>捕获率 = 同组组合年化收益 ÷ 同组沪深300年化收益。100% 表示两者同组年化收益相同；不是组合赚了 100%。</p>
+        <p>上涨捕获率为负，表示大盘上涨的这些区间内组合总体亏损；下跌捕获率为负，表示大盘下跌时组合总体盈利。下跌捕获率接近 0，表示组合在这些区间内接近持平。</p>
+        <p>按月末分段，首月只作为起点；末月截至回测结束日，可能不足整月。沪深300持平的区间不计入两组。</p>
+      </details>
     </article>`;
 }
 
@@ -1783,49 +1784,6 @@ function deriveDrawdownRecovery(series) {
   };
 }
 
-function deriveMarketCapture(series) {
-  const monthly = new Map();
-  let strategyNav = 1;
-  series.forEach((row) => {
-    strategyNav *= 1 + Number(row.daily_return || 0);
-    monthly.set(String(row.trade_date).slice(0, 7), [strategyNav, 1 + Number(row.benchmark_return || 0)]);
-  });
-  const strategyUp = [];
-  const benchmarkUp = [];
-  const strategyDown = [];
-  const benchmarkDown = [];
-  const endpoints = [...monthly.values()];
-  for (let index = 1; index < endpoints.length; index += 1) {
-    const previous = endpoints[index - 1];
-    const current = endpoints[index];
-    const strategyReturn = previous[0] ? current[0] / previous[0] - 1 : 0;
-    const benchmarkReturn = previous[1] ? current[1] / previous[1] - 1 : 0;
-    if (benchmarkReturn > 1e-12) {
-      strategyUp.push(strategyReturn);
-      benchmarkUp.push(benchmarkReturn);
-    } else if (benchmarkReturn < -1e-12) {
-      strategyDown.push(strategyReturn);
-      benchmarkDown.push(benchmarkReturn);
-    }
-  }
-  const annualized = (values) => values.length
-    ? values.reduce((growth, value) => growth * Math.max(1 + value, 0), 1) ** (12 / values.length) - 1
-    : null;
-  const capture = (strategy, benchmark) => {
-    const strategyReturn = annualized(strategy);
-    const benchmarkReturn = annualized(benchmark);
-    return strategyReturn == null || benchmarkReturn == null || Math.abs(benchmarkReturn) <= 1e-12
-      ? null
-      : strategyReturn / benchmarkReturn;
-  };
-  return {
-    upside_capture_ratio: capture(strategyUp, benchmarkUp),
-    downside_capture_ratio: capture(strategyDown, benchmarkDown),
-    up_market_months: benchmarkUp.length,
-    down_market_months: benchmarkDown.length,
-  };
-}
-
 function expandChartSeries(data) {
   if (Array.isArray(data?.series)) return data.series;
   const chart = data?.chart || {};
@@ -1852,7 +1810,7 @@ function deriveSummary(summary, series) {
   const last = series.at(-1);
   const calendarRisk = deriveWorstCalendarPeriods(series);
   const recovery = deriveDrawdownRecovery(series);
-  const capture = deriveMarketCapture(series);
+
   return {
     ...summary,
     final_asset_cny: summary.final_asset_cny ?? last.total_asset_cny,
@@ -1862,10 +1820,6 @@ function deriveSummary(summary, series) {
     worst_year: summary.worst_year ?? calendarRisk.worst_year,
     worst_half_year: summary.worst_half_year ?? calendarRisk.worst_half_year,
     drawdown_recovery: summary.drawdown_recovery ?? recovery,
-    upside_capture_ratio: summary.upside_capture_ratio ?? capture.upside_capture_ratio,
-    downside_capture_ratio: summary.downside_capture_ratio ?? capture.downside_capture_ratio,
-    up_market_months: summary.up_market_months ?? capture.up_market_months,
-    down_market_months: summary.down_market_months ?? capture.down_market_months,
   };
 }
 
@@ -3409,7 +3363,7 @@ function renderRunHistory() {
       <div class="history-item-header"><strong>${escapeHtml(historyTitle(entry))}${isCurrent ? '<em class="current-badge">当前</em>' : ""}</strong><time>${escapeHtml(formatHistoryTime(entryTime(entry)))}</time></div>
       <div class="history-item-params">${escapeHtml(historyParams(entry))}</div>
       ${historyMetadataMarkup(entry)}<div class="history-item-metrics">${historyMetricMarkup("年盈利率", summary.annualized_return, "percent", annualReturnTone(summary.annualized_return))}${historyMetricMarkup("年盈利/回撤比", ratio, "ratio", ratioTone(ratio))}${historyMetricMarkup("最大回撤", summary.max_drawdown, "percent", drawdownTone(summary.max_drawdown))}</div>
-      <div class="history-item-actions"><button type="button" data-history-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-history-replay="${escapeHtml(runId)}">查看结果</button>${historyMetadataActions(entry)}<button type="button" class="danger" data-history-delete="${escapeHtml(runId)}">删除</button></div>
+      ${historyActionsMarkup(entry, "history", compareLabel)}
     </article>`;
   }).join("");
   host.querySelectorAll("[data-history-compare]").forEach((button) => {
@@ -3457,7 +3411,7 @@ function renderLeaderboard(records) {
       <div class="history-item-params"><strong>${escapeHtml(historyTitle(entry))}</strong><br>${escapeHtml(historyParams(entry))}</div>
       ${historyMetadataMarkup(entry)}<div class="leaderboard-metrics">${metricMarkup}</div>
       <div class="leaderboard-score">${scoreMarkup}</div>
-      <div class="history-item-actions"><button type="button" data-leaderboard-compare="${escapeHtml(runId)}">${compareLabel}</button><button type="button" data-leaderboard-replay="${escapeHtml(runId)}">查看结果</button>${historyMetadataActions(entry)}<button type="button" class="danger" data-leaderboard-delete="${escapeHtml(runId)}">删除</button></div>
+      ${historyActionsMarkup(entry, "leaderboard", compareLabel)}
     </article>`;
   }).join("");
   host.querySelectorAll("[data-leaderboard-compare]").forEach((button) => {
@@ -3941,7 +3895,7 @@ function setupUiInteractions() {
   $("downloadCsv")?.addEventListener("click", downloadCsvExport);
   setupTabs("[data-record-tab]", "recordTab", selectRecordPanel);
   selectChart(activeChartId);
-  selectRecordPanel("statusPanel");
+  selectRecordPanel("rebalancePanel");
   selectArchiveView(activeArchiveView);
   syncDrawerAccessibility();
 }
@@ -4091,10 +4045,38 @@ function historyMetadataMarkup(entry) {
 
 function historyMetadataActions(entry) {
   const id = escapeHtml(entryRunId(entry));
-  return `<button type="button" data-history-metadata="${id}">编辑名称 / 备注</button><button type="button" data-history-favorite="${id}" aria-pressed="${Boolean(entry.metadata?.favorite)}">${entry.metadata?.favorite ? "取消收藏" : "收藏"}</button><button type="button" data-history-copy="${id}">用此参数修改</button>`;
+  return `<button type="button" data-history-metadata="${id}">编辑名称备注</button><button type="button" data-history-favorite="${id}" aria-pressed="${Boolean(entry.metadata?.favorite)}">${entry.metadata?.favorite ? "取消收藏" : "收藏方案"}</button><button type="button" data-history-copy="${id}">载入参数</button>`;
+}
+
+function historyActionsMarkup(entry, source, compareLabel) {
+  const id = escapeHtml(entryRunId(entry));
+  const panelId = `${source}-actions-${id}`;
+  return `<div class="history-item-actions">
+    <button type="button" class="history-view-result" data-${source}-replay="${id}">查看结果</button>
+    <button type="button" data-${source}-compare="${id}" aria-pressed="${compareLabel === "取消对比"}">${compareLabel}</button>
+    <button type="button" class="history-more-toggle" aria-expanded="false" aria-controls="${panelId}">更多</button>
+    <div id="${panelId}" class="history-item-secondary" hidden>
+      ${historyMetadataActions(entry)}<button type="button" class="danger" data-${source}-delete="${id}">删除记录</button>
+    </div>
+  </div>`;
 }
 
 function bindHistoryMetadataActions(host) {
+  host.querySelectorAll(".history-item-actions").forEach((actions) => {
+    const toggle = actions.querySelector(".history-more-toggle");
+    const panel = actions.querySelector(".history-item-secondary");
+    toggle.addEventListener("click", () => {
+      panel.hidden = !panel.hidden;
+      toggle.setAttribute("aria-expanded", String(!panel.hidden));
+    });
+    actions.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || panel.hidden) return;
+      event.preventDefault(); event.stopPropagation();
+      panel.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.focus();
+    });
+  });
   host.querySelectorAll("[data-history-metadata]").forEach((button) => button.addEventListener("click", () => openMetadataEditor(button.dataset.historyMetadata, button)));
   host.querySelectorAll("[data-history-favorite]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.dataset.historyFavorite, entry = archiveEntries().find((item) => entryRunId(item) === id);

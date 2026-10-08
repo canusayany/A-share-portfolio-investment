@@ -1503,7 +1503,7 @@ def market_capture_metrics(
     daily_returns: list[float],
     benchmark_values: list[float | None],
 ) -> dict[str, Any]:
-    """Return standard monthly upside/downside capture ratios versus the benchmark."""
+    """Return capture ratios and geometric monthly returns for each market group."""
     monthly_endpoints: dict[str, tuple[float, float]] = {}
     strategy_nav = 1.0
     last_benchmark: float | None = None
@@ -1544,11 +1544,21 @@ def market_capture_metrics(
             return None
         return strategy_annualized / benchmark_annualized
 
+    def geometric_monthly_return(values: list[float]) -> float | None:
+        if not values:
+            return None
+        growth = math.prod(max(1.0 + value, 0.0) for value in values)
+        return growth ** (1.0 / len(values)) - 1.0
+
     return {
         "upside_capture_ratio": capture(strategy_up, benchmark_up),
         "downside_capture_ratio": capture(strategy_down, benchmark_down),
         "up_market_months": len(benchmark_up),
         "down_market_months": len(benchmark_down),
+        "up_market_strategy_monthly_return": geometric_monthly_return(strategy_up),
+        "up_market_benchmark_monthly_return": geometric_monthly_return(benchmark_up),
+        "down_market_strategy_monthly_return": geometric_monthly_return(strategy_down),
+        "down_market_benchmark_monthly_return": geometric_monthly_return(benchmark_down),
     }
 
 
