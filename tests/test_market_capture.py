@@ -22,9 +22,40 @@ MONTHLY_FIELDS = (
     "up_market_strategy_monthly_return", "up_market_benchmark_monthly_return",
     "down_market_strategy_monthly_return", "down_market_benchmark_monthly_return",
 )
+DAILY_FIELDS = ("common_observation_days", "strategy_up_days", "benchmark_up_days")
 
 
 class MarketCaptureMetricsTests(unittest.TestCase):
+    def test_daily_counts_share_samples_and_exclude_the_first_observation(self):
+        metrics = market_capture_metrics(
+            ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07", "2020-01-08"],
+            [.50, -.02, .03, 0, .01], [100, 110, 99, 99, 100],
+        )
+        self.assertEqual(metrics["common_observation_days"], 4)
+        self.assertEqual(metrics["strategy_up_days"], 2)
+        self.assertEqual(metrics["benchmark_up_days"], 2)
+
+    def test_daily_counts_never_compare_across_missing_or_invalid_quotes(self):
+        dates = [f"2020-01-{day:02d}" for day in range(2, 11)]
+        metrics = market_capture_metrics(dates, [.01] * 9, [None, 100, 110, None, 150, 150, 0, 200, 210])
+        self.assertEqual(metrics["common_observation_days"], 3)
+        self.assertEqual(metrics["strategy_up_days"], 3)
+        self.assertEqual(metrics["benchmark_up_days"], 2)
+        for invalid in (None, 0, -100, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid):
+                metrics = market_capture_metrics(dates[:3], [.01] * 3, [100, invalid, 110])
+                self.assertTrue(all(metrics[field] == 0 for field in DAILY_FIELDS))
+
+    def test_daily_counts_require_strategy_return_and_use_positive_threshold(self):
+        metrics = market_capture_metrics(
+            [f"2020-01-{day:02d}" for day in range(2, 8)],
+            [.5, None, float("nan"), 1e-12, -1e-12, 2e-12],
+            [100, 100, 100, 100 * (1 + 5e-13), 100, 100 * (1 + 2e-12)],
+        )
+        self.assertEqual(metrics["common_observation_days"], 3)
+        self.assertEqual(metrics["strategy_up_days"], 1)
+        self.assertEqual(metrics["benchmark_up_days"], 1)
+
     def test_negative_upside_capture_shows_portfolio_loss_in_rising_market(self):
         metrics = market_capture_metrics(["2020-01-31", "2020-02-28"], [0, -.02], [100, 110])
         self.assertEqual(metrics["up_market_months"], 1)
@@ -168,9 +199,27 @@ class HistoricalMarketCaptureApiTests(unittest.TestCase):
         summary = http_json(f"{self.url}/api/backtest/{run_id}")["summary"]
         self.assertEqual(summary["up_market_months"], 0)
         self.assertTrue(all(summary[field] is None for field in MONTHLY_FIELDS))
+        self.assertTrue(all(summary[field] == 0 for field in DAILY_FIELDS))
+
+    def test_monthly_only_history_backfills_daily_counts_using_cash_flow_adjusted_returns(self):
+        run_id, original_json, _ = self.save_run([
+            {"trade_date": "2020-01-02", "daily_return": .5, "payload_json": '{"benchmark_value":100}'},
+            # Assets fell because of consumption, while investment return was positive.
+            {"trade_date": "2020-01-03", "total_asset_cny": 910, "flow_cny": -100,
+             "daily_return": .01, "payload_json": '{"benchmark_value":110}'},
+            {"trade_date": "2020-01-06", "daily_return": -.02, "payload_json": '{"benchmark_value":null}'},
+            {"trade_date": "2020-01-07", "daily_return": .2, "payload_json": '{"benchmark_value":120}'},
+            {"trade_date": "2020-01-08", "daily_return": 0, "payload_json": '{"benchmark_value":114}'},
+            {"trade_date": "2020-01-09", "daily_return": .02, "payload_json": '{"benchmark_value":114}'},
+        ], {field: None for field in MONTHLY_FIELDS})
+        summary = http_json(f"{self.url}/api/backtest/{run_id}")["summary"]
+        self.assertEqual(summary["common_observation_days"], 3)
+        self.assertEqual(summary["strategy_up_days"], 2)
+        self.assertEqual(summary["benchmark_up_days"], 1)
+        self.assert_saved_unchanged(run_id, original_json)
 
     def test_already_present_metrics_do_not_recalculate_even_if_null(self):
-        summary = {field: None for field in MONTHLY_FIELDS}
+        summary = {**{field: None for field in MONTHLY_FIELDS}, **{field: 0 for field in DAILY_FIELDS}}
         original = deepcopy(summary)
         with db_session(self.db_path) as conn, patch("app.main.market_capture_metrics", side_effect=AssertionError("unexpected calculation")):
             result = backfill_market_capture_metrics(conn, "not-needed", summary)
@@ -179,6 +228,8 @@ class HistoricalMarketCaptureApiTests(unittest.TestCase):
 
 
 class CachedMarketCaptureApiTests(unittest.TestCase):
+    missing_fields = MONTHLY_FIELDS
+
     @classmethod
     def setUpClass(cls):
         cls.db_path, cls.config = build_synced_db("2020-01-02", "2020-03-31")
@@ -189,10 +240,10 @@ class CachedMarketCaptureApiTests(unittest.TestCase):
         cls.url = f"http://{host}:{port}"
         fresh = http_json(f"{cls.url}/api/backtest/run", {"config": cls.config})
         cls.run_id = fresh["run_id"]
-        cls.expected = {key: fresh["summary"][key] for key in (*MONTHLY_FIELDS, "upside_capture_ratio", "downside_capture_ratio", "up_market_months", "down_market_months")}
+        cls.expected = {key: fresh["summary"][key] for key in (*MONTHLY_FIELDS, *DAILY_FIELDS, "upside_capture_ratio", "downside_capture_ratio", "up_market_months", "down_market_months")}
         with db_session(cls.db_path) as conn:
             legacy_summary = json.loads(conn.execute("SELECT summary_json FROM backtest_runs WHERE run_id=?", (cls.run_id,)).fetchone()[0])
-            for field in MONTHLY_FIELDS:
+            for field in cls.missing_fields:
                 legacy_summary.pop(field)
             # This is an existing version-52 cache, not an engine migration.
             legacy_summary["engine_version"] = BACKTEST_ENGINE_VERSION
@@ -229,3 +280,9 @@ class CachedMarketCaptureApiTests(unittest.TestCase):
                 time.sleep(.01)
             self.assertEqual(state["status"], "completed", state)
         self.assert_response_and_snapshot(state["result"])
+
+
+class CachedDailyMarketCaptureApiTests(CachedMarketCaptureApiTests):
+    """The prior release already stored monthly metrics, but no daily counts."""
+
+    missing_fields = DAILY_FIELDS

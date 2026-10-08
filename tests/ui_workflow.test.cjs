@@ -41,6 +41,50 @@ test("sampled chart points never replace authoritative unavailable capture value
   assert.equal(result.downside_capture_ratio, undefined);
 });
 
+test("rebalance records prioritize annual profit and drawdown without inventing missing annual data", () => {
+  const h = harness(); h.assign("config", fixtureConfig());
+  const rows = [
+    {rebalance_date:"2024-01-02", fee_cny:3, payload:{event_type:"scheduled", rebalanced:true, decision_date:"2023-12-29", year_label:2023, year_profit_cny:1234567, year_profit_on_year_start:1.2, year_profit_on_original_capital:0, period_max_drawdown:-.43, executed_trade_count:2}},
+    {rebalance_date:"2024-02-01", payload:{rebalanced:true, year_profit_cny:-100, year_max_drawdown:0}},
+    {rebalance_date:"2024-03-01", payload:{rebalance_reason:"within_band"}},
+  ];
+  h.context.__rows = rows;
+  const output = h.evaluate("rebalanceDisplayRows(__rows)");
+  assert.deepEqual(Array.from(output.columns).slice(0,3), ["执行日", "当年盈亏", "当年最大回撤"]);
+  assert.equal(output.rows.length, 2);
+  h.context.__record = output.rows[0];
+  assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /123.46万/);
+  assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /2023年 · 截至12-29/);
+  assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /\+￥1,234,567/);
+  assert.match(h.evaluate('formatCell(__record["当年最大回撤"])'), /—/);
+  assert.doesNotMatch(h.evaluate('formatCell(__record["当年最大回撤"])'), /43.00|0.00/);
+  assert.match(h.evaluate('formatCell(__record["当年收益（按上年度总资产）"])'), /120.00%/);
+  assert.match(h.evaluate('formatCell(__record["当年收益（按原始资金）"])'), /0.00%/);
+  assert.equal(h.evaluate('formatCell(__record["成交笔数"])'), "2");
+  assert.equal(h.evaluate('formatCell(__record["当年手续费"])'), "—");
+  h.context.__record = output.rows[1];
+  assert.match(h.evaluate('formatCell(__record["当年最大回撤"])'), /0.00%/);
+  assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /−￥100/);
+});
+
+test("research profitability shows positive negative and flat counts while no cycles stays unavailable", () => {
+  const h = harness();
+  const markup = h.evaluate('rebalancePositiveMarkup(rebalancePositiveValue({rebalance_positive_ratio:.5,rebalance_evaluated_count:4,rebalance_positive_count:2,rebalance_negative_count:1,rebalance_flat_count:1}))');
+  assert.match(markup, /50.00%/); assert.match(markup, /盈利 2 · 亏损 1 · 持平 1/); assert.match(markup, /共 4 个周期/);
+  assert.match(h.evaluate('rebalancePositiveMarkup(rebalancePositiveValue({rebalance_positive_ratio:0,rebalance_evaluated_count:0}))'), /无已完成调仓周期/);
+  assert.match(h.evaluate('rebalancePositiveMarkup(rebalancePositiveValue({}))'), /尚未记录/);
+  assert.equal(h.evaluate('tableSortValue(rebalancePositiveValue({rebalance_positive_ratio:.5,rebalance_evaluated_count:4}))'), .5);
+});
+
+test("up-day comparison uses the shared denominator and distinguishes zero from missing", () => {
+  const h = harness();
+  const markup = h.evaluate('captureUpDaysMarkup({common_observation_days:8,strategy_up_days:5,benchmark_up_days:3})');
+  assert.match(markup, /共同统计 8 个交易日/); assert.match(markup, /5 天/); assert.match(markup, /62.50%/); assert.match(markup, /策略多 2 天上涨/);
+  assert.match(h.evaluate('captureUpDaysMarkup({common_observation_days:8,strategy_up_days:0,benchmark_up_days:0})'), /0 天/);
+  assert.match(h.evaluate('captureUpDaysMarkup({})'), /暂无共同交易日数据/);
+  assert.match(h.evaluate('captureUpDaysMarkup({common_observation_days:0,strategy_up_days:0,benchmark_up_days:0})'), /暂无共同交易日数据/);
+});
+
 function deferred() {
   let resolve;
   let reject;

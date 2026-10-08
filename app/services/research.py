@@ -20,6 +20,8 @@ RESULT_METRICS = (
     "rebalance_check_count", "final_asset_cny", "total_spend_cny", "total_planned_spend_cny",
     "total_spend_shortfall_cny", "first_spend_shortfall_date", "spend_shortfall_count",
     "initial_capital_cny", "net_profit_cny", "total_return", "annualized_return_basis",
+    "rebalance_positive_ratio", "rebalance_positive_count", "rebalance_negative_count",
+    "rebalance_flat_count", "rebalance_evaluated_count", "rebalance_cycle_return_basis",
 )
 
 
@@ -165,5 +167,6 @@ def run_research(conn, base_config: dict[str, Any], payload: dict[str, Any], sho
             "start_dates": "起始年替换基准开始日期的年份；2月29日在非闰年取2月28日，实际日期取可用交易日。",
             "returns": "收益率剔除消费现金流；同时报告实际提取与消费缺口。不同起始年回测时长不同。",
             "annual_only_rules": "逢跌补仓和年度调仓月份仅在年度频率生效。",
+            "rebalance_positive_ratio": "调仓间盈利占比=盈利周期数/已完成周期数，持平也计入分母。首次建仓完成只作起点，每次实际成交的周期调仓完成作终点；带内或未成交检查、现金标的启用不重置起点，末尾未再调仓的区间不统计。按成交后组合净值比较，剔除消费现金流，包含期间费用及终点调仓费用；初次建仓费用已在起点净值中，不是调仓动作本身的盈利率。",
         },
     }

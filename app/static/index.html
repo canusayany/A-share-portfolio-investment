@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a55'/%3E%3Cpath d='M7 23l6-8 5 3 7-10' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="static/styles.css?v=20261008-clarity-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20261008-performance-1" />
   </head>
   <body class="history-collapsed">
     <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
@@ -475,6 +475,7 @@
             <p class="field-help">固定已保存方案逐场景真实计算，不使用待应用草稿；每项最多 24 个场景，结果不会加入回测历史。</p>
             <section class="research-tool" aria-labelledby="rebalanceResearchTitle">
               <h3 id="rebalanceResearchTitle">调仓频率 × 容忍带</h3>
+              <p class="field-help">盈利调仓占比 = 盈利周期数 ÷ 已完成调仓周期数。按两次实际调仓之间的组合收益判断；首次建仓作为起点，持平计入分母，未结束的尾段不计。</p>
               <fieldset id="rebalanceResearchFrequencies"><legend>检查频率（可多选）</legend>
                 <label><input type="checkbox" value="daily" />每日</label><label><input type="checkbox" value="weekly" />每周</label><label><input type="checkbox" value="monthly" checked />每月</label><label><input type="checkbox" value="quarterly" checked />每季度</label><label><input type="checkbox" value="semiannual" />每半年</label><label><input type="checkbox" value="yearly" checked />每年</label>
               </fieldset>
@@ -522,6 +523,7 @@
             <div class="table-scroll"><table id="monthsTable"></table></div>
           </div>
           <div id="rebalancePanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRebalance">
+            <div class="table-context rebalance-table-context"><span>先看当年盈亏与回撤，点击执行日查看调仓详情。</span><small>年度指标截至决策日；盈亏已剔除消费等外部收支。手机大额以万／亿简写，其余字段可横向滑动。</small></div>
             <div class="table-scroll"><table id="rebalanceTable"></table></div>
           </div>
           <div id="tradesPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabTrades" hidden>
@@ -604,6 +606,6 @@
         </div>
       </form>
     </dialog>
-  <script src="static/app.js?v=20261008-clarity-1"></script>
+  <script src="static/app.js?v=20261008-performance-1"></script>
   </body>
 </html>

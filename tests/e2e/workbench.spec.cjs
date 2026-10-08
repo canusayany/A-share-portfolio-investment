@@ -274,7 +274,17 @@ test('frequency-by-band research uses saved config and reports real trading diff
   expect(job.rows).toHaveLength(6);
   expect(job.rows.every(row => row.status === 'success')).toBe(true);
   expect(new Set(job.rows.map(row => row.rebalance_trade_count)).size).toBeGreaterThan(1);
+  for (const row of job.rows) {
+    expect(row.rebalance_evaluated_count).toBe(row.rebalance_positive_count + row.rebalance_negative_count + row.rebalance_flat_count);
+    expect(row.rebalance_evaluated_count).toBeLessThanOrEqual(row.rebalance_trade_count);
+    if (row.rebalance_evaluated_count) expect(row.rebalance_positive_ratio).toBeCloseTo(row.rebalance_positive_count / row.rebalance_evaluated_count, 12);
+    else expect(row.rebalance_positive_ratio).toBeNull();
+  }
   await expect(page.locator('#rebalanceResearchTable tbody tr')).toHaveCount(6);
+  await expect(page.locator('#rebalanceResearchTable thead')).toContainText('盈利调仓占比');
+  await expect(page.locator('#rebalanceResearchTable .research-win-rate').first()).toContainText('盈利');
+  await expect(page.locator('#rebalanceResearchMethodology')).toContainText('持平也计入分母');
+  if (testInfo.project.name !== 'desktop') await expect(page.locator('#rebalanceResearchCards .research-card-win').first()).toBeVisible();
   await page.locator(testInfo.project.name === 'desktop' ? '#rebalanceResearchTable' : '#rebalanceResearchCards').scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('rebalance-research.png') });
 });

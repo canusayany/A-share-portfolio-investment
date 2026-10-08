@@ -1503,11 +1503,25 @@ def market_capture_metrics(
     daily_returns: list[float],
     benchmark_values: list[float | None],
 ) -> dict[str, Any]:
-    """Return capture ratios and geometric monthly returns for each market group."""
+    """Return monthly capture metrics and up-day counts on common daily samples."""
     monthly_endpoints: dict[str, tuple[float, float]] = {}
     strategy_nav = 1.0
     last_benchmark: float | None = None
+    previous_daily_benchmark: float | None = None
+    common_observation_days = strategy_up_days = benchmark_up_days = 0
     for trade_date, daily_return, benchmark_value in zip(dates, daily_returns, benchmark_values):
+        daily_benchmark = float(benchmark_value) if benchmark_value is not None else None
+        if daily_benchmark is not None and (not math.isfinite(daily_benchmark) or daily_benchmark <= 0):
+            daily_benchmark = None
+        strategy_daily_return = float(daily_return) if daily_return is not None else None
+        if (previous_daily_benchmark is not None and daily_benchmark is not None
+                and strategy_daily_return is not None and math.isfinite(strategy_daily_return)):
+            common_observation_days += 1
+            strategy_up_days += int(strategy_daily_return > 1e-12)
+            benchmark_up_days += int(daily_benchmark / previous_daily_benchmark - 1.0 > 1e-12)
+        # Daily comparisons must not carry a price across a missing quote.
+        # Monthly capture retains its existing carry-forward convention below.
+        previous_daily_benchmark = daily_benchmark
         strategy_nav *= 1.0 + float(daily_return or 0.0)
         if benchmark_value is not None and float(benchmark_value) > 0:
             last_benchmark = float(benchmark_value)
@@ -1559,6 +1573,9 @@ def market_capture_metrics(
         "up_market_benchmark_monthly_return": geometric_monthly_return(benchmark_up),
         "down_market_strategy_monthly_return": geometric_monthly_return(strategy_down),
         "down_market_benchmark_monthly_return": geometric_monthly_return(benchmark_down),
+        "common_observation_days": common_observation_days,
+        "strategy_up_days": strategy_up_days,
+        "benchmark_up_days": benchmark_up_days,
     }
 
 
@@ -2895,6 +2912,46 @@ def _simulate_comparison_series(
     return totals
 
 
+def rebalance_cycle_metrics(event_payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Score completed holding cycles, not the profit of a rebalance action.
+
+    Initial allocation supplies the first post-trade NAV baseline. Only an
+    executed scheduled rebalance ends a cycle. Other checks and treasury
+    activation neither create observations nor reset the baseline.
+    """
+    previous_nav: float | None = None
+    positive = negative = flat = 0
+    for payload in event_payloads:
+        if not payload.get("rebalanced"):
+            continue
+        event_type = payload.get("event_type")
+        if event_type not in {"initial_allocation", "scheduled"}:
+            continue
+        value = payload.get("execution_nav_after")
+        if value is None or not math.isfinite(float(value)) or float(value) < 0:
+            continue
+        current_nav = float(value)
+        if event_type == "scheduled" and previous_nav is not None and previous_nav > 0:
+            cycle_return = current_nav / previous_nav - 1.0
+            # Treat floating-point noise as flat, not as a profitable cycle.
+            if cycle_return > 1e-10:
+                positive += 1
+            elif cycle_return < -1e-10:
+                negative += 1
+            else:
+                flat += 1
+        previous_nav = current_nav
+    evaluated = positive + negative + flat
+    return {
+        "rebalance_positive_ratio": positive / evaluated if evaluated else None,
+        "rebalance_positive_count": positive,
+        "rebalance_negative_count": negative,
+        "rebalance_flat_count": flat,
+        "rebalance_evaluated_count": evaluated,
+        "rebalance_cycle_return_basis": "post_execution_cash_flow_adjusted_nav_including_endpoint_fees_initial_allocation_baseline",
+    }
+
+
 def run_backtest(
     conn,
     user_config: dict[str, Any] | None = None,
@@ -3290,10 +3347,21 @@ def run_backtest(
                 after_values = before_open_values
                 rebalance_action = "record_only"
                 rebalance_reason = "within_band"
+            previous_close_total = daily_total_assets[-1] if daily_total_assets else initial_capital_cny
+            # nav_for_period is the continuous NAV at the preceding close.
+            # Mark this event after its actual opening trades, including their
+            # fees, without advancing the daily NAV twice. Monthly withdrawal
+            # happens later today; flow is retained here to make that boundary
+            # explicit and consistent with the engine's daily-return formula.
+            execution_nav_after = (
+                nav_for_period * (after_rebalance - flow) / previous_close_total
+                if previous_close_total > 0 else None
+            )
             payload = {
                 **pending_rebalance["payload"],
                 "targets": pending_rebalance["targets"],
                 "event_type": "scheduled",
+                "execution_nav_after": execution_nav_after,
                 "current_weights": open_weights,
                 "before_weights": open_weights,
                 "after_weights": {key: value / after_rebalance if after_rebalance else 0.0 for key, value in after_values.items()},
@@ -3645,6 +3713,10 @@ def run_backtest(
                         {
                             "asset_performance_version": 3,
                             "event_type": "initial_allocation" if starts_dip_buy_cycle else "treasury_activation",
+                            "execution_nav_after": (
+                                nav_for_period * (after_rebalance - flow) / previous_total
+                                if previous_total > 0 else None
+                            ),
                             "current_weights": current_weights,
                             "before_weights": current_weights,
                             "after_weights": {key: value / after_rebalance if after_rebalance else 0.0 for key, value in after_values.items()},
@@ -4361,6 +4433,7 @@ def run_backtest(
         # between checking a threshold, actual execution and first allocation.
         "rebalance_check_count": len(scheduled_checks),
         "rebalance_trade_count": scheduled_trade_count,
+        **rebalance_cycle_metrics(rebalance_payloads),
         "rebalance_no_trade_count": len(scheduled_checks) - scheduled_trade_count,
         "rebalance_within_band_count": sum(payload["rebalance_reason"] == "within_band" for payload in scheduled_checks),
         "rebalance_constrained_count": sum(payload["rebalance_reason"] == "trade_constraints" for payload in scheduled_checks),

@@ -397,11 +397,12 @@ def archive_config_payload(config: dict) -> dict:
 
 def backfill_market_capture_metrics(conn, run_id: str, summary: dict) -> dict:
     """Enrich old responses from every daily observation without changing the run."""
-    monthly_fields = (
+    required_fields = (
         "up_market_strategy_monthly_return", "up_market_benchmark_monthly_return",
         "down_market_strategy_monthly_return", "down_market_benchmark_monthly_return",
+        "common_observation_days", "strategy_up_days", "benchmark_up_days",
     )
-    if all(field in summary for field in monthly_fields):
+    if all(field in summary for field in required_fields):
         return dict(summary)
     rows = conn.execute(
         "SELECT trade_date,daily_return,benchmark_return,payload_json FROM portfolio_daily WHERE run_id=? ORDER BY trade_date",

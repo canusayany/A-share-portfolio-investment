@@ -12,6 +12,9 @@ test('market regimes show actual signed monthly returns and records omit data st
   const run = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../output/playwright/fixture.json'), 'utf8')).runs[0];
   const detailUrl = `/api/backtest/${run.run_id}`;
   const saved = await (await page.request.get(detailUrl)).json();
+  expect(saved.summary.common_observation_days).toBeGreaterThan(0);
+  expect(saved.summary.strategy_up_days).toBeGreaterThanOrEqual(0);
+  expect(saved.summary.benchmark_up_days).toBeGreaterThanOrEqual(0);
   for (const side of ['up', 'down']) {
     expect(saved.summary[`${side}_market_strategy_monthly_return`]).toEqual(expect.any(Number));
     expect(saved.summary[`${side}_market_benchmark_monthly_return`]).toEqual(expect.any(Number));
@@ -23,6 +26,7 @@ test('market regimes show actual signed monthly returns and records omit data st
       up_market_months: 5, up_market_strategy_monthly_return: -0.0123, up_market_benchmark_monthly_return: 0.042,
       upside_capture_ratio: -0.2949, down_market_months: 3, down_market_strategy_monthly_return: -0.000002,
       down_market_benchmark_monthly_return: -0.04, downside_capture_ratio: 0.0005,
+      common_observation_days: 8, strategy_up_days: 5, benchmark_up_days: 3,
     } } });
   });
   await page.locator(testInfo.project.name === 'desktop' ? '#historyToggle' : '#mobileHistoryToggle').click();
@@ -31,6 +35,12 @@ test('market regimes show actual signed monthly returns and records omit data st
   await page.locator('#riskDetails > summary').click();
   const card = page.locator('.capture-card');
   await expect(card).toBeVisible();
+  await expect(card.locator('.capture-up-days')).toContainText('共同统计 8 个交易日');
+  await expect(card.locator('.is-strategy')).toContainText('5 天');
+  await expect(card.locator('.is-strategy')).toContainText('62.50%');
+  await expect(card.locator('.is-benchmark')).toContainText('3 天');
+  await expect(card.locator('.is-benchmark')).toContainText('37.50%');
+  await expect(card.locator('.capture-up-days')).toContainText('策略多 2 天上涨');
   await card.scrollIntoViewIfNeeded();
   await expect(card).toContainText('大盘涨，组合反而下跌');
   await expect(card).toContainText('−1.23%');
@@ -41,6 +51,7 @@ test('market regimes show actual signed monthly returns and records omit data st
   await expect(card.locator('details')).not.toHaveAttribute('open', '');
   const captureBounds = await card.boundingBox();
   await page.screenshot({ path: testInfo.outputPath('market-regimes.png'), fullPage: false });
+  await card.screenshot({ path: testInfo.outputPath('up-days-and-monthly-returns.png') });
   expect(captureBounds.width).toBeLessThanOrEqual(page.viewportSize().width);
   await card.locator('summary').click();
   await expect(card.locator('details')).toContainText('-29.49%');

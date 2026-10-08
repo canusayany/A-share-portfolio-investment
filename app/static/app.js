@@ -1559,6 +1559,17 @@ function captureScenarioMarkup(side, summary) {
   </section>`;
 }
 
+function captureUpDaysMarkup(summary) {
+  const total = summary.common_observation_days;
+  const strategy = summary.strategy_up_days;
+  const benchmark = summary.benchmark_up_days;
+  const available = Number.isInteger(total) && total > 0 && [strategy, benchmark].every((count) => Number.isInteger(count) && count >= 0 && count <= total);
+  const row = (label, count, className) => `<div class="capture-up-days-row ${className}"><span>${label}</span><strong>${available ? `${count} 天` : "—"}</strong><span class="up-days-ratio">${available ? fmtPct(count / total) : "—"}</span><div class="up-days-track" aria-hidden="true"><i style="width:${available ? (count / total * 100).toFixed(2) : 0}%"></i></div></div>`;
+  const difference = available ? strategy - benchmark : 0;
+  const comparison = difference > 0 ? `策略多 ${difference} 天上涨` : difference < 0 ? `策略少 ${Math.abs(difference)} 天上涨` : "两者上涨天数相同";
+  return `<section class="capture-up-days" aria-label="总上涨天数对比"><div class="capture-scenario-heading"><h3>总上涨天数</h3><span>${available ? `共同统计 ${total} 个交易日` : "暂无共同交易日数据"}</span></div>${row("策略", strategy, "is-strategy")}${row("沪深300", benchmark, "is-benchmark")}<p>${available ? `${comparison} · 右侧为上涨天数占比` : "需要至少两个相邻且有有效行情的交易日"}</p></section>`;
+}
+
 function renderRiskInsights(summary = {}) {
   const host = $("riskInsightsContent");
   if (!host) return;
@@ -1569,7 +1580,8 @@ function renderRiskInsights(summary = {}) {
       ${recoveryMarkup(summary)}
     </div>
     <article class="capture-card">
-      <div class="capture-card-heading"><div><span>大盘涨跌时，组合表现如何？</span><small>按沪深300涨跌月份分组，比较月均收益（几何平均）</small></div></div>
+      <div class="capture-card-heading"><div><span>大盘涨跌时，组合表现如何？</span><small>比较上涨天数，再看大盘涨跌月份中的月均收益（几何平均）</small></div></div>
+      ${captureUpDaysMarkup(summary)}
       <div class="capture-grid">
         ${captureScenarioMarkup("up", summary)}
         ${captureScenarioMarkup("down", summary)}
@@ -1580,6 +1592,7 @@ function renderRiskInsights(summary = {}) {
         <p>捕获率 = 同组组合年化收益 ÷ 同组沪深300年化收益。100% 表示两者同组年化收益相同；不是组合赚了 100%。</p>
         <p>上涨捕获率为负，表示大盘上涨的这些区间内组合总体亏损；下跌捕获率为负，表示大盘下跌时组合总体盈利。下跌捕获率接近 0，表示组合在这些区间内接近持平。</p>
         <p>按月末分段，首月只作为起点；末月截至回测结束日，可能不足整月。沪深300持平的区间不计入两组。</p>
+        <p>上涨天数按相邻有效交易日统计，首日及行情缺失的区间不计，两者使用相同样本。策略日收益剔除外部入金和消费，包含费用影响；天数占比不等于收益率。</p>
       </details>
     </article>`;
 }
@@ -2948,6 +2961,7 @@ function renderTable(id, columns, rows, options = {}) {
 }
 
 function formatCell(value) {
+  if (value && typeof value === "object" && value.kind === "rebalance-positive") return rebalancePositiveMarkup(value);
   if (value && typeof value === "object" && value.kind === "event-date") return `<button type="button" class="event-date-button" data-rebalance-date="${escapeHtml(value.raw)}" aria-label="查看 ${escapeHtml(value.raw)} 调仓详情并定位图表">${escapeHtml(value.raw)}</button>`;
   if (value && typeof value === "object" && value.kind === "money") return value.raw == null ? "—" : escapeHtml(`￥${fmtMoney(value.raw)}`);
   if (value && typeof value === "object" && value.kind === "number") {
@@ -2969,8 +2983,13 @@ function formatCell(value) {
     }
     const profit = Number(value.profit);
     const tone = profit > 1e-9 ? "positive" : profit < -1e-9 ? "negative" : "flat";
-    const title = `年初资产 ￥${fmtMoney(value.yearStartTotal)}；期间外部净流入 ￥${fmtMoney(value.externalFlow)}`;
-    return `<span class="table-year-profit is-${tone}" title="${escapeHtml(title)}"><strong>${profit >= 0 ? "+" : "−"}￥${fmtMoney(Math.abs(profit))}</strong></span>`;
+    const sign = profit > 0 ? "+" : profit < 0 ? "−" : "";
+    const amount = Math.abs(profit);
+    const full = `${sign}￥${fmtMoney(amount)}`;
+    const compact = amount >= 1e8 ? `${sign}￥${(amount / 1e8).toFixed(2)}亿` : amount >= 1e4 ? `${sign}￥${(amount / 1e4).toFixed(2)}万` : full;
+    const period = value.yearLabel ? `${value.yearLabel}年${value.asOfDate ? ` · 截至${String(value.asOfDate).slice(5)}` : ""}` : "";
+    const title = `${full}${value.asOfDate ? `；截至 ${value.asOfDate}` : ""}${value.yearStartTotal == null ? "" : `；年初资产 ￥${fmtMoney(value.yearStartTotal)}`}${value.externalFlow == null ? "" : `；期间外部净流入 ￥${fmtMoney(value.externalFlow)}`}`;
+    return `<span class="table-year-profit is-${tone}" title="${escapeHtml(title)}"><strong><span class="visually-hidden">${escapeHtml(full)}</span><span class="profit-full" aria-hidden="true">${escapeHtml(full)}</span><span class="profit-compact" aria-hidden="true">${escapeHtml(compact)}</span></strong>${period ? `<small class="rebalance-year-context">${escapeHtml(period)}</small>` : ""}</span>`;
   }
   if (typeof value === "number") {
     const formatted = Math.abs(value) < 1 && value !== 0 ? fmtPct(value) : fmtNum(value, 2);
@@ -3030,28 +3049,31 @@ function rebalanceDisplayRows(rows) {
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["执行日", "检查结果", "成交笔数", "成交金额", "决策日", "收益年度", "当年总资产", "当年收益（按上年度总资产）", "当年收益（按原始资金）", "当年盈亏", "当年最大回撤", "当年手续费"];
+  const baseColumns = ["执行日", "当年盈亏", "当年最大回撤", "检查结果", "当年收益（按上年度总资产）", "当年总资产", "成交金额", "成交笔数", "当年手续费", "收益年度", "决策日", "当年收益（按原始资金）"];
   const assetColumns = orderedSymbols.map(rebalanceAssetColumnName);
   const displayRows = visibleRows.map((row) => {
     const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
     const item = {
       执行日: { kind: "event-date", raw: row.rebalance_date },
       检查结果: rebalanceActionLabel(row.payload),
-      成交笔数: row.payload?.executed_trade_count ?? "—",
+      成交笔数: row.payload?.executed_trade_count == null ? "—" : { kind: "number", raw: row.payload.executed_trade_count, decimals: 0 },
       成交金额: row.turnover_cny == null ? "—" : `￥${fmtMoney(row.turnover_cny)}`,
       决策日: row.payload?.decision_date || row.rebalance_date,
       收益年度: row.payload?.year_label ? `${row.payload.year_label}年` : `${String(row.payload?.decision_date || row.rebalance_date).slice(0, 4)}年`,
       当年总资产: annualTotal == null ? "—" : `￥${fmtMoney(annualTotal)}`,
-      "当年收益（按上年度总资产）": row.payload?.year_profit_on_year_start ?? "—",
-      "当年收益（按原始资金）": row.payload?.year_profit_on_original_capital ?? "—",
+      "当年收益（按上年度总资产）": { kind: "metric", raw: row.payload?.year_profit_on_year_start, format: "percent", tone: annualReturnTone(row.payload?.year_profit_on_year_start) },
+      "当年收益（按原始资金）": { kind: "metric", raw: row.payload?.year_profit_on_original_capital, format: "percent", tone: annualReturnTone(row.payload?.year_profit_on_original_capital) },
       当年盈亏: {
         kind: "year-profit",
         profit: row.payload?.year_profit_cny,
+        raw: row.payload?.year_profit_cny,
+        yearLabel: row.payload?.year_label || String(row.payload?.decision_date || row.rebalance_date).slice(0, 4),
+        asOfDate: row.payload?.decision_date || row.rebalance_date,
         yearStartTotal: row.payload?.year_start_total_cny,
         externalFlow: row.payload?.year_external_flow_cny,
       },
-      当年最大回撤: row.payload?.year_max_drawdown ?? row.payload?.period_max_drawdown ?? 0,
-      当年手续费: row.payload?.year_fee_cny ?? row.fee_cny,
+      当年最大回撤: { kind: "metric", raw: row.payload?.year_max_drawdown, format: "percent", tone: drawdownTone(row.payload?.year_max_drawdown) },
+      当年手续费: { kind: "money", raw: row.payload?.year_fee_cny },
     };
     for (const symbol of orderedSymbols) {
       const periodPerf = row.payload?.asset_performance?.[symbol];
@@ -4333,6 +4355,18 @@ function updateResearchCounts() {
   }
 }
 
+function rebalancePositiveValue(row) {
+  return { kind: "rebalance-positive", raw: row.rebalance_evaluated_count > 0 ? row.rebalance_positive_ratio : null,
+    count: row.rebalance_evaluated_count, positive: row.rebalance_positive_count, negative: row.rebalance_negative_count, flat: row.rebalance_flat_count };
+}
+
+function rebalancePositiveMarkup(value) {
+  if (value.count == null) return '<span class="research-win-rate is-muted">—<small>尚未记录</small></span>';
+  if (!value.count) return '<span class="research-win-rate is-muted">—<small>无已完成调仓周期</small></span>';
+  if (value.raw == null || !Number.isFinite(Number(value.raw))) return '<span class="research-win-rate is-muted">—<small>明细不可用</small></span>';
+  return `<span class="research-win-rate"><strong>${fmtPct(value.raw)}</strong><small>盈利 ${Number(value.positive)} · 亏损 ${Number(value.negative)} · 持平 ${Number(value.flat)}<br>共 ${Number(value.count)} 个周期</small></span>`;
+}
+
 function renderResearch() {
   const baseline = $("researchBaseline");
   if (!baseline) return;
@@ -4357,10 +4391,11 @@ function renderResearch() {
     const money = (raw) => ({ kind: "money", raw });
     const rows = (task?.rows || []).map((row, index) => ({
       场景: kind === "rebalance_grid" ? `${REBALANCE_FREQUENCY_NAMES[row.inputs?.rebalance_frequency] || "—"} · ${fmtPct(row.inputs?.rebalance_band)}` : `${fmtMoney(row.inputs?.monthly_spend_cny)}元/月 · ${fmtPct(row.inputs?.monthly_spend_annual_growth)}年增 · ${row.inputs?.start_year}起`, 状态: row.status === "success" ? "完成" : "失败", 检查频率: REBALANCE_FREQUENCY_NAMES[row.inputs?.rebalance_frequency] || "—", 容忍带: metric(row.inputs?.rebalance_band), 月消费: money(row.inputs?.monthly_spend_cny), 消费年增幅: metric(row.inputs?.monthly_spend_annual_growth), 开始年份: row.inputs?.start_year == null ? "—" : { kind: "number", raw: row.inputs.start_year, decimals: 0 },
+      盈利调仓占比: rebalancePositiveValue(row),
       实际区间: row.start_date && row.end_date ? `${row.start_date} 至 ${row.end_date}` : "—", 年化收益: metric(row.annualized_return), 最大回撤: metric(row.max_drawdown), 总费用: money(row.total_fees_cny), 实际调仓次数: row.rebalance_trade_count == null ? "—" : { kind: "number", raw: row.rebalance_trade_count, decimals: 0 }, 期末资产: money(row.final_asset_cny), 计划提取: money(row.total_planned_spend_cny), 实际提取: money(row.total_spend_cny), 提取缺口: money(row.total_spend_shortfall_cny), 首次不足: row.first_spend_shortfall_date || (row.status === "success" ? "未发生" : "—"), 不足次数: row.spend_shortfall_count == null ? "—" : { kind: "number", raw: row.spend_shortfall_count, decimals: 0 }, 补仓适用性: row.dip_buy_applicability_note || (row.dip_buy_active ? "启用" : "未启用"), 说明: row.error || "",
     }));
     renderResearchSupplement(kind, task);
-    const columns = kind === "rebalance_grid" ? ["场景", "年化收益", "最大回撤", "总费用", "实际调仓次数", "期末资产", "实际区间", "状态", "补仓适用性", "说明"] : ["场景", "首次不足", "期末资产", "提取缺口", "不足次数", "计划提取", "实际提取", "年化收益", "最大回撤", "总费用", "实际区间", "状态", "说明"];
+    const columns = kind === "rebalance_grid" ? ["场景", "盈利调仓占比", "年化收益", "最大回撤", "总费用", "实际调仓次数", "期末资产", "实际区间", "状态", "补仓适用性", "说明"] : ["场景", "首次不足", "期末资产", "提取缺口", "不足次数", "计划提取", "实际提取", "年化收益", "最大回撤", "总费用", "实际区间", "状态", "说明"];
     if ($(ui.prefix + "Table")) renderTable(ui.prefix + "Table", rows.length ? columns : [], rows, { pageSize: 24, sortableColumns: columns });
   }
   updateResearchCounts();
@@ -4370,7 +4405,7 @@ function renderResearch() {
 function renderResearchSupplement(kind, task) {
   const ui = RESEARCH_UI[kind], method = $(ui.prefix + "Methodology"), cards = $(ui.prefix + "Cards");
   if (method) {
-    const fields = kind === "rebalance_grid" ? ["fixed_conditions", "annual_only_rules"] : ["fixed_conditions", "withdrawal_growth", "start_dates", "returns"];
+    const fields = kind === "rebalance_grid" ? ["fixed_conditions", "rebalance_positive_ratio", "annual_only_rules"] : ["fixed_conditions", "withdrawal_growth", "start_dates", "returns"];
     const notes = typeof task?.methodology === "string" ? [task.methodology] : fields.map((key) => task?.methodology?.[key]).filter(Boolean);
     method.innerHTML = notes.length ? `<details><summary>计算方法与适用范围</summary>${notes.map((note) => `<p>${escapeHtml(note)}</p>`).join("")}</details>` : "";
   }
@@ -4381,7 +4416,7 @@ function renderResearchSupplement(kind, task) {
     const title = kind === "rebalance_grid" ? `${REBALANCE_FREQUENCY_NAMES[input.rebalance_frequency] || "—"} · 容忍带 ${pct(input.rebalance_band)}` : `每月 ${fmtMoney(input.monthly_spend_cny)} 元 · 年增 ${pct(input.monthly_spend_annual_growth)} · ${input.start_year} 起`;
     if (row.status !== "success") return `<article class="research-card"><h4>${escapeHtml(title)}</h4><p class="negative">此场景失败：${escapeHtml(row.error || "未知错误")}</p></article>`;
     const metrics = kind === "rebalance_grid" ? [["年化收益",pct(row.annualized_return)],["最大回撤",pct(row.max_drawdown)],["总费用",money(row.total_fees_cny)],["实际调仓",`${row.rebalance_trade_count ?? "—"} 次`]] : [["首次不足",row.first_spend_shortfall_date || "未发生"],["期末资产",money(row.final_asset_cny)],["提取缺口",money(row.total_spend_shortfall_cny)],["不足次数",`${row.spend_shortfall_count ?? "—"} 次`]];
-    return `<article class="research-card"><h4>${escapeHtml(title)}</h4><div class="research-card-metrics">${metrics.map(([label,value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div><small>${escapeHtml(row.start_date || "—")} 至 ${escapeHtml(row.end_date || "—")}</small></article>`;
+    return `<article class="research-card"><h4>${escapeHtml(title)}</h4>${kind === "rebalance_grid" ? `<div class="research-card-win"><span>盈利调仓占比</span>${rebalancePositiveMarkup(rebalancePositiveValue(row))}</div>` : ""}<div class="research-card-metrics">${metrics.map(([label,value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div><small>${escapeHtml(row.start_date || "—")} 至 ${escapeHtml(row.end_date || "—")}</small></article>`;
   }).join("");
 }
 

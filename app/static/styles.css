@@ -1904,7 +1904,7 @@ body:not(.history-collapsed) .history-backdrop {
 
 .risk-insights-content {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(420px, 1.1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin-top: 13px;
 }
@@ -1992,7 +1992,13 @@ body:not(.history-collapsed) .history-backdrop {
 
 .capture-card {
   padding: 13px 15px;
+  display: grid;
+  grid-template-columns: minmax(230px, .8fr) minmax(0, 1.2fr);
+  gap: 0 14px;
 }
+
+.capture-card-heading, .capture-methodology { grid-column: 1 / -1; }
+@media (max-width: 1100px) { .capture-card { display: block; } }
 
 .capture-card-heading > div {
   display: grid;
@@ -2038,6 +2044,14 @@ body:not(.history-collapsed) .history-backdrop {
 .capture-methodology dl > div { display: flex; gap: 12px; }
 .capture-methodology dt { color: var(--muted); }
 .capture-methodology dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.capture-up-days { margin-top: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+.capture-up-days-row { display: grid; grid-template-columns: 70px 1fr auto; align-items: baseline; gap: 6px 10px; margin-top: 12px; color: var(--ink-soft); font-size: 14px; }
+.capture-up-days-row strong { text-align: right; color: var(--ink); font-size: 18px; font-variant-numeric: tabular-nums; }
+.up-days-ratio { min-width: 58px; text-align: right; color: var(--muted); font-size: 13px; }
+.up-days-track { grid-column: 1 / -1; height: 6px; background: var(--surface-strong); border-radius: 4px; overflow: hidden; }
+.up-days-track i { display: block; height: 100%; background: var(--accent); }
+.is-benchmark .up-days-track i { background: var(--blue); }
+.capture-up-days > p { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
 
 .analysis-panel,
 .records-panel {
@@ -3021,6 +3035,25 @@ th[aria-sort="descending"] .table-sort i {
 .table-year-profit.is-flat,
 .table-year-profit.is-muted {
   color: var(--muted);
+}
+
+.profit-compact { display: none; }
+.rebalance-table-context { display: grid; justify-content: start; gap: 3px; padding: 10px 0; }
+.rebalance-year-context { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 400; }
+#rebalanceTable .table-year-profit { min-width: 0; }
+#rebalanceTable .table-year-profit strong { font-size: 16px; line-height: 1.4; }
+#rebalanceTable th:nth-child(2), #rebalanceTable th:nth-child(3) { color: var(--ink); background: #eef5f2; }
+#rebalanceTable td:nth-child(2), #rebalanceTable td:nth-child(3) { background: #f7fbf9; }
+#rebalanceTable td:nth-child(3) .table-metric { font-size: 15px; }
+#rebalanceTable th:first-child, #rebalanceTable td:first-child { position: sticky; left: 0; background: var(--surface); box-shadow: 1px 0 0 var(--line); z-index: 1; }
+#rebalanceTable th:first-child { z-index: 3; background: var(--surface-subtle); }
+@media (max-width: 600px) {
+  #rebalanceTable th, #rebalanceTable td { padding-left: 6px; padding-right: 6px; }
+  #rebalanceTable .event-date-button { padding: 7px 5px; font-size: 13px; }
+  #rebalanceTable .profit-full { display: none; }
+  #rebalanceTable .profit-compact { display: inline; }
+  #rebalanceTable .rebalance-year-context { max-width: 110px; white-space: normal; font-size: 13px; }
+  #rebalanceTable td:nth-child(3) .table-metric { min-width: 0; padding: 3px 5px; }
 }
 
 tbody tr.is-selected td {
@@ -4066,3 +4099,9 @@ tbody tr:hover td {
   .research-card > small { display: block; margin-top: 10px; font-size: 13px; color: var(--muted); }
   .research-card p { font-size: 14px; overflow-wrap: anywhere; }
 }
+
+.research-win-rate { display: block; font-variant-numeric: tabular-nums; }
+.research-win-rate strong { display: block; color: var(--ink); font-size: 16px; font-weight: 650; }
+.research-win-rate small { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.research-card-win { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 12px; font-size: 14px; }
+.research-card-win .research-win-rate { text-align: right; }
