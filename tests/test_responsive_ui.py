@@ -59,13 +59,49 @@ class ResponsiveUiContractTests(unittest.TestCase):
         self.assertIn("@media (max-height: 600px) and (max-width: 1100px)", STYLES)
 
     def test_responsive_release_cache_busts_both_static_assets(self) -> None:
-        release = "20260927-trading-calendar-1"
+        release = "20261008-workflow-51"
         self.assertEqual(INDEX.count(release), 2)
 
     def test_export_error_toast_is_fixed_and_safe_area_aware(self) -> None:
         self.assertIn('id="toast"', INDEX)
         self.assertRegex(STYLES, re.compile(r"\.toast\s*\{[^}]*position:\s*fixed;", re.DOTALL))
         self.assertIn("env(safe-area-inset-top)", STYLES)
+
+    def test_parameter_steps_keep_related_fields_in_their_panels(self) -> None:
+        expected = {
+            "scope": ("initialCapital", "startDate", "endDate", "monthlySpend"),
+            "allocation": ("assetControls", "repoSymbol", "repoTargetMode"),
+            "rebalance": ("rebalanceFrequency", "rebalanceBand", "dipBuyEnabled"),
+            "advanced": ("rollingWindowYears", "rebalanceMonthAnalysisEnabled", "cnCommission"),
+        }
+        for step, fields in expected.items():
+            self.assertIn(f'data-parameter-tab="{step}"', INDEX)
+            panel = re.search(
+                rf'<section\b[^>]*data-parameter-panel="{step}"[^>]*>(.*?)</section>',
+                INDEX,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(panel, step)
+            for field in fields:
+                self.assertIn(f'id="{field}"', panel.group(1))
+
+    def test_results_distinguish_draft_run_state_and_rebalance_evidence(self) -> None:
+        for field in ("resultState", "resultConfigSummary", "draftNotice", "workspaceMessage", "rebalanceExplanation"):
+            self.assertEqual(INDEX.count(f'id="{field}"'), 1)
+        self.assertLess(INDEX.index('id="summaryGrid"'), INDEX.index('id="rebalanceExplanation"'))
+        self.assertLess(INDEX.index('id="rebalanceExplanation"'), INDEX.index('id="analysisSection"'))
+        self.assertIn('id="resultStatusText" class="visually-hidden"', INDEX)
+        self.assertLess(INDEX.index('id="analysisSection"'), INDEX.index('id="riskDetails"'))
+
+    def test_typography_uses_shared_readable_scale(self) -> None:
+        for token in ("--font-caption: 13px", "--font-body: 14px", "--font-section: 18px", "--font-metric: 28px"):
+            self.assertIn(token, STYLES)
+        explicit_sizes = [float(size) for size in re.findall(r"font-size:\s*(\d+(?:\.\d+)?)px", STYLES)]
+        self.assertTrue(all(size >= 13 for size in explicit_sizes))
+
+    def test_run_and_analysis_recovery_actions_have_visible_hosts(self) -> None:
+        for field in ("runBtn", "mobileRunBtn", "workspaceRunBtn", "analysisMessage", "retryAnalysisBtn"):
+            self.assertEqual(INDEX.count(f'id="{field}"'), 1)
 
 
 if __name__ == "__main__":

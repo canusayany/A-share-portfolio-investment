@@ -31,11 +31,13 @@ from app.identity import (
     valid_leaderboard_key_id,
 )
 from app.services.backtest_engine import (
+    BACKTEST_ENGINE_VERSION,
     asset_comovement_statistics,
     BacktestCancelled,
     BacktestError,
     RANKING_VERSION,
     ranking_metrics,
+    canonical_config_hash,
     get_cached_backtest_run,
     rolling_window_ranges,
     run_backtest,
@@ -320,6 +322,16 @@ def rebalance_display_payload(payload: dict) -> dict:
     return {
         key: payload.get(key)
         for key in (
+            "event_type",
+            "threshold_exceeded",
+            "executed_trade_count",
+            "rebalanced",
+            "rebalance_reason",
+            "rebalance_action",
+            "rebalance_frequency",
+            "rebalance_band",
+            "rebalance_to_target",
+            "current_weights",
             "decision_date",
             "year_label",
             "year_start_date",
@@ -336,6 +348,9 @@ def rebalance_display_payload(payload: dict) -> dict:
             "year_profit_basis",
             "year_asset_performance",
             "asset_performance",
+            "asset_performance_version",
+            "asset_profit_basis",
+            "asset_return_basis",
             "period_max_drawdown",
         )
         if key in payload
@@ -362,10 +377,9 @@ def archive_config_payload(config: dict) -> dict:
 
 
 def archive_summary_payload(summary: dict) -> dict:
-    return {
-        key: summary.get(key)
-        for key in (
+    fields = (
             "start_date",
+            "engine_version",
             "end_date",
             "annualized_return",
             "max_drawdown",
@@ -380,8 +394,13 @@ def archive_summary_payload(summary: dict) -> dict:
             "ranking_eligible",
             "ranking_score",
             "analysis_status",
-        )
-        if key in summary
+            "rebalance_check_count",
+            "rebalance_trade_count",
+            "rebalance_no_trade_count",
+    )
+    return {
+        **{key: summary[key] for key in fields if key in summary},
+        "requires_recalculation": int(summary.get("engine_version") or 0) < BACKTEST_ENGINE_VERSION,
     }
 
 
@@ -465,6 +484,7 @@ def backtest_archive_entries(
                 FROM backtest_runs br
                 {membership_join}
                 WHERE COALESCE(json_extract(br.summary_json, '$.ranking_eligible'), 0) = 1
+                  AND COALESCE(json_extract(br.summary_json, '$.engine_version'), 0) >= {BACKTEST_ENGINE_VERSION}
                 ORDER BY
                   COALESCE(json_extract(br.summary_json, '$.ranking_score'), 0) DESC,
                   COALESCE(json_extract(br.summary_json, '$.excess_annualized_return'), 0) DESC,
@@ -524,6 +544,7 @@ def leaderboard_available_years(conn, leaderboard_key_id: str | None = None) -> 
                COALESCE(json_extract(br.summary_json, '$.end_date'), json_extract(br.config_json, '$.end_date')) AS end_date
         FROM backtest_runs br
         {membership_join}
+        WHERE COALESCE(json_extract(br.summary_json, '$.engine_version'), 0) >= {BACKTEST_ENGINE_VERSION}
         """
         ,
         query_params,
@@ -647,8 +668,10 @@ def time_aware_backtest_leaderboard(
         f"""
         SELECT pd.run_id,pd.trade_date,pd.daily_return
         FROM portfolio_daily pd
+        JOIN backtest_runs br ON br.run_id=pd.run_id
         {membership_join}
         WHERE pd.trade_date BETWEEN ? AND ?
+          AND COALESCE(json_extract(br.summary_json, '$.engine_version'), 0) >= {BACKTEST_ENGINE_VERSION}
         ORDER BY pd.run_id,pd.trade_date
         """,
         query_params,
@@ -908,6 +931,26 @@ def execute_backtest_request(
                 if cached:
                     add_leaderboard_membership(conn, leaderboard_key_id, cached["run_id"])
                     cached_status = cached["summary"].get("analysis_status", "completed")
+                    if (
+                        not defer_extended_analysis
+                        and extended_analysis_required(config)
+                        and cached_status not in {"completed", "not_required"}
+                    ):
+                        # A synchronous caller must not receive the partial
+                        # result left by an earlier asynchronous request.
+                        analysis = run_backtest(
+                            conn,
+                            config,
+                            persist=False,
+                            should_cancel=should_cancel,
+                            include_comparison=False,
+                            include_month_analysis=True,
+                            include_rolling_analysis=True,
+                        )["summary"]
+                        cached["summary"]["rolling_periods"] = analysis.get("rolling_periods", [])
+                        cached["summary"]["rebalance_month_scenarios"] = analysis.get("rebalance_month_scenarios", [])
+                        set_persisted_analysis_status(conn, cached, "completed")
+                        cached_status = "completed"
                     cached["analysis_pending"] = bool(
                         defer_extended_analysis
                         and extended_analysis_required(config)
@@ -1153,6 +1196,10 @@ def schedule_deferred_backtest_analysis(server, run_id: str, config: dict) -> No
         existing = server.analysis_futures.get(run_id)  # type: ignore[attr-defined]
         if existing and not existing.done():
             return
+        with db_session(server.settings.db_path) as conn:  # type: ignore[attr-defined]
+            row = conn.execute("SELECT summary_json FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not row or json_loads(row["summary_json"], {}).get("analysis_status") in {"completed", "not_required"}:
+                return
         future = server.analysis_executor.submit(  # type: ignore[attr-defined]
             run_deferred_backtest_analysis,
             server,
@@ -1277,8 +1324,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length == 0:
             return {}
+        if length < 0:
+            raise BacktestError("Content-Length must be non-negative")
         body = self.rfile.read(length).decode("utf-8")
-        return json.loads(body) if body else {}
+        payload = json.loads(body) if body else {}
+        if not isinstance(payload, dict):
+            raise BacktestError("request body must be a JSON object")
+        if "config" in payload and not isinstance(payload["config"], dict):
+            raise BacktestError("config must be an object")
+        return payload
 
     def identity_cookie_key_id(self) -> str | None:
         raw_cookie = self.headers.get("Cookie") or ""
@@ -1448,7 +1502,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         path = self.normalize_path(parsed.path)
         try:
             if path == "/api/health":
-                self.send_json(HTTPStatus.OK, {"ok": True, "service": "portfolio-backtest", "time": iso_now()})
+                self.send_json(HTTPStatus.OK, {"ok": True, "service": "portfolio-backtest", "time": iso_now(), "engine_version": BACKTEST_ENGINE_VERSION})
             elif path == "/api/identity":
                 key_id = self.identity_cookie_key_id()
                 self.send_json(
@@ -1551,19 +1605,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 client_request_id = str(payload.get("client_request_id") or "").strip()
                 active_key_id = self.current_leaderboard_key_id()
                 request_index_key = f"{active_key_id}:{client_request_id}" if client_request_id else ""
+                request_config_hash = canonical_config_hash(config)
                 job_id = str(uuid.uuid4())
                 now_mono = time.monotonic()
-                if client_request_id:
-                    with self.jobs_lock:
-                        existing_job_id = self.server.job_request_index.get(request_index_key)  # type: ignore[attr-defined]
-                        existing_job = self.jobs.get(existing_job_id) if existing_job_id else None
-                        if existing_job:
-                            self.server.job_activity[existing_job_id] = now_mono  # type: ignore[index,attr-defined]
-                            existing_job["last_requested_at"] = iso_now()
-                            existing_job["updated_at"] = iso_now()
-                            self.jobs[existing_job_id] = existing_job  # type: ignore[index]
-                            self.send_json(HTTPStatus.ACCEPTED, existing_job)
-                            return
                 job = {
                     "job_id": job_id,
                     "status": "queued",
@@ -1572,14 +1616,35 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "updated_at": iso_now(),
                     "client_request_id": client_request_id or None,
                     "request_index_key": request_index_key or None,
+                    "request_config_hash": request_config_hash,
                     "cancel_if_unrequested_seconds": self.server.job_abandoned_seconds,  # type: ignore[attr-defined]
                 }
+                existing_job = None
                 with self.jobs_lock:
-                    self.jobs[job_id] = job
-                    self.server.job_activity[job_id] = now_mono  # type: ignore[attr-defined]
-                    self.server.job_cancel_events[job_id] = Event()  # type: ignore[attr-defined]
                     if client_request_id:
-                        self.server.job_request_index[request_index_key] = job_id  # type: ignore[attr-defined]
+                        existing_job_id = self.server.job_request_index.get(request_index_key)  # type: ignore[attr-defined]
+                        existing_job = self.jobs.get(existing_job_id) if existing_job_id else None
+                    if existing_job:
+                        existing_job = dict(existing_job)
+                        if existing_job.get("request_config_hash") == request_config_hash:
+                            self.server.job_activity[existing_job_id] = now_mono  # type: ignore[index,attr-defined]
+                            existing_job["last_requested_at"] = iso_now()
+                            existing_job["updated_at"] = iso_now()
+                            self.jobs[existing_job_id] = existing_job  # type: ignore[index]
+                    else:
+                        # Lookup and registration must share one critical
+                        # section: network retries can arrive concurrently.
+                        self.jobs[job_id] = job
+                        self.server.job_activity[job_id] = now_mono  # type: ignore[attr-defined]
+                        self.server.job_cancel_events[job_id] = Event()  # type: ignore[attr-defined]
+                        if client_request_id:
+                            self.server.job_request_index[request_index_key] = job_id  # type: ignore[attr-defined]
+                if existing_job:
+                    if existing_job.get("request_config_hash") != request_config_hash:
+                        self.send_error_json(HTTPStatus.CONFLICT, "同一次请求的参数已改变，请重新提交回测")
+                    else:
+                        self.send_json(HTTPStatus.ACCEPTED, existing_job)
+                    return
                 future = self.server.job_executor.submit(  # type: ignore[attr-defined]
                     run_backtest_job,
                     self.server,
@@ -1590,11 +1655,35 @@ class ApiHandler(BaseHTTPRequestHandler):
                 with self.jobs_lock:
                     self.server.job_futures[job_id] = future  # type: ignore[attr-defined]
                 self.send_json(HTTPStatus.ACCEPTED, job)
+            elif path.startswith("/api/backtest/") and path.endswith("/analysis"):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) != 4:
+                    self.send_error_json(HTTPStatus.NOT_FOUND, "unknown API endpoint")
+                    return
+                run_id = parts[2]
+                with self.write_lock:
+                    with db_session(self.settings.db_path) as conn:
+                        row = conn.execute("SELECT config_json,summary_json FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+                        if not row:
+                            self.send_error_json(HTTPStatus.NOT_FOUND, "run not found")
+                            return
+                        config = json_loads(row["config_json"], {})
+                        summary = json_loads(row["summary_json"], {})
+                        if int(summary.get("engine_version") or 0) != BACKTEST_ENGINE_VERSION:
+                            self.send_error_json(HTTPStatus.CONFLICT, "此历史记录使用旧版计算逻辑，请重新运行回测后分析")
+                            return
+                        status = summary.get("analysis_status", "completed")
+                        if status not in {"completed", "not_required"}:
+                            status = "pending" if extended_analysis_required(config) else "not_required"
+                            set_persisted_analysis_status(conn, {"run_id": run_id, "summary": summary}, status)
+                if status == "pending":
+                    schedule_deferred_backtest_analysis(self.server, run_id, config)
+                self.send_json(HTTPStatus.ACCEPTED, {"run_id": run_id, "analysis_status": status})
             else:
                 self.send_error_json(HTTPStatus.NOT_FOUND, "unknown API endpoint")
         except (BrokenPipeError, ConnectionResetError):
             raise
-        except BacktestError as exc:
+        except (BacktestError, ValueError, UnicodeDecodeError) as exc:
             self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:
             logger.exception("http post failed path=%s", path)
@@ -1612,22 +1701,25 @@ class ApiHandler(BaseHTTPRequestHandler):
             with self.write_lock:
                 with db_session(self.settings.db_path) as conn:
                     existing = conn.execute("SELECT 1 FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
-                    if not existing:
-                        self.send_error_json(HTTPStatus.NOT_FOUND, "run not found")
-                        return
                     conn.execute("DELETE FROM portfolio_daily WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM trades WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM rebalance_events WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM leaderboard_memberships WHERE run_id=?", (run_id,))
                     conn.execute("DELETE FROM backtest_runs WHERE run_id=?", (run_id,))
-            self.send_json(HTTPStatus.OK, {"deleted": run_id})
+            with self.server.diagnostics_cache_lock:  # type: ignore[attr-defined]
+                for key in list(self.server.diagnostics_cache):  # type: ignore[attr-defined]
+                    if key[0] == run_id:
+                        self.server.diagnostics_cache.pop(key, None)  # type: ignore[attr-defined]
+            # The browser retries after a lost response. A successful deletion
+            # remains successful when that same request arrives again.
+            self.send_json(HTTPStatus.OK, {"deleted": run_id, "already_deleted": not bool(existing)})
         except Exception as exc:
             logger.exception("http delete failed path=%s", path)
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
     def handle_backtest_get(self, path: str, query: dict[str, list[str]]) -> None:
         parts = [part for part in path.split("/") if part]
-        if len(parts) < 3:
+        if len(parts) < 3 or len(parts) > 4:
             self.send_error_json(HTTPStatus.NOT_FOUND, "missing run_id")
             return
         run_id = parts[2]
@@ -1638,13 +1730,26 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_error_json(HTTPStatus.NOT_FOUND, "run not found")
                 return
             if not section:
+                saved_config = json_loads(run["config_json"], {})
+                saved_summary = json_loads(run["summary_json"], {})
+                if (
+                    saved_summary.get("analysis_status") in {"pending", "running"}
+                    and int(saved_summary.get("engine_version") or 0) == BACKTEST_ENGINE_VERSION
+                    and extended_analysis_required(saved_config)
+                ):
+                    # Resume interrupted background analysis when a saved run
+                    # is reopened after a process restart.
+                    schedule_deferred_backtest_analysis(self.server, run_id, saved_config)
                 self.send_json(
                     HTTPStatus.OK,
                     {
                         "run_id": run_id,
                         "created_at": run["created_at"],
-                        "config": json_loads(run["config_json"]),
-                        "summary": json_loads(run["summary_json"]),
+                        "config": saved_config,
+                        "summary": {
+                            **saved_summary,
+                            "requires_recalculation": int(saved_summary.get("engine_version") or 0) < BACKTEST_ENGINE_VERSION,
+                        },
                     },
                 )
                 return
@@ -1700,6 +1805,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                     },
                 )
             elif section == "strategy-diagnostics":
+                saved_summary = json_loads(run["summary_json"], {})
+                if int(saved_summary.get("engine_version") or 0) != BACKTEST_ENGINE_VERSION:
+                    self.send_error_json(HTTPStatus.CONFLICT, "此历史记录使用旧版计算逻辑，请重新运行回测后分析")
+                    return
                 window_key = str((query.get("window") or ["all"])[0] or "all")
                 cache_key = (run_id, window_key)
                 with self.server.diagnostics_cache_lock:  # type: ignore[attr-defined]
@@ -1708,7 +1817,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         diagnostics = strategy_diagnostics(
                             conn,
                             json_loads(run["config_json"], {}),
-                            json_loads(run["summary_json"], {}),
+                            saved_summary,
                             window_key,
                         )
                         if len(self.server.diagnostics_cache) >= 32:  # type: ignore[attr-defined]
@@ -1740,7 +1849,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 rows = rows_to_dicts(
                     conn.execute(
                         """
-                        SELECT rebalance_date,period_return,total_asset_before,fee_cny,payload_json
+                        SELECT rebalance_date,period_return,total_asset_before,total_asset_after,turnover_cny,fee_cny,payload_json
                         FROM rebalance_events WHERE run_id=? ORDER BY rebalance_date
                         """,
                         (run_id,),

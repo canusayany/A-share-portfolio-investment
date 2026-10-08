@@ -58,6 +58,12 @@ let apiRecoveryPromise = null;
 let controlsEventController = null;
 let chartLibraryPromise = null;
 let toastTimer = null;
+let resultRequestVersion = 0;
+let runInProgress = false;
+let exportRunId = null;
+let drawerReturnFocus = null;
+let identityReturnFocus = null;
+let pendingReplayRunId = null;
 
 function loadChartLibrary() {
   if (window.echarts) return Promise.resolve(window.echarts);
@@ -67,7 +73,11 @@ function loadChartLibrary() {
     script.src = `${APP_BASE_PATH}/static/echarts.min.js?v=5.6.0`;
     script.async = true;
     script.onload = () => resolve(window.echarts);
-    script.onerror = () => reject(new Error("图表组件加载失败"));
+    script.onerror = () => {
+      chartLibraryPromise = null;
+      script.remove();
+      reject(new Error("图表组件加载失败"));
+    };
     document.head.appendChild(script);
   });
   return chartLibraryPromise;
@@ -536,6 +546,10 @@ function closeIdentityGate() {
   const gate = $("identityGate");
   if (gate) gate.hidden = true;
   document.body.classList.remove("identity-locked");
+  document.querySelector(".app-shell")?.removeAttribute("inert");
+  document.querySelector(".mobile-app-bar")?.removeAttribute("inert");
+  syncDrawerAccessibility();
+  identityReturnFocus?.focus();
   const resolve = identityGateResolver;
   identityGateResolver = null;
   identityGateRequired = false;
@@ -543,6 +557,7 @@ function closeIdentityGate() {
 }
 
 function showIdentityGate(required = false) {
+  identityReturnFocus = document.activeElement;
   identityGateRequired = required;
   const gate = $("identityGate");
   const form = $("identityForm");
@@ -556,6 +571,8 @@ function showIdentityGate(required = false) {
   if ($("identityCancel")) $("identityCancel").hidden = required;
   if (gate) gate.hidden = false;
   document.body.classList.add("identity-locked");
+  document.querySelector(".app-shell")?.setAttribute("inert", "");
+  document.querySelector(".mobile-app-bar")?.setAttribute("inert", "");
   window.requestAnimationFrame(() => input?.focus());
   return new Promise((resolve) => {
     identityGateResolver = resolve;
@@ -633,11 +650,10 @@ function createClientRequestId() {
 }
 
 function setMessage(text, isError = false) {
-  const message = $("message");
-  if (message) {
+  [$("message"), $("workspaceMessage")].filter(Boolean).forEach((message) => {
     message.textContent = text || "";
-    message.className = isError ? "message error" : "message";
-  }
+    message.classList.toggle("error", isError);
+  });
   const resultStatus = $("resultStatusText");
   if (resultStatus) {
     resultStatus.textContent = text || "尚未运行回测";
@@ -732,7 +748,7 @@ function readConfig() {
   next.repo_fixed_target_cny = Number($("repoFixedTarget").value);
   next.repo_fixed_target_ratio = Number($("repoFixedRatio").value);
   next.repo_symbol = $("repoSymbol").value;
-  next.dip_buy_enabled = $("dipBuyEnabled").checked;
+  next.dip_buy_enabled = next.rebalance_frequency === "yearly" && $("dipBuyEnabled").checked;
   next.dip_buy_drawdown = Number($("dipBuyDrawdown").value);
   next.dip_buy_total_parts = Number($("dipBuyTotalParts").value);
   next.dip_buy_level_mode = $("dipBuyLevelMode").value;
@@ -784,6 +800,113 @@ function compactConfigForRequest(fullConfig) {
     ...requestConfig,
     assets: fullConfig.assets.map(({ key, enabled, target_weight }) => ({ key, enabled, target_weight })),
   };
+}
+
+function selectParameterStep(step) {
+  document.querySelectorAll("[data-parameter-tab]").forEach((button) => {
+    const active = button.dataset.parameterTab === step;
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll("[data-parameter-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.parameterPanel !== step;
+  });
+}
+
+function configFingerprint(value) {
+  if (!value) return "";
+  // Compare editable values only; catalogue descriptions and server metadata
+  // may change without changing a strategy.
+  const scalarKeys = ["initial_capital_cny", "start_date", "end_date", "rebalance_frequency",
+    "annual_rebalance_month", "rolling_window_years", "rebalance_month_analysis_enabled",
+    "rebalance_band", "rebalance_to_target", "monthly_spend_cny", "repo_target_mode",
+    "repo_fixed_target_cny", "repo_fixed_target_ratio", "repo_symbol", "dip_buy_enabled",
+    "dip_buy_drawdown", "dip_buy_total_parts", "dip_buy_level_mode", "dip_buy_cost_basis_mode",
+    "dip_buy_recovery_sell_enabled", "dip_buy_asset_cap_enabled", "dip_buy_asset_cap_ratio",
+    "dip_buy_blackout_enabled", "dip_buy_blackout_months"];
+  const normalized = Object.fromEntries(scalarKeys.map((key) => [key, value[key]]));
+  if (value.rebalance_frequency !== "yearly") {
+    normalized.dip_buy_enabled = false;
+    normalized.rebalance_month_analysis_enabled = false;
+  }
+  normalized.assets = (value.assets || []).map(({ key, enabled, target_weight }) => ({ key, enabled, target_weight }));
+  normalized.fees = value.fees;
+  const stable = (item) => Array.isArray(item) ? item.map(stable)
+    : item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, stable(item[key])])) : item;
+  return JSON.stringify(stable(normalized));
+}
+
+function updateResultContext() {
+  if (!config) return;
+  const dirty = Boolean(currentRunConfig && configFingerprint(readConfig()) !== configFingerprint(currentRunConfig));
+  if ($("draftNotice")) $("draftNotice").hidden = !dirty;
+  if ($("resultState")) $("resultState").textContent = runInProgress ? "正在回测" : !currentRunId ? "等待运行" : dirty ? "参数待应用" : "已保存结果";
+  if ($("resultConfigSummary")) {
+    const cfg = currentRunConfig;
+    $("resultConfigSummary").textContent = cfg
+      ? `${currentSummary?.start_date || cfg.start_date} 至 ${currentSummary?.end_date || cfg.end_date} · ${REBALANCE_FREQUENCY_NAMES[cfg.rebalance_frequency] || cfg.rebalance_frequency}检查 · 容忍带 ${fmtPct(cfg.rebalance_band)} · ${cfg.rebalance_to_target ? "超带后恢复目标" : "超带后调回带内"}`
+      : "设置资金与资产配置，运行后在这里查看结果。";
+  }
+  if ($("openCsvExport")) $("openCsvExport").disabled = !currentRunId;
+}
+
+function updateRebalanceExplanation() {
+  const host = $("rebalanceExplanation");
+  if (!host) return;
+  const summary = currentSummary;
+  host.hidden = !currentRunId;
+  host.textContent = summary?.rebalance_check_count != null
+    ? `周期检查 ${summary.rebalance_check_count} 次 · 实际调仓 ${summary.rebalance_trade_count} 次 · 带内无需调仓 ${summary.rebalance_within_band_count ?? 0} 次 · 成交条件不足 ${summary.rebalance_constrained_count ?? 0} 次。首次建仓单独计算；逐次原因见调仓记录。`
+    : currentRunId ? "此历史版本未区分周期检查与实际成交，请重新运行以查看调仓原因。" : "运行后将分别显示周期检查与实际调仓次数。";
+}
+
+function setRunBusy(busy) {
+  runInProgress = busy;
+  ["runBtn", "mobileRunBtn", "workspaceRunBtn"].forEach((id) => {
+    const button = $(id);
+    if (!button) return;
+    button.disabled = busy || !config;
+    button.classList.toggle("is-running", busy);
+    const label = button.querySelector("span") || button;
+    label.textContent = busy ? "正在回测" : "运行回测";
+  });
+  updateResultContext();
+}
+
+function focusInvalidControl(input, message) {
+  const step = input?.closest("[data-parameter-panel]")?.dataset.parameterPanel;
+  if (step) selectParameterStep(step);
+  if (isMobileLayout()) setParameterPanel(true);
+  let parent = input?.parentElement;
+  while (parent && parent !== $("parameterPanel")) {
+    if (parent.tagName === "DETAILS") parent.open = true;
+    parent = parent.parentElement;
+  }
+  setMessage(message || input?.validationMessage || "请检查参数", true);
+  window.requestAnimationFrame(() => { input?.focus(); input?.reportValidity(); });
+  return false;
+}
+
+function validateControls() {
+  for (const input of document.querySelectorAll('#parameterPanel input[type="number"], #parameterPanel input[type="date"]')) {
+    input.setCustomValidity("");
+    if (input.disabled) continue;
+    if (input.closest("#repoFixedControls") && $("repoFixedControls")?.hidden) continue;
+    const asset = input.closest(".asset-control");
+    if (asset && !asset.querySelector('input[type="checkbox"]')?.checked) continue;
+    if (input.type === "number" && !input.value) {
+      input.setCustomValidity("请输入数值；不启用的金额请填 0");
+    }
+    if (!input.checkValidity()) return focusInvalidControl(input);
+  }
+  const next = readConfig();
+  if (next.start_date > next.end_date) return focusInvalidControl($("endDate"), "结束日期不能早于开始日期");
+  const total = next.assets.reduce((sum, asset) => sum + (asset.enabled ? asset.target_weight : 0), 0);
+  if (next.repo_target_mode === "residual_weight" && total > 1 + 1e-8) {
+    selectParameterStep("allocation");
+    return focusInvalidControl($("assetControls")?.querySelector('input[type="number"]'), `资产权重合计 ${fmtPct(total)}，不能超过 100%`);
+  }
+  return true;
 }
 
 function repoModeLabel(mode) {
@@ -852,7 +975,7 @@ function currentRepoPlan(mode, enabledWeight) {
     const initialCapital = Math.max(Number($("initialCapital")?.value || config.initial_capital_cny || 0), 0);
     const fixedAmount = Math.max(Number($("repoFixedTarget")?.value || 0), 0);
     const fixedRatio = Math.min(Math.max(Number($("repoFixedRatio")?.value || 0), 0), 1);
-    const repoTargetValue = initialCapital > 0 ? Math.min(fixedAmount + initialCapital * fixedRatio, initialCapital) : 0;
+    const repoTargetValue = enabledWeight <= 0 ? initialCapital : initialCapital > 0 ? Math.min(fixedAmount + initialCapital * fixedRatio, initialCapital) : 0;
     const repoWeight = initialCapital > 0 ? repoTargetValue / initialCapital : 1;
     return {
       mode,
@@ -860,7 +983,7 @@ function currentRepoPlan(mode, enabledWeight) {
       repoTargetValue,
       repoWeight,
       remainingWeight: Math.max(1 - repoWeight, 0),
-      warning: repoWeight >= 1 || enabledWeight <= 0,
+      warning: false,
     };
   }
   const repoWeight = Math.max(1 - enabledWeight, 0);
@@ -1008,8 +1131,8 @@ function applyDatePreset(value) {
   const endValue = $("endDate").value || config.end_date;
   const end = parseInputDate(endValue) || new Date();
   if (value === "all") {
-    $("startDate").value = config.start_date;
-    $("endDate").value = config.end_date;
+    $("startDate").value = (defaultConfigSnapshot || config).start_date;
+    $("endDate").value = (defaultConfigSnapshot || config).end_date;
   } else {
     const start = new Date(end.getTime());
     start.setFullYear(start.getFullYear() - Number(value));
@@ -1066,6 +1189,9 @@ function updateRepoWeight() {
   syncDipBuyModeTabs();
   renderControlSummary(plan);
   renderAllocationSummary(plan);
+  const frequency = REBALANCE_FREQUENCY_NAMES[$("rebalanceFrequency")?.value] || "每年";
+  if ($("rebalanceRuleHint")) $("rebalanceRuleHint").textContent = `${frequency}检查权重；只有超出 ${fmtPct($("rebalanceBand").value)} 相对容忍带才调仓。首次建仓按目标配置。修改后需重新运行；频率提高不保证每期都有成交。`;
+  updateResultContext();
   if (mode === "fixed_bucket") {
     controls.forEach((item) => {
       const effectiveWeight = item.enabled && enabledWeight > 0 ? (item.weight / enabledWeight) * plan.remainingWeight : 0;
@@ -1107,7 +1233,7 @@ function bindAssetWeightInputs(row, key) {
     updateRepoWeight();
   });
   percent.addEventListener("input", () => {
-    const normalized = Math.min(Math.max(Number(percent.value || 0), 0), 80) / 100;
+    const normalized = Math.min(Math.max(Number(percent.value || 0), 0), 100) / 100;
     range.value = String(normalized);
     updateRepoWeight();
   });
@@ -1214,8 +1340,8 @@ function renderControls() {
     row.className = "asset-control";
     row.innerHTML = `
       <input id="enabled_${asset.key}" type="checkbox" aria-label="启用${assetName(asset.symbol)}" ${asset.enabled ? "checked" : ""} />
-      <input id="weight_${asset.key}" type="range" min="0" max="0.8" step="0.01" value="${asset.target_weight}" aria-label="${assetName(asset.symbol)}目标权重" />
-      <label class="asset-percent"><input id="weight_percent_${asset.key}" type="number" min="0" max="80" step="1" value="${Number(asset.target_weight || 0) * 100}" /><span>%</span></label>
+      <input id="weight_${asset.key}" type="range" min="0" max="1" step="any" value="${asset.target_weight}" aria-label="${assetName(asset.symbol)}目标权重" />
+      <label class="asset-percent"><input id="weight_percent_${asset.key}" type="number" min="0" max="100" step="any" value="${Number(asset.target_weight || 0) * 100}" /><span>%</span></label>
       <div class="asset-name">
         <span class="asset-title">${assetName(asset.symbol)}</span>
         <span id="effective_${asset.key}" class="asset-effective" hidden></span>
@@ -1243,8 +1369,8 @@ function renderBroadEtfControl(host) {
   row.className = "asset-control asset-control-group";
   row.innerHTML = `
     <input id="enabled_${BROAD_ETF_CONTROL_KEY}" type="checkbox" aria-label="启用宽基ETF" ${enabled ? "checked" : ""} />
-    <input id="weight_${BROAD_ETF_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="宽基ETF目标权重" />
-    <label class="asset-percent"><input id="weight_percent_${BROAD_ETF_CONTROL_KEY}" type="number" min="0" max="80" step="1" value="${Number(weight || 0) * 100}" /><span>%</span></label>
+    <input id="weight_${BROAD_ETF_CONTROL_KEY}" type="range" min="0" max="1" step="any" value="${weight}" aria-label="宽基ETF目标权重" />
+    <label class="asset-percent"><input id="weight_percent_${BROAD_ETF_CONTROL_KEY}" type="number" min="0" max="100" step="any" value="${Number(weight || 0) * 100}" /><span>%</span></label>
     <div class="asset-name">
       <span class="asset-title">宽基 ETF</span>
       <span id="effective_${BROAD_ETF_CONTROL_KEY}" class="asset-effective" hidden></span>
@@ -1274,8 +1400,8 @@ function renderSp500Control(host) {
   row.className = "asset-control asset-control-group";
   row.innerHTML = `
     <input id="enabled_${SP500_CONTROL_KEY}" type="checkbox" aria-label="启用标普500" ${enabled ? "checked" : ""} />
-    <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="0.8" step="0.01" value="${weight}" aria-label="标普500目标权重" />
-    <label class="asset-percent"><input id="weight_percent_${SP500_CONTROL_KEY}" type="number" min="0" max="80" step="1" value="${Number(weight || 0) * 100}" /><span>%</span></label>
+    <input id="weight_${SP500_CONTROL_KEY}" type="range" min="0" max="1" step="any" value="${weight}" aria-label="标普500目标权重" />
+    <label class="asset-percent"><input id="weight_percent_${SP500_CONTROL_KEY}" type="number" min="0" max="100" step="any" value="${Number(weight || 0) * 100}" /><span>%</span></label>
     <div class="asset-name">
       <span class="asset-title">标普500</span>
       <span id="effective_${SP500_CONTROL_KEY}" class="asset-effective" hidden></span>
@@ -1315,10 +1441,10 @@ function updateDataStatus(rows) {
   const validDates = rows.map((row) => row.end_date).filter(Boolean).sort();
   const latestDate = validDates.at(-1);
   const text = rows.length
-    ? `${rows.length} 项数据已就绪${latestDate ? ` · 最新 ${latestDate}` : ""}`
+    ? `${rows.length} 项已缓存${latestDate ? ` · 最晚日期 ${latestDate}` : ""} · 运行时核验所需区间`
     : "暂无可用数据";
   if (statusText) statusText.textContent = text;
-  if (mobileStatus) mobileStatus.textContent = rows.length ? `数据最新 ${latestDate || "已就绪"}` : "暂无可用数据";
+  if (mobileStatus) mobileStatus.textContent = rows.length ? `缓存至 ${latestDate || "未知日期"}` : "暂无可用数据";
   if (statusDot) {
     statusDot.classList.remove("is-loading", "is-error");
     statusDot.classList.toggle("is-error", !rows.length);
@@ -1339,12 +1465,14 @@ function renderSummaryGroups(primary, secondary, notes = null) {
   const noteList = (Array.isArray(notes) ? notes : [notes]).filter(Boolean);
   $("summaryGrid").innerHTML = `
     <div class="metric-group metric-group-primary">${primary.map(metricMarkup).join("")}</div>
-    <div class="metric-group metric-group-secondary">${secondary.map(metricMarkup).join("")}</div>
+    <details class="summary-more"><summary>费用、现金流与交易统计</summary><div class="metric-group metric-group-secondary">${secondary.map(metricMarkup).join("")}</div></details>
+    ${currentSummary?.requires_recalculation ? '<p class="message error">历史结果使用旧版计算逻辑，请重新运行。</p>' : ""}
+    ${noteList.length ? '<details class="summary-methodology"><summary>收益口径与数据来源</summary>' : ""}
     ${noteList.map((note) => `<div class="summary-note" role="note">
       <span class="summary-note-icon" aria-hidden="true">i</span>
       <span>${escapeHtml(note.text)}</span>
       ${note.href ? `<a href="${escapeHtml(note.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(note.linkText || "查看依据")}</a>` : ""}
-    </div>`).join("")}
+    </div>`).join("")}${noteList.length ? "</details>" : ""}
   `;
 }
 
@@ -1429,11 +1557,13 @@ function renderRiskInsights(summary = {}) {
 function renderInitialSummary() {
   currentSummary = null;
   renderSummaryGroups(
-    ["期末总资产", "累计收益（现金流调整）", "年化收益（现金流调整）", "最大回撤"].map((label) => ({ label, value: "--" })),
-    ["原始本金折算年化", "原始本金累计盈亏", "总手续费", "实际到账现金分红", "总消费", "浮盈浮亏", "对比期末资产", "再平衡次数", "交易次数", "分红预扣税"]
+    ["期末总资产", "累计收益率", "年化收益率", "最大回撤"].map((label) => ({ label, value: "--" })),
+    ["原始本金折算年化", "原始本金累计盈亏", "总手续费", "实际到账现金分红", "总消费", "浮盈浮亏", "对比期末资产", "实际调仓次数", "交易次数", "分红预扣税"]
       .map((label) => ({ label, value: "--" })),
   );
   renderRiskInsights();
+  updateRebalanceExplanation();
+  updateResultContext();
 }
 
 function renderSummary(summary) {
@@ -1443,13 +1573,13 @@ function renderSummary(summary) {
   const originalProfitValue = summary.net_profit_cny == null
     ? "—"
     : `￥${fmtMoney(summary.net_profit_cny)} / ${optionalPct(summary.original_capital_return)}`;
-  const hasDividendLowVol = Boolean(config?.assets?.some(
+  const hasDividendLowVol = Boolean((currentRunConfig || config)?.assets?.some(
     (asset) => asset.symbol === "512890.SH" && asset.enabled && Number(asset.target_weight || 0) > 0,
   ));
   const primary = [
     { label: "期末总资产", value: `￥${fmtMoney(summary.final_asset_cny)}` },
-    { label: "累计收益（现金流调整）", value: fmtPct(summary.total_return), tone: positiveTone(summary.total_return) },
-    { label: "年化收益（现金流调整）", value: fmtPct(summary.annualized_return), tone: positiveTone(summary.annualized_return) },
+    { label: "累计收益率", value: fmtPct(summary.total_return), tone: positiveTone(summary.total_return) },
+    { label: "年化收益率", value: fmtPct(summary.annualized_return), tone: positiveTone(summary.annualized_return) },
     { label: "最大回撤", value: fmtPct(summary.max_drawdown), tone: "negative" },
   ];
   const secondary = [
@@ -1468,7 +1598,7 @@ function renderSummary(summary) {
     { label: "总消费", value: `￥${fmtMoney(summary.total_spend_cny)}` },
     { label: "浮盈浮亏", value: `￥${fmtMoney(summary.final_unrealized_pnl_cny)}`, tone: positiveTone(summary.final_unrealized_pnl_cny) },
     { label: "对比期末资产", value: `￥${fmtMoney(summary.comparison_final_asset_cny)}` },
-    { label: "再平衡次数", value: fmtNum(summary.rebalance_count, 0) },
+    { label: "实际调仓次数", value: summary.rebalance_trade_count == null ? "—" : fmtNum(summary.rebalance_trade_count, 0) },
     { label: "交易次数", value: fmtNum(summary.trade_count, 0) },
     { label: "分红预扣税", value: `￥${fmtMoney(summary.withheld_tax_cny)}` },
   ];
@@ -1498,8 +1628,19 @@ function renderSummary(summary) {
       linkText: "查看511090上市依据",
     };
   }
-  renderSummaryGroups(primary, secondary, [returnBasisNote, treasuryNote, dividendNote]);
+  const recalculationNote = summary.requires_recalculation ? {
+    text: "此历史结果使用旧版计算逻辑，尚未重算，已退出当前排行榜。请重新运行相同参数。",
+  } : null;
+  renderSummaryGroups(primary, secondary, [recalculationNote, returnBasisNote, treasuryNote, dividendNote]);
+  if (Number(summary.total_spend_shortfall_cny) > 0) {
+    const warning = document.createElement("p");
+    warning.className = "message error";
+    warning.textContent = `消费资金不足：计划 ￥${fmtMoney(summary.total_planned_spend_cny)}，实际提取 ￥${fmtMoney(summary.total_spend_cny)}，缺口 ￥${fmtMoney(summary.total_spend_shortfall_cny)}（${summary.spend_shortfall_count} 次，首次 ${summary.first_spend_shortfall_date}）。`;
+    $("summaryGrid").appendChild(warning);
+  }
   renderRiskInsights(summary);
+  updateRebalanceExplanation();
+  updateResultContext();
 }
 
 function daysBetween(start, end) {
@@ -2191,6 +2332,7 @@ async function openCsvExportDialog() {
   }
   const dialog = $("csvExportDialog");
   const runId = currentRunId;
+  exportRunId = null;
   let exportConfig = null;
   try {
     const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`, { attempts: 1 });
@@ -2243,18 +2385,26 @@ async function openCsvExportDialog() {
     $("csvExportAssets").innerHTML = exportOptions.map((option) => `<label><input type="checkbox" value="${escapeHtml(option.symbol)}" checked /><span><strong>${escapeHtml(option.name)}</strong><small>${escapeHtml(option.detail)}</small></span></label>`).join("");
   }
   if ($("csvExportError")) $("csvExportError").textContent = "";
+  exportRunId = runId;
+  [$("csvExportStart"), $("csvExportEnd")].forEach((input) => input?.setCustomValidity(""));
   if (typeof dialog?.showModal === "function") dialog.showModal();
   else dialog?.setAttribute("open", "");
 }
 
 async function downloadCsvExport() {
+  const runId = exportRunId;
+  if (!runId || runId !== currentRunId) {
+    showToast("当前结果已切换，请重新打开导出窗口", true);
+    return;
+  }
   const startInput = $("csvExportStart");
   const endInput = $("csvExportEnd");
   const error = $("csvExportError");
   const startDate = String(startInput?.value || "");
   const endDate = String(endInput?.value || "");
   const symbols = [...document.querySelectorAll('#csvExportAssets input[type="checkbox"]:checked')].map((input) => input.value);
-  const datesValid = Boolean(startDate && endDate && startDate <= endDate);
+  const datesValid = Boolean(startDate && endDate && startDate <= endDate
+    && (!startInput.min || startDate >= startInput.min) && (!endInput.max || endDate <= endInput.max));
   [startInput, endInput].filter(Boolean).forEach((input) => input.setCustomValidity(datesValid ? "" : "请选择有效的开始和结束时间"));
   if (!datesValid) {
     (startDate ? endInput : startInput)?.reportValidity();
@@ -2274,7 +2424,7 @@ async function downloadCsvExport() {
   }
   try {
     const response = await fetch(
-      `${APP_BASE_PATH}/api/backtest/${encodeURIComponent(currentRunId)}/export.csv?${params}`,
+      `${APP_BASE_PATH}/api/backtest/${encodeURIComponent(runId)}/export.csv?${params}`,
       { method: "GET", cache: "no-store", credentials: "same-origin", headers: { Accept: "text/csv" } },
     );
     if (!response.ok) {
@@ -2760,7 +2910,7 @@ function compareTableValues(left, right, direction) {
 function renderTable(id, columns, rows, options = {}) {
   const table = $(id);
   if (!rows.length) {
-    table.innerHTML = "<tbody><tr><td class=\"table-empty\">暂无数据</td></tr></tbody>";
+    table.innerHTML = `<tbody><tr><td class="table-empty">${escapeHtml(options.emptyMessage || "暂无数据")}</td></tr></tbody>`;
     return;
   }
   const pageSize = Number(options.pageSize || rows.length);
@@ -2813,6 +2963,9 @@ function renderTable(id, columns, rows, options = {}) {
 }
 
 function formatCell(value) {
+  if (value && typeof value === "object" && value.kind === "number") {
+    return escapeHtml(fmtNum(value.raw, value.decimals ?? 2));
+  }
   if (value && typeof value === "object" && value.kind === "metric") {
     let text = "—";
     if (value.raw != null && Number.isFinite(Number(value.raw))) {
@@ -2845,13 +2998,19 @@ function formatPerformanceCell(value) {
   const profitText = profit === "" || profit == null ? "-" : `￥${fmtMoney(profit)}`;
   const rateText = rate === "" || rate == null ? "-" : fmtPct(rate);
   const className = Number(profit || 0) < 0 || Number(rate || 0) < 0 ? "negative" : "";
-  return `<span class="${className}">${profitText} / ${rateText}</span>`;
+  const title = value.profitBasis === "position_change_excluding_trade_principal_including_net_distributions_and_fees"
+    ? "盈亏剔除买卖本金，包含净分红及费用；百分比为盈亏除以期初持仓金额，首次建仓年用初始配置金额，不是该标的的时间加权净值收益。"
+    : "";
+  return `<span class="${className}" title="${escapeHtml(title)}">${profitText} / ${rateText}</span>`;
 }
 
 function rebalanceActionLabel(payload = {}) {
+  if (payload.event_type === "initial_allocation") return payload.rebalanced ? "首次建仓" : "建仓未成交";
+  if (payload.event_type === "treasury_activation") return "现金标的启用";
   if (payload.rebalance_action === "trade" || payload.rebalanced === true) return "已调仓";
-  if (payload.rebalance_reason === "within_band") return "未偏离";
-  return "已记录";
+  if (payload.rebalance_reason === "within_band") return "带内，无需调仓";
+  if (payload.rebalance_reason === "trade_constraints") return "超带，成交条件不足";
+  return "历史记录，未区分成交";
 }
 
 function rebalanceAssetColumnName(symbol) {
@@ -2860,12 +3019,13 @@ function rebalanceAssetColumnName(symbol) {
 
 function rebalanceCashEquivalentSymbols() {
   const symbols = new Set(["REPO"]);
-  for (const option of config.repo_options || []) {
+  const resultConfig = currentRunConfig || config;
+  for (const option of resultConfig.repo_options || []) {
     if (["repo", "money_fund"].includes(option.instrument_type) && option.symbol) {
       symbols.add(option.symbol);
     }
   }
-  if (config.repo_symbol) symbols.add(config.repo_symbol);
+  if (resultConfig.repo_symbol) symbols.add(resultConfig.repo_symbol);
   return symbols;
 }
 
@@ -2878,16 +3038,19 @@ function rebalanceDisplayRows(rows) {
       if (!symbols.includes(symbol)) symbols.push(symbol);
     }
   }
-  const orderedSymbols = config.assets.map((asset) => asset.symbol).filter((symbol) => symbols.includes(symbol));
+  const orderedSymbols = (currentRunConfig || config).assets.map((asset) => asset.symbol).filter((symbol) => symbols.includes(symbol));
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["执行日", "决策日", "收益年度", "当年总资产", "当年收益（按上年度总资产）", "当年收益（按原始资金）", "当年盈亏", "当年最大回撤", "当年手续费"];
+  const baseColumns = ["执行日", "检查结果", "成交笔数", "成交金额", "决策日", "收益年度", "当年总资产", "当年收益（按上年度总资产）", "当年收益（按原始资金）", "当年盈亏", "当年最大回撤", "当年手续费"];
   const assetColumns = orderedSymbols.map(rebalanceAssetColumnName);
   const displayRows = rows.map((row) => {
     const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
     const item = {
       执行日: row.rebalance_date,
+      检查结果: rebalanceActionLabel(row.payload),
+      成交笔数: row.payload?.executed_trade_count ?? "—",
+      成交金额: row.turnover_cny == null ? "—" : `￥${fmtMoney(row.turnover_cny)}`,
       决策日: row.payload?.decision_date || row.rebalance_date,
       收益年度: row.payload?.year_label ? `${row.payload.year_label}年` : `${String(row.payload?.decision_date || row.rebalance_date).slice(0, 4)}年`,
       当年总资产: annualTotal == null ? "—" : `￥${fmtMoney(annualTotal)}`,
@@ -2911,6 +3074,7 @@ function rebalanceDisplayRows(rows) {
         kind: "performance",
         profit: perf.profit_cny ?? "",
         rate: perf.return ?? "",
+        profitBasis: row.payload?.asset_profit_basis,
       };
     }
     return item;
@@ -2948,17 +3112,40 @@ async function waitForBacktestJob(jobId) {
 }
 
 async function loadBacktestResultSections(runId, onSeries, prefetchedChart = null) {
-  setMessage("计算完成，正在生成图表...");
   const seriesPromise = prefetchedChart
     ? Promise.resolve({ chart: prefetchedChart })
     : api(`/api/backtest/${runId}/chart-series`, { attempts: 6, retryDelayMs: 700 });
   const rebalancePromise = api(`/api/backtest/${runId}/rebalance`, { attempts: 5, retryDelayMs: 700 });
   const tradesPromise = api(`/api/backtest/${runId}/trades`, { attempts: 5, retryDelayMs: 700 });
-  const series = computeSeriesMetrics(expandChartSeries(await seriesPromise));
+  // Attach handlers to all parallel requests immediately. A failed records
+  // request must not become an unhandled rejection while charts are loading.
+  const [seriesData, rebalance, trades] = await Promise.all([seriesPromise, rebalancePromise, tradesPromise]);
+  const series = computeSeriesMetrics(expandChartSeries(seriesData));
   await onSeries?.(series);
-  setMessage("图表已显示，正在加载调仓与交易记录...");
-  const [rebalance, trades] = await Promise.all([rebalancePromise, tradesPromise]);
   return { series, rebalance, trades };
+}
+
+function setAnalysisMessage(text = "", retry = false) {
+  if ($("analysisMessage")) $("analysisMessage").textContent = text;
+  if ($("retryAnalysisBtn")) $("retryAnalysisBtn").hidden = !retry;
+}
+
+async function retryBacktestAnalysis() {
+  const runId = currentRunId;
+  if (!runId) return;
+  if ($("retryAnalysisBtn")) $("retryAnalysisBtn").disabled = true;
+  try {
+    await api(`/api/backtest/${encodeURIComponent(runId)}/analysis`, { method: "POST", body: "{}" });
+    if (currentRunId !== runId) return;
+    setAnalysisMessage("扩展分析已重新开始，主体结果仍可查看。");
+    const { rebalance, trades } = await loadBacktestResultSections(runId);
+    if (currentRunId !== runId) return;
+    watchBacktestAnalysis(runId, rebalance, trades);
+  } catch (error) {
+    if (currentRunId === runId) setAnalysisMessage(`重试失败：${humanizeError(error.message)}`, true);
+  } finally {
+    if ($("retryAnalysisBtn")) $("retryAnalysisBtn").disabled = false;
+  }
 }
 
 async function watchBacktestAnalysis(runId, rebalance, trades) {
@@ -2969,6 +3156,7 @@ async function watchBacktestAnalysis(runId, rebalance, trades) {
     if (watchId !== activeAnalysisWatch || currentRunId !== runId) return;
     try {
       const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`, { attempts: 2, retryDelayMs: 500 });
+      if (watchId !== activeAnalysisWatch || currentRunId !== runId) return;
       failures = 0;
       const status = entry.summary?.analysis_status || "completed";
       if (status === "completed" || status === "not_required") {
@@ -2976,24 +3164,34 @@ async function watchBacktestAnalysis(runId, rebalance, trades) {
         renderBacktestRecords(entry.summary, rebalance, trades);
         scheduleArchiveRefresh({ includeLeaderboard: activeArchiveView === "leaderboard" });
         setMessage("主体结果、滚动窗口和月份对比均已完成");
+        setAnalysisMessage("扩展分析已完成。");
         return;
       }
       if (status === "failed") {
+        renderBacktestRecords(entry.summary, rebalance, trades);
+        setAnalysisMessage(`扩展分析失败：${humanizeError(entry.summary?.analysis_error || "未知错误")}`, true);
         setMessage(`主体结果已显示；扩展分析失败：${humanizeError(entry.summary?.analysis_error || "未知错误")}`, true);
         return;
       }
     } catch (error) {
+      if (watchId !== activeAnalysisWatch || currentRunId !== runId) return;
       failures += 1;
       if (failures >= 5) {
         console.warn("无法继续获取后台分析进度", error);
+        setAnalysisMessage("暂时无法获取分析进度，可以重新连接并继续。", true);
         return;
       }
     }
   }
+  if (watchId === activeAnalysisWatch && currentRunId === runId) setAnalysisMessage("扩展分析仍在后台运行，可以重新连接查看进度。", true);
 }
 
 function renderBacktestRecords(summary, rebalance, trades) {
   const rollingPeriods = summary?.rolling_periods || [];
+  const analysisConfig = currentRunConfig || config;
+  const analysisEnabled = analysisConfig?.rebalance_frequency === "yearly" && analysisConfig?.rebalance_month_analysis_enabled;
+  const analysisPending = ["pending", "running"].includes(summary?.analysis_status);
+  const analysisFailed = summary?.analysis_status === "failed";
   renderTable(
     "rollingTable",
     ["回测窗口", "开始日期", "结束日期", "窗口长度", "年盈利率", "最大回撤", "年盈利/回撤比"],
@@ -3011,6 +3209,7 @@ function renderBacktestRecords(summary, rebalance, trades) {
     }),
     {
       pageSize: 100,
+      emptyMessage: analysisPending ? "滚动窗口正在计算，完成后自动更新。" : analysisFailed ? "扩展分析失败，可点击上方按钮重试。" : "回测区间不足一个完整滚动窗口，可缩短窗口年数或延长回测区间。",
       sortableColumns: ["回测窗口", "开始日期", "结束日期", "年盈利率", "最大回撤", "年盈利/回撤比"],
       defaultSort: { column: "年盈利/回撤比", direction: "desc" },
       sortDirections: { 开始日期: "asc", 结束日期: "asc", 最大回撤: "desc" },
@@ -3035,6 +3234,7 @@ function renderBacktestRecords(summary, rebalance, trades) {
     }),
     {
       pageSize: 12,
+      emptyMessage: !analysisEnabled ? "月份对比未开启。选择每年检查，并在高级设置中开启 1–12 月对比后重新运行。" : analysisPending ? "月份对比正在后台计算。" : analysisFailed ? "扩展分析失败，可点击上方按钮重试。" : "当前区间没有可比较的年度月份。",
       sortableColumns: ["再平衡月份", "年盈利率", "最大回撤", "年盈利/回撤比"],
       defaultSort: { column: "年盈利/回撤比", direction: "desc" },
       sortDirections: { 再平衡月份: "asc", 最大回撤: "desc" },
@@ -3043,7 +3243,13 @@ function renderBacktestRecords(summary, rebalance, trades) {
   $("recordTabMonths").textContent = `月份对比（${monthScenarios.length}）`;
   if (["pending", "running"].includes(summary?.analysis_status)) {
     $("recordTabRolling").textContent = "滚动窗口（后台计算中）";
-    $("recordTabMonths").textContent = "月份对比（后台计算中）";
+    $("recordTabMonths").textContent = analysisEnabled ? "月份对比（后台计算中）" : "月份对比（未开启）";
+    setAnalysisMessage("滚动窗口与已启用的月份对比正在后台计算。");
+  } else if (summary?.analysis_status === "failed") {
+    setAnalysisMessage(`扩展分析失败：${humanizeError(summary.analysis_error || "未知错误")}`, true);
+  } else {
+    setAnalysisMessage(rollingPeriods.length ? "扩展分析已完成。" : "当前区间不足一个完整滚动窗口。");
+    if (!analysisEnabled && !monthScenarios.length) $("recordTabMonths").textContent = "月份对比（未开启）";
   }
 
   const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || []);
@@ -3057,7 +3263,7 @@ function renderBacktestRecords(summary, rebalance, trades) {
       标的名称: tradeAssetName(row.symbol),
       方向: SIDE_NAMES[row.side] || row.side,
       份额: row.quantity,
-      价格: row.price,
+      价格: { kind: "number", raw: row.price, decimals: 4 },
       成交额: row.gross_amount,
       费用: row.fee,
       币种: CURRENCY_NAMES[row.currency] || row.currency,
@@ -3380,16 +3586,31 @@ function scheduleArchiveRefresh(options = {}, delayMs = 80) {
 }
 
 async function deleteHistoryRun(runId) {
+  if (runInProgress || pendingReplayRunId) { showToast("请等待当前回测或回放完成后再删除记录"); return; }
   if (!runId || !window.confirm("删除这组回测及其榜单记录？此操作不可恢复。")) return;
   try {
     await api(`/api/backtest/${encodeURIComponent(runId)}`, { method: "DELETE", retry: true });
     if (currentRunId === runId) {
+      resultRequestVersion += 1;
+      activeAnalysisWatch += 1;
       currentRunId = null;
       currentSummary = null;
       currentRunConfig = null;
       resetDailyPnlChart();
       resetStrategyDiagnostics();
       resetAssetComovementChart();
+      exportRunId = null;
+      $("csvExportDialog")?.close();
+      Object.keys(pendingChartOptions).forEach((key) => delete pendingChartOptions[key]);
+      Object.values(charts).forEach((chart) => chart.clear());
+      document.querySelectorAll(".chart-view .chart").forEach((host) => {
+        if (!charts[host.id]) host.innerHTML = "";
+      });
+      renderInitialSummary();
+      ["rollingTable", "monthsTable", "rebalanceTable", "tradesTable"].forEach((id) => renderTable(id, [], []));
+      [["recordTabRolling", "滚动窗口"], ["recordTabMonths", "月份对比"], ["recordTabRebalance", "调仓记录"], ["recordTabTrades", "交易流水"]]
+        .forEach(([id, label]) => { $(id).textContent = label; });
+      setAnalysisMessage();
     }
     if (comparisonRunId === runId) comparisonRunId = null;
     await refreshBacktestArchiveSafely({ includeLeaderboard: true });
@@ -3400,10 +3621,18 @@ async function deleteHistoryRun(runId) {
 }
 
 async function replayHistoryRun(runId) {
+  if (runInProgress) { showToast("请等待当前回测完成后再回放记录"); return; }
+  const requestVersion = ++resultRequestVersion;
+  pendingReplayRunId = runId;
+  activeAnalysisWatch += 1;
   setMessage("正在回放已保存的回测结果...");
   try {
     const chartReady = loadChartLibrary().catch((error) => console.warn(error));
     const entry = await api(`/api/backtest/${encodeURIComponent(runId)}`);
+    if (requestVersion !== resultRequestVersion) return;
+    const { series, rebalance, trades } = await loadBacktestResultSections(entry.run_id);
+    await chartReady;
+    if (requestVersion !== resultRequestVersion) return;
     config = JSON.parse(JSON.stringify(entry.config));
     currentRunConfig = JSON.parse(JSON.stringify(entry.config));
     renderControls();
@@ -3411,16 +3640,13 @@ async function replayHistoryRun(runId) {
     resetStrategyDiagnostics();
     resetAssetComovementChart();
     currentRunId = entry.run_id;
-    renderSummary(entry.summary);
-    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, async (series) => {
-      await chartReady;
-      renderSummary(deriveSummary(entry.summary, series));
-      renderCharts(series);
-    });
+    renderSummary(deriveSummary(entry.summary, series));
+    renderCharts(series);
     renderBacktestRecords(entry.summary, rebalance, trades);
     if (activeChartId === "strategyDiagnosticsChart") loadStrategyDiagnostics().catch(() => {});
     scheduleArchiveRefresh({ includeLeaderboard: activeArchiveView === "leaderboard" });
     setHistoryPanel(false);
+    selectRecordPanel("rebalancePanel");
     if (["pending", "running"].includes(entry.summary?.analysis_status)) {
       setMessage("已显示主体结果；滚动窗口与月份对比正在后台补齐");
       watchBacktestAnalysis(currentRunId, rebalance, trades);
@@ -3428,16 +3654,18 @@ async function replayHistoryRun(runId) {
       setMessage("已回放保存的回测结果");
     }
   } catch (error) {
-    setMessage(`回放失败：${humanizeError(error.message)}`, true);
+    if (requestVersion === resultRequestVersion) setMessage(`回放失败：${humanizeError(error.message)}`, true);
+  } finally {
+    if (requestVersion === resultRequestVersion) pendingReplayRunId = null;
   }
 }
 
 async function runBacktest() {
-  const button = $("runBtn");
-  const buttonLabel = button.querySelector("span");
-  button.disabled = true;
-  button.classList.add("is-running");
-  if (buttonLabel) buttonLabel.textContent = "正在回测";
+  if (runInProgress || !config || !validateControls()) return;
+  const requestVersion = ++resultRequestVersion;
+  pendingReplayRunId = null;
+  activeAnalysisWatch += 1;
+  setRunBusy(true);
   if (isMobileLayout()) setParameterPanel(false);
   setMessage("正在提交回测任务...");
   try {
@@ -3453,21 +3681,20 @@ async function runBacktest() {
     });
     setMessage(job.message || "回测任务已进入队列");
     const result = await waitForBacktestJob(job.job_id);
+    const { series, rebalance, trades } = await loadBacktestResultSections(result.run_id, null, result.chart || null);
+    await chartReady;
+    if (requestVersion !== resultRequestVersion) return;
     resetDailyPnlChart();
     resetStrategyDiagnostics();
     resetAssetComovementChart();
     currentRunId = result.run_id;
     currentRunConfig = JSON.parse(JSON.stringify(submittedFullConfig));
     if (result.status) renderStatus(result.status);
-    renderSummary(result.summary);
-    let finalSummary = result.summary;
-    const { rebalance, trades } = await loadBacktestResultSections(currentRunId, async (computedSeries) => {
-      await chartReady;
-      finalSummary = deriveSummary(result.summary, computedSeries);
-      renderSummary(finalSummary);
-      renderCharts(computedSeries);
-    }, result.chart || null);
+    const finalSummary = deriveSummary(result.summary, series);
+    renderSummary(finalSummary);
+    renderCharts(series);
     renderBacktestRecords(finalSummary, rebalance, trades);
+    selectRecordPanel("rebalancePanel");
     if (activeChartId === "strategyDiagnosticsChart") loadStrategyDiagnostics().catch(() => {});
     scheduleArchiveRefresh({ includeLeaderboard: false });
     const analysisPending = Boolean(result.analysis_pending) || ["pending", "running"].includes(result.summary?.analysis_status);
@@ -3483,24 +3710,28 @@ async function runBacktest() {
       setMessage("数据充足，回测完成");
     }
   } catch (error) {
-    setMessage(humanizeError(error.message), true);
+    if (requestVersion === resultRequestVersion) setMessage(humanizeError(error.message), true);
   } finally {
-    button.disabled = false;
-    button.classList.remove("is-running");
-    if (buttonLabel) buttonLabel.textContent = "运行回测";
+    setRunBusy(false);
   }
 }
 
 function setParameterPanel(open) {
+  const wasOpen = document.body.classList.contains("parameters-open");
   if (open) setHistoryPanel(false);
+  if (open && !document.body.classList.contains("parameters-open")) drawerReturnFocus = document.activeElement;
   document.body.classList.toggle("parameters-open", open);
   [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => {
     button.setAttribute("aria-expanded", open ? "true" : "false");
   });
+  syncDrawerAccessibility();
   if (open) window.requestAnimationFrame(() => $("closeParameterPanel")?.focus());
+  else if (wasOpen) drawerReturnFocus?.focus();
 }
 
 function setHistoryPanel(open) {
+  const wasOpen = isMobileLayout() ? document.body.classList.contains("history-open") : !document.body.classList.contains("history-collapsed");
+  if (open) drawerReturnFocus = document.activeElement;
   if (open) {
     document.body.classList.remove("parameters-open");
     [$('parameterToggle'), $('mobileParameterToggle')].filter(Boolean).forEach((button) => button.setAttribute("aria-expanded", "false"));
@@ -3515,7 +3746,40 @@ function setHistoryPanel(open) {
     : !document.body.classList.contains("history-collapsed");
   [$('historyToggle'), $('mobileHistoryToggle')].filter(Boolean).forEach((button) => button.setAttribute("aria-expanded", expanded ? "true" : "false"));
   if (expanded && !recentArchiveLoaded) scheduleArchiveRefresh({ includeLeaderboard: activeArchiveView === "leaderboard" }, 0);
+  syncDrawerAccessibility();
   if (expanded) window.requestAnimationFrame(() => $("closeHistoryPanel")?.focus());
+  else if (wasOpen) drawerReturnFocus?.focus();
+}
+
+function syncDrawerAccessibility() {
+  const mobile = isMobileLayout();
+  const parametersOpen = mobile && document.body.classList.contains("parameters-open");
+  const historyOpen = mobile ? document.body.classList.contains("history-open") : !document.body.classList.contains("history-collapsed");
+  $("parameterPanel")?.toggleAttribute("inert", historyOpen || (mobile && !parametersOpen));
+  $("historyPanel")?.toggleAttribute("inert", !historyOpen);
+  document.querySelector("main")?.toggleAttribute("inert", parametersOpen || historyOpen);
+  if (!document.body.classList.contains("identity-locked")) {
+    document.querySelector(".mobile-app-bar")?.toggleAttribute("inert", mobile && (parametersOpen || historyOpen));
+  }
+  [$("parameterToggle"), $("mobileParameterToggle")].filter(Boolean).forEach((button) => button.setAttribute("aria-expanded", String(parametersOpen)));
+  [$("historyToggle"), $("mobileHistoryToggle")].filter(Boolean).forEach((button) => button.setAttribute("aria-expanded", String(historyOpen)));
+}
+
+function trapOverlayFocus(event) {
+  if (event.key !== "Tab") return;
+  const overlay = !$("identityGate")?.hidden ? $("identityGate")
+    : isMobileLayout() && document.body.classList.contains("parameters-open") ? $("parameterPanel")
+      : (isMobileLayout() ? document.body.classList.contains("history-open") : !document.body.classList.contains("history-collapsed")) ? $("historyPanel") : null;
+  if (!overlay) return;
+  const items = [...overlay.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary, a[href], [tabindex="0"]')]
+    .filter((item) => item.tabIndex >= 0 && item.getClientRects().length && !item.closest("[hidden], [inert]"));
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) {
+    event.preventDefault(); last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {
+    event.preventDefault(); first.focus();
+  }
 }
 
 function setupTabs(selector, dataKey, selectPanel) {
@@ -3537,6 +3801,18 @@ function setupTabs(selector, dataKey, selectPanel) {
 }
 
 function setupUiInteractions() {
+  window.addEventListener("resize", syncDrawerAccessibility);
+  setRunBusy(false);
+  setupTabs("[data-parameter-tab]", "parameterTab", selectParameterStep);
+  selectParameterStep("scope");
+  $("parameterPanel")?.addEventListener("input", () => { if (config) updateResultContext(); });
+  $("parameterPanel")?.addEventListener("change", () => { if (config) updateResultContext(); });
+  $("identityKeyInput")?.addEventListener("input", (event) => event.target.setCustomValidity(""));
+  ["leaderboardStartDate", "leaderboardEndDate", "csvExportStart", "csvExportEnd"].forEach((id) => {
+    $(id)?.addEventListener("input", (event) => event.target.setCustomValidity(""));
+  });
+  $("retryAnalysisBtn")?.addEventListener("click", retryBacktestAnalysis);
+  document.addEventListener("keydown", trapOverlayFocus);
   $("identityForm")?.addEventListener("submit", saveIdentityKey);
   [$('identityKeyButton'), $('mobileIdentityKeyButton')].filter(Boolean).forEach((button) => {
     button.addEventListener("click", () => showIdentityGate(false));
@@ -3600,7 +3876,7 @@ function setupUiInteractions() {
       return;
     }
     if (document.body.classList.contains("parameters-open")) setParameterPanel(false);
-    if (document.body.classList.contains("history-open")) setHistoryPanel(false);
+    if (document.body.classList.contains("history-open") || !document.body.classList.contains("history-collapsed")) setHistoryPanel(false);
   });
   setupTabs("[data-chart-tab]", "chartTab", selectChart);
   document.querySelectorAll("[data-daily-pnl-scale]").forEach((button) => {
@@ -3633,6 +3909,7 @@ function setupUiInteractions() {
   selectChart(activeChartId);
   selectRecordPanel("statusPanel");
   selectArchiveView(activeArchiveView);
+  syncDrawerAccessibility();
 }
 
 let backgroundRecoveryTimer = null;
@@ -3658,9 +3935,11 @@ async function init() {
   config = await api("/api/default-config");
   defaultConfigSnapshot = JSON.parse(JSON.stringify(config));
   renderControls();
-  $("runBtn").addEventListener("click", runBacktest);
+  ["runBtn", "mobileRunBtn", "workspaceRunBtn"].forEach((id) => $(id)?.addEventListener("click", runBacktest));
+  setRunBusy(false);
   $("runBtn").addEventListener("pointerenter", () => loadChartLibrary().catch(() => {}), { once: true });
   window.addEventListener("resize", queueChartResize);
+  syncDrawerAccessibility();
   window.addEventListener("online", scheduleBackgroundApiRecovery);
   window.addEventListener("pageshow", scheduleBackgroundApiRecovery);
   document.addEventListener("visibilitychange", scheduleBackgroundApiRecovery);

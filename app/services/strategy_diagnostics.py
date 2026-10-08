@@ -274,6 +274,7 @@ def _asset_daily_return_records(conn, config: dict[str, Any]) -> tuple[list[dict
         end,
         share_splits=configured_share_splits(sleeves),
         share_scale_maps=share_scale_maps,
+        asset_definitions=sleeves,
     )
     attach_proxy_price_maps(price_maps, sleeves)
     attach_nontradable_route_expense_drag(price_maps, sleeves)
@@ -707,6 +708,7 @@ def _raw_route_price_rows(
         end_date,
         share_splits=configured_share_splits(selected_assets),
         share_scale_maps=share_scale_maps,
+        asset_definitions=selected_assets,
     )
     attach_proxy_price_maps(price_maps, selected_assets)
     attach_nontradable_route_expense_drag(price_maps, selected_assets)

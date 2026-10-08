@@ -17,6 +17,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 from app.config import DEFAULT_ASSETS, asset_price_start_date, asset_trade_start_date, required_fx_pairs_for_assets
 from app.db import insert_many, upsert_assets, utc_now
+from app.services.price_data import INDEX_PROXY_PRICE_SOURCES
 from app.services.calendar import (
     business_days, calendar_missing_years, daterange, market_business_days,
     market_day_on_or_before, parse_date,
@@ -47,13 +48,6 @@ CN_PRICE_SOURCE_PRIORITY = {
 PRICE_CROSS_SOURCE_MAX_DEVIATION = 0.15
 PRICE_ISOLATED_JUMP_THRESHOLD = 0.70
 PRICE_NEIGHBOR_MAX_DEVIATION = 0.25
-INDEX_PROXY_PRICE_SOURCES = {
-    "csindex:index_perf",
-    "tushare:index_daily",
-    "datasrc:index",
-    "sohu:index_kline",
-    "eastmoney:index_kline",
-}
 DIVIDEND_SOURCE_PRIORITY = {
     "tushare:fund_div": 0,
     "eastmoney:fund_dividend": 1,
@@ -3447,7 +3441,7 @@ def sync_all(
                 raise_if_cancelled(should_cancel)
                 try:
                     fallback_range_end = range_end
-                    if authoritative_fallback:
+                    if authoritative_fallback or asset.get("asset_type") == "cn_etf":
                         fallback_range_end = min(
                             parse_date(range_end), primary_start - timedelta(days=1)
                         ).isoformat()
@@ -3466,7 +3460,7 @@ def sync_all(
                         row
                         for row in fallback_rows
                         if row["trade_date"] in missing_price_dates
-                        and (not authoritative_fallback or parse_date(row["trade_date"]) < primary_start)
+                        and (not (authoritative_fallback or asset.get("asset_type") == "cn_etf") or parse_date(row["trade_date"]) < primary_start)
                     ]
                     if fallback_rows:
                         range_prices = merge_rows_by_trade_date(range_prices, fallback_rows)

@@ -1153,7 +1153,7 @@ class DbAndSyncTests(unittest.TestCase):
         self.assertEqual(result["inserted"]["prices"], 2)
         self.assertNotIn("prices:VOO", result["missing_data"])
 
-    def test_targeted_cn_price_sync_uses_configured_price_fallback(self) -> None:
+    def test_targeted_cn_price_sync_rejects_configured_post_listing_fallback(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         enable_assets(cfg, "510300.SH")
         original_fetch_cn = data_sync_module.fetch_cn_fund_prices
@@ -1167,25 +1167,7 @@ class DbAndSyncTests(unittest.TestCase):
             raise data_sync_module.SyncWarning("source unavailable")
 
         def fake_fallback(asset, range_start, range_end, target_rows, token=""):
-            self.assertEqual(asset["symbol"], "510300.SH")
-            self.assertEqual((range_start, range_end), ("2020-01-10", "2020-01-10"))
-            self.assertTrue(target_rows)
-            self.assertEqual(token, "")
-            return [
-                {
-                    "symbol": "510300.SH",
-                    "trade_date": "2020-01-10",
-                    "open": 3.1,
-                    "high": 3.1,
-                    "low": 3.1,
-                    "close": 3.1,
-                    "adj_close": 3.1,
-                    "volume": 0.0,
-                    "amount": 0.0,
-                    "currency": "CNY",
-                    "source": "test:price_fallback",
-                }
-            ]
+            self.fail("A listed ETF quote must not be filled with a proxy")
 
         try:
             data_sync_module.fetch_cn_fund_prices = fail_source
@@ -1206,9 +1188,9 @@ class DbAndSyncTests(unittest.TestCase):
             data_sync_module.fetch_cn_yahoo_prices = original_yahoo
             data_sync_module.fetch_price_fallback_rows = original_fallback
 
-        self.assertEqual(result["inserted"]["prices"], 1)
-        self.assertNotIn("prices:510300.SH", result["missing_data"])
-        self.assertEqual(dict(row), {"close": 3.1, "source": "test:price_fallback"})
+        self.assertEqual(result["inserted"]["prices"], 0)
+        self.assertIn("prices:510300.SH", result["missing_data"])
+        self.assertIsNone(row)
 
     def test_hs300_fallback_nav_is_scaled_to_target_price_level(self) -> None:
         cfg = normalize_config({})

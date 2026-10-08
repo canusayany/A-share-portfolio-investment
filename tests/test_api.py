@@ -22,6 +22,7 @@ from app.identity import (
 )
 from app.main import create_server, rebalance_display_payload
 from app.services.calendar import business_days
+from app.services.backtest_engine import BACKTEST_ENGINE_VERSION
 from tests.helpers import build_synced_db, seed_fixture_data, temp_db_path
 
 
@@ -156,6 +157,7 @@ class ApiTests(unittest.TestCase):
             "assets": [{"symbol": "TEST", "name": "TEST", "enabled": True, "target_weight": 1.0}],
         }
         summary = {
+            "engine_version": BACKTEST_ENGINE_VERSION,
             "start_date": "2020-01-01",
             "end_date": "2020-12-31",
             "annualized_return": 0.12,
@@ -350,6 +352,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn("year_profit_cny", rebalance["rebalance"][0]["payload"])
         self.assertIn("year_profit_on_year_start", rebalance["rebalance"][0]["payload"])
         self.assertIn("year_profit_on_original_capital", rebalance["rebalance"][0]["payload"])
+        self.assertEqual(rebalance["rebalance"][0]["payload"]["asset_performance_version"], 3)
+        self.assertEqual(rebalance["rebalance"][0]["payload"]["asset_return_basis"], "profit_on_start_position_value")
+        self.assertIn("asset_profit_basis", rebalance["rebalance"][0]["payload"])
         self.assertIn("total_asset_before", rebalance["rebalance"][0])
         self.assertTrue(chart["weights"])
         self.assertEqual(set(chart["values"]), set(chart["weights"]))
@@ -667,6 +672,7 @@ class ApiTests(unittest.TestCase):
                     "assets": [{"symbol": run_id, "name": run_id, "enabled": True, "target_weight": 1.0}],
                 }
                 summary = {
+                    "engine_version": BACKTEST_ENGINE_VERSION,
                     "start_date": "2020-01-01",
                     "end_date": "2021-12-31",
                     "annualized_return": 0.10,
@@ -815,7 +821,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn("20260927-trading-calendar-1", detail)
+        self.assertIn("20261008-workflow-51", detail)
         self.assertIn("策略诊断", detail)
         self.assertIn("导出CSV", detail)
         self.assertIn("时间窗口", detail)

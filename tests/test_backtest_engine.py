@@ -255,7 +255,7 @@ class BacktestEngineTests(unittest.TestCase):
             self.assertAlmostEqual(attributed_profit, economic_profit, places=6)
             previous_total = row["total_asset_cny"]
         rebalance_payload = json.loads(rebalances[0]["payload_json"])
-        self.assertEqual(rebalance_payload["asset_performance_version"], 2)
+        self.assertEqual(rebalance_payload["asset_performance_version"], 3)
         self.assertIn("asset_performance", rebalance_payload)
         self.assertIn("REPO", rebalance_payload["asset_performance"])
         self.assertIn("profit_cny", rebalance_payload["asset_performance"]["REPO"])
