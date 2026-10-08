@@ -6,6 +6,7 @@ const appPath = '/backtest/permanent-investment/';
 const fixtures = () => JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../output/playwright/fixture.json'), 'utf8')).runs;
 const browserErrors = new WeakMap();
 const primaryColumns = ['执行日', '当年盈亏', '当年最大回撤'];
+const leadingColumns = [...primaryColumns, '当年收益（按上年度总资产）', '当年总资产', '当年收益（按原始资金）'];
 
 async function replayRun(page, runId) {
   const toggle = page.locator(page.viewportSize().width <= 1100 ? '#mobileHistoryToggle' : '#historyToggle');
@@ -65,7 +66,7 @@ test('rebalance key metrics are immediately readable and keep date and horizonta
   const table = page.locator('#rebalanceTable');
   const firstRow = table.locator('tbody tr').first();
   const headers = table.locator('thead th');
-  expect((await headers.allTextContents()).slice(0, 3)).toEqual(primaryColumns);
+  expect((await headers.allTextContents()).slice(0, leadingColumns.length)).toEqual(leadingColumns);
   await assertPrimaryColumnsFit(table);
 
   const dateButton = firstRow.locator('[data-rebalance-date]');

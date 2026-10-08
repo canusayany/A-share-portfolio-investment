@@ -59,7 +59,7 @@ class ResponsiveUiContractTests(unittest.TestCase):
         self.assertIn("@media (max-height: 600px) and (max-width: 1100px)", STYLES)
 
     def test_responsive_release_cache_busts_both_static_assets(self) -> None:
-        release = "20261008-performance-1"
+        release = "20261008-columns-1"
         self.assertEqual(INDEX.count(release), 2)
 
     def test_export_error_toast_is_fixed_and_safe_area_aware(self) -> None:

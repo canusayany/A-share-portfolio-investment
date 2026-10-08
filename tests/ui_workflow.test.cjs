@@ -50,7 +50,7 @@ test("rebalance records prioritize annual profit and drawdown without inventing 
   ];
   h.context.__rows = rows;
   const output = h.evaluate("rebalanceDisplayRows(__rows)");
-  assert.deepEqual(Array.from(output.columns).slice(0,3), ["执行日", "当年盈亏", "当年最大回撤"]);
+  assert.deepEqual(Array.from(output.columns).slice(0,6), ["执行日", "当年盈亏", "当年最大回撤", "当年收益（按上年度总资产）", "当年总资产", "当年收益（按原始资金）"]);
   assert.equal(output.rows.length, 2);
   h.context.__record = output.rows[0];
   assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /123.46万/);

@@ -3049,7 +3049,7 @@ function rebalanceDisplayRows(rows) {
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["执行日", "当年盈亏", "当年最大回撤", "检查结果", "当年收益（按上年度总资产）", "当年总资产", "成交金额", "成交笔数", "当年手续费", "收益年度", "决策日", "当年收益（按原始资金）"];
+  const baseColumns = ["执行日", "当年盈亏", "当年最大回撤", "当年收益（按上年度总资产）", "当年总资产", "当年收益（按原始资金）", "检查结果", "成交金额", "成交笔数", "当年手续费", "收益年度", "决策日"];
   const assetColumns = orderedSymbols.map(rebalanceAssetColumnName);
   const displayRows = visibleRows.map((row) => {
     const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
