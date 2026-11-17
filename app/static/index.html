@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a55'/%3E%3Cpath d='M7 23l6-8 5 3 7-10' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="static/styles.css?v=20261008-columns-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20261117-rebalance-records" />
   </head>
   <body class="history-collapsed">
     <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
@@ -516,20 +516,21 @@
           </div>
           <div id="rollingPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRolling" hidden>
             <div class="table-context"><span>每个窗口都会按当前配置重新建仓</span><small>默认按年盈利/回撤比排序，点击表头可切换</small></div>
-            <div class="table-scroll"><table id="rollingTable"></table></div>
+            <div class="table-scroll record-table-scroll" role="region" aria-label="滚动窗口表格" tabindex="0"><table id="rollingTable"></table></div>
           </div>
           <div id="monthsPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabMonths" hidden>
             <div class="table-context"><span>绿色更优，黄色居中，红色需关注</span><small>默认按年盈利/回撤比排序，点击表头可切换</small></div>
-            <div class="table-scroll"><table id="monthsTable"></table></div>
+            <div class="table-scroll record-table-scroll" role="region" aria-label="月份对比表格" tabindex="0"><table id="monthsTable"></table></div>
           </div>
           <div id="rebalancePanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRebalance">
-            <div class="table-context rebalance-table-context"><span>先看当年盈亏与回撤，点击执行日查看调仓详情。</span><small>年度指标截至决策日；盈亏已剔除消费等外部收支。手机大额以万／亿简写，其余字段可横向滑动。</small></div>
-            <div class="table-scroll"><table id="rebalanceTable"></table></div>
+            <div class="table-context rebalance-table-context"><span>显示全部周期检查和自动换标。点击日期查看明细与当日交易。</span><small>年度指标截至决策日，盈亏已剔除外部收支。成交金额与笔数按该条记录统计。手机可横向滑动查看完整字段。</small></div>
+            <div class="table-scroll record-table-scroll" role="region" aria-label="再平衡记录表格" tabindex="0"><table id="rebalanceTable"></table></div>
           </div>
           <div id="tradesPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabTrades" hidden>
-            <div id="tradeDateFilter" class="trade-date-filter" hidden><span id="tradeDateFilterLabel"></span><button id="clearTradeDateFilter" type="button" class="button button-secondary">清除日期筛选</button></div><div class="table-scroll"><table id="tradesTable"></table></div>
+            <div id="tradeDateFilter" class="trade-date-filter" hidden><span id="tradeDateFilterLabel"></span><button id="clearTradeDateFilter" type="button" class="button button-secondary">清除日期筛选</button></div>
+            <div class="table-scroll record-table-scroll" role="region" aria-label="交易流水表格" tabindex="0"><table id="tradesTable"></table></div>
           </div>
-          <div class="table-hint">表格可横向滚动查看完整字段</div>
+          <div class="table-hint">在表格内纵向滚动查看记录，横向滚动查看完整字段</div>
         </section>
       </main>
 
@@ -606,6 +607,6 @@
         </div>
       </form>
     </dialog>
-  <script src="static/app.js?v=20261008-columns-1"></script>
+    <script src="static/app.js?v=20261117-rebalance-records"></script>
   </body>
 </html>

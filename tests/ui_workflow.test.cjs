@@ -46,12 +46,18 @@ test("rebalance records prioritize annual profit and drawdown without inventing 
   const rows = [
     {rebalance_date:"2024-01-02", fee_cny:3, payload:{event_type:"scheduled", rebalanced:true, decision_date:"2023-12-29", year_label:2023, year_profit_cny:1234567, year_profit_on_year_start:1.2, year_profit_on_original_capital:0, period_max_drawdown:-.43, executed_trade_count:2}},
     {rebalance_date:"2024-02-01", payload:{rebalanced:true, year_profit_cny:-100, year_max_drawdown:0}},
-    {rebalance_date:"2024-03-01", payload:{rebalance_reason:"within_band"}},
+    {
+      rebalance_date: "2024-03-01", turnover_cny: 0,
+      payload: {
+        event_type: "scheduled", rebalance_reason: "within_band", rebalance_action: "record_only",
+        threshold_exceeded: false, rebalanced: false, executed_trade_count: 0, decision_date: "2024-02-29",
+      },
+    },
   ];
   h.context.__rows = rows;
   const output = h.evaluate("rebalanceDisplayRows(__rows)");
   assert.deepEqual(Array.from(output.columns).slice(0,6), ["执行日", "当年盈亏", "当年最大回撤", "当年收益（按上年度总资产）", "当年总资产", "当年收益（按原始资金）"]);
-  assert.equal(output.rows.length, 2);
+  assert.equal(output.rows.length, 3);
   h.context.__record = output.rows[0];
   assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /123.46万/);
   assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /2023年 · 截至12-29/);
@@ -65,6 +71,74 @@ test("rebalance records prioritize annual profit and drawdown without inventing 
   h.context.__record = output.rows[1];
   assert.match(h.evaluate('formatCell(__record["当年最大回撤"])'), /0.00%/);
   assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /−￥100/);
+  h.context.__record = output.rows[2];
+  assert.match(output.rows[2]["检查结果"], /带内.*无需调仓/);
+  assert.equal(output.rows[2]["决策日"], "2024-02-29");
+  assert.equal(h.evaluate('formatCell(__record["成交笔数"])'), "0");
+  assert.equal(h.evaluate('formatCell(__record["成交金额"])'), "￥0");
+
+  h.context.__table = output;
+  h.evaluate('renderTable("rebalanceTable", __table.columns, __table.rows, { newestFirst: true })');
+  const eventDates = [...h.el("rebalanceTable").innerHTML.matchAll(/data-rebalance-date="([^"]+)"/g)];
+  assert.deepEqual(eventDates.map((match) => match[1]), ["2024-03-01", "2024-02-01", "2024-01-02"]);
+});
+
+test("automatic replacements appear as their own rebalance records with only replacement trades", () => {
+  const h = harness({ stubBacktestRecords: false });
+  h.assign("config", fixtureConfig());
+  h.replace("selectChart", () => {});
+  h.replace("focusRebalanceChart", () => {});
+  const rows = [
+    {
+      rebalance_date: "2021-01-04", turnover_cny: 0, fee_cny: 0,
+      payload: { event_type: "scheduled", rebalance_reason: "within_band", rebalance_action: "record_only", executed_trade_count: 0 },
+    },
+    {
+      rebalance_date: "2024-01-02", turnover_cny: 120, fee_cny: 4,
+      payload: { event_type: "scheduled", rebalance_reason: "scheduled_open", rebalanced: true, executed_trade_count: 1 },
+    },
+  ];
+  const trades = [
+    { trade_date: "2021-01-04", symbol: "518880.SH", side: "SELL", gross_amount: 90, fee: 2, currency: "CNY", reason: "asset_replacement" },
+    { trade_date: "2021-01-04", symbol: "518850.SH", side: "BUY", gross_amount: 80, fee: 3, currency: "CNY", reason: "asset_replacement" },
+    { trade_date: "2021-01-04", symbol: "512890.SH", side: "BUY", gross_amount: 999, fee: 11, currency: "CNY", reason: "dip_buy" },
+    { trade_date: "2023-06-13", symbol: "CBA21801", side: "SELL", gross_amount: 400, fee: 4, currency: "CNY", reason: "asset_replacement" },
+    { trade_date: "2023-06-13", symbol: "511090.SH", side: "BUY", gross_amount: 350, fee: 5, currency: "CNY", reason: "asset_replacement" },
+    { trade_date: "2024-01-02", symbol: "512890.SH", side: "BUY", gross_amount: 120, fee: 4, currency: "CNY", reason: "rebalance" },
+  ];
+  h.context.__rows = rows;
+  h.context.__trades = trades;
+  const output = h.evaluate("rebalanceDisplayRows(__rows, __trades)");
+  assert.equal(output.rows.length, 4);
+  assert.equal(rows.length, 2, "rendering should leave the saved periodic checks intact");
+  const goldSwitch = output.rows.find((row) => /自动换标.*518880.*518850/.test(row["检查结果"]));
+  const bondSwitch = output.rows.find((row) => /自动换标.*CBA21801.*511090/.test(row["检查结果"]));
+  assert.equal(goldSwitch["执行日"].raw, "2021-01-04");
+  assert.equal(bondSwitch["执行日"].raw, "2023-06-13");
+  assert.equal(goldSwitch["成交笔数"].raw, 2);
+  assert.equal(goldSwitch["成交金额"], "￥170");
+  assert.equal(bondSwitch["成交金额"], "￥750");
+  assert.equal(goldSwitch["当年盈亏"], "—");
+  assert.equal(goldSwitch["当年总资产"], "—");
+  const januaryCheck = output.rows.find((row) => /带内.*无需调仓/.test(row["检查结果"]));
+  assert.equal(januaryCheck["成交笔数"].raw, 0);
+  assert.equal(januaryCheck["成交金额"], "￥0");
+
+  h.evaluate("renderBacktestRecords({}, { rebalance: __rows }, { trades: __trades })");
+  assert.equal(h.el("recordTabRebalance").textContent, "再平衡记录（4）");
+  const dates = [...h.el("rebalanceTable").innerHTML.matchAll(/data-rebalance-date="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(dates, ["2024-01-02", "2023-06-13", "2021-01-04", "2021-01-04"]);
+  h.evaluate('selectRebalanceEvent("2021-01-04")');
+  const detail = h.el("rebalanceEventDetail");
+  assert.equal(detail.hidden, false);
+  const entries = detail.innerHTML.split('class="event-detail-entry"').slice(1);
+  const checkDetail = entries.find((entry) => entry.includes("带内，无需调仓"));
+  const replacementDetail = entries.find((entry) => entry.includes("自动换标"));
+  assert.match(checkDetail, /成交金额 ￥0/);
+  assert.match(replacementDetail, /518880[\s\S]*518850/);
+  assert.match(replacementDetail, /成交金额 ￥170.*手续费 ￥5/);
+  assert.doesNotMatch(replacementDetail, /999/);
+  assert.match(detail.innerHTML, /查看当天 3 笔交易/);
 });
 
 test("research profitability shows positive negative and flat counts while no cycles stays unavailable", () => {
@@ -151,7 +225,7 @@ function fixtureConfig() {
   };
 }
 
-function harness() {
+function harness({ stubBacktestRecords = true } = {}) {
   const elements = new Map();
   const selectors = new Map();
   const downloads = [];
@@ -203,7 +277,7 @@ function harness() {
   replace("selectRecordPanel", () => {});
   replace("renderControls", () => {});
   replace("renderCharts", () => rendered.push(evaluate("currentRunId")));
-  replace("renderBacktestRecords", () => {});
+  if (stubBacktestRecords) replace("renderBacktestRecords", () => {});
   replace("loadBacktestResultSections", async () => ({ series: [], rebalance: { rebalance: [] }, trades: { trades: [] } }));
   evaluate("renderSummary = (summary) => { currentSummary = summary; }; ");
 

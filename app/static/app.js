@@ -209,7 +209,7 @@ const DATA_KIND_NAMES = {
 };
 
 const SIDE_NAMES = { BUY: "买入", SELL: "卖出" };
-const REASON_NAMES = { rebalance: "再平衡", asset_replacement: "指数代理切换ETF", liquidity_shortfall: "补足现金", dip_buy: "逢低补仓", dip_buy_funding: "补仓资金", dip_buy_recovery: "补仓回本卖出" };
+const REASON_NAMES = { rebalance: "再平衡", asset_replacement: "自动换标", liquidity_shortfall: "补足现金", dip_buy: "逢低补仓", dip_buy_funding: "补仓资金", dip_buy_recovery: "补仓回本卖出" };
 const CURRENCY_NAMES = { CNY: "人民币", USD: "美元", HKD: "港币" };
 const REBALANCE_FREQUENCY_NAMES = {
   daily: "每日",
@@ -880,7 +880,7 @@ function updateRebalanceExplanation() {
   const summary = currentSummary;
   host.hidden = !currentRunId;
   host.textContent = summary?.rebalance_check_count != null
-    ? `周期检查 ${summary.rebalance_check_count} 次 · 实际调仓 ${summary.rebalance_trade_count} 次 · 带内无需调仓 ${summary.rebalance_within_band_count ?? 0} 次 · 成交条件不足 ${summary.rebalance_constrained_count ?? 0} 次。首次建仓单独计算；带内无需调仓记录已隐藏。`
+    ? `周期检查 ${summary.rebalance_check_count} 次 · 实际调仓 ${summary.rebalance_trade_count} 次 · 带内无需调仓 ${summary.rebalance_within_band_count ?? 0} 次 · 成交条件不足 ${summary.rebalance_constrained_count ?? 0} 次。首次建仓单独计算。`
     : currentRunId ? "此历史版本未区分周期检查与实际成交，请重新运行以查看调仓原因。" : "运行后将分别显示周期检查与实际调仓次数。";
 }
 
@@ -2962,7 +2962,7 @@ function renderTable(id, columns, rows, options = {}) {
 
 function formatCell(value) {
   if (value && typeof value === "object" && value.kind === "rebalance-positive") return rebalancePositiveMarkup(value);
-  if (value && typeof value === "object" && value.kind === "event-date") return `<button type="button" class="event-date-button" data-rebalance-date="${escapeHtml(value.raw)}" aria-label="查看 ${escapeHtml(value.raw)} 调仓详情并定位图表">${escapeHtml(value.raw)}</button>`;
+  if (value && typeof value === "object" && value.kind === "event-date") return `<button type="button" class="event-date-button" data-rebalance-date="${escapeHtml(value.raw)}" aria-label="查看 ${escapeHtml(value.raw)} ${escapeHtml(value.label || "调仓")}详情并定位图表">${escapeHtml(value.raw)}</button>`;
   if (value && typeof value === "object" && value.kind === "money") return value.raw == null ? "—" : escapeHtml(`￥${fmtMoney(value.raw)}`);
   if (value && typeof value === "object" && value.kind === "number") {
     return escapeHtml(fmtNum(value.raw, value.decimals ?? 2));
@@ -3035,11 +3035,48 @@ function rebalanceCashEquivalentSymbols() {
   return symbols;
 }
 
-function rebalanceDisplayRows(rows) {
-  const visibleRows = rows.filter((row) => rebalanceActionLabel(row.payload) !== "带内，无需调仓");
+function replacementEvents(trades) {
+  const byDate = new Map();
+  for (const trade of trades) {
+    if (trade.reason !== "asset_replacement" || !trade.trade_date) continue;
+    if (!byDate.has(trade.trade_date)) byDate.set(trade.trade_date, []);
+    byDate.get(trade.trade_date).push(trade);
+  }
+  return [...byDate].map(([date, trades]) => ({ rebalance_date: date, replacement_trades: trades }));
+}
+
+function replacementDescription(trades) {
+  return ["SELL", "BUY"].flatMap((side) => {
+    const symbols = new Set(trades.filter((trade) => trade.side === side).map((trade) => trade.symbol));
+    return symbols.size ? [`${SIDE_NAMES[side]} ${[...symbols].map(tradeAssetName).join("、")}`] : [];
+  }).join(" / ");
+}
+
+function tradeAmountsByCurrency(trades) {
+  const amounts = new Map();
+  for (const trade of trades) {
+    const currency = trade.currency || "CNY";
+    const item = amounts.get(currency) || { buy: 0, sell: 0 };
+    const side = String(trade.side).toLowerCase();
+    if (side === "buy") item.buy += Number(trade.gross_amount || 0);
+    if (side === "sell") item.sell += Number(trade.gross_amount || 0);
+    amounts.set(currency, item);
+  }
+  return amounts;
+}
+
+function replacementTurnoverText(trades) {
+  return [...tradeAmountsByCurrency(trades)].map(([currency, totals]) => {
+    const total = fmtMoney(totals.buy + totals.sell);
+    return currency === "CNY" ? `￥${total}` : `${currency} ${total}`;
+  }).join(" / ");
+}
+
+function rebalanceDisplayRows(rows, trades = []) {
+  const events = [...rows, ...replacementEvents(trades)].sort((a, b) => a.rebalance_date.localeCompare(b.rebalance_date));
   const cashEquivalentSymbols = rebalanceCashEquivalentSymbols();
   const symbols = [];
-  for (const row of visibleRows) {
+  for (const row of rows) {
     for (const symbol of Object.keys(row.payload?.asset_performance || {})) {
       if (cashEquivalentSymbols.has(symbol)) continue;
       if (!symbols.includes(symbol)) symbols.push(symbol);
@@ -3050,8 +3087,18 @@ function rebalanceDisplayRows(rows) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
   const baseColumns = ["执行日", "当年盈亏", "当年最大回撤", "当年收益（按上年度总资产）", "当年总资产", "当年收益（按原始资金）", "检查结果", "成交金额", "成交笔数", "当年手续费", "收益年度", "决策日"];
-  const assetColumns = orderedSymbols.map(rebalanceAssetColumnName);
-  const displayRows = visibleRows.map((row) => {
+  const columns = [...baseColumns, ...orderedSymbols.map(rebalanceAssetColumnName)];
+  const displayRows = events.map((row) => {
+    if (row.replacement_trades) {
+      const replacement = row.replacement_trades;
+      return {
+        ...Object.fromEntries(columns.map((column) => [column, "—"])),
+        执行日: { kind: "event-date", raw: row.rebalance_date, label: "自动换标" },
+        检查结果: `自动换标 · ${replacementDescription(replacement)}`,
+        成交金额: replacementTurnoverText(replacement),
+        成交笔数: { kind: "number", raw: replacement.length, decimals: 0 },
+      };
+    }
     const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
     const item = {
       执行日: { kind: "event-date", raw: row.rebalance_date },
@@ -3089,7 +3136,7 @@ function rebalanceDisplayRows(rows) {
     }
     return item;
   });
-  return { columns: [...baseColumns, ...assetColumns], rows: displayRows };
+  return { columns, rows: displayRows, events };
 }
 
 async function loadStatus() {
@@ -3197,7 +3244,6 @@ async function watchBacktestAnalysis(runId, rebalance, trades) {
 }
 
 function renderBacktestRecords(summary, rebalance, trades) {
-  currentRebalanceRecords = rebalance.rebalance || [];
   currentTradeRecords = trades.trades || [];
   const rollingPeriods = summary?.rolling_periods || [];
   const analysisConfig = currentRunConfig || config;
@@ -3264,7 +3310,8 @@ function renderBacktestRecords(summary, rebalance, trades) {
     if (!analysisEnabled && !monthScenarios.length) $("recordTabMonths").textContent = "月份对比（未开启）";
   }
 
-  const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || []);
+  const rebalanceTable = rebalanceDisplayRows(rebalance.rebalance || [], currentTradeRecords);
+  currentRebalanceRecords = rebalanceTable.events;
   renderTable("rebalanceTable", rebalanceTable.columns, rebalanceTable.rows, { pageSize: 200, newestFirst: true });
   $("recordTabRebalance").textContent = `再平衡记录（${rebalanceTable.rows.length}）`;
   renderTradeRecords();
@@ -3981,27 +4028,24 @@ function rebalanceEventReason(payload = {}) {
 }
 
 function selectRebalanceEvent(date) {
-  const events = currentRebalanceRecords.filter((event) => event.rebalance_date === date && rebalanceActionLabel(event.payload) !== "带内，无需调仓");
+  const events = currentRebalanceRecords.filter((event) => event.rebalance_date === date);
   if (!events.length) return;
   selectedTradeDate = date;
   renderTradeRecords();
   const host = $("rebalanceEventDetail");
   const trades = currentTradeRecords.filter((row) => row.trade_date === date);
-  // Trade amounts retain their original currencies; the event turnover and fees are CNY.
-  const amounts = new Map();
-  trades.forEach((trade) => {
-    const currency = trade.currency || "CNY";
-    const item = amounts.get(currency) || { buy: 0, sell: 0 };
-    const side = String(trade.side).toLowerCase();
-    if (side === "buy") item.buy += Number(trade.gross_amount || 0);
-    if (side === "sell") item.sell += Number(trade.gross_amount || 0);
-    amounts.set(currency, item);
-  });
-  const amountText = [...amounts].map(([currency, v]) => `${CURRENCY_NAMES[currency] || currency}：买入 ${fmtMoney(v.buy)} / 卖出 ${fmtMoney(v.sell)}`).join("；") || "当日没有可展示的逐笔成交";
+  const amounts = tradeAmountsByCurrency(trades);
+  const amountText = [...amounts].map(([currency, v]) => `${CURRENCY_NAMES[currency] || currency}：买入 ${fmtMoney(v.buy)} / 卖出 ${fmtMoney(v.sell)}`).join("；");
   host.hidden = false;
-  host.innerHTML = `<div class="event-detail-heading"><h3>${escapeHtml(date)} 调仓详情</h3><button type="button" class="button button-secondary" data-clear-event>清除事件与日期筛选</button></div><p>${escapeHtml(amountText)}</p>${events.map((event) => {
+  host.innerHTML = `<div class="event-detail-heading"><h3>${escapeHtml(date)} 再平衡详情</h3><button type="button" class="button button-secondary" data-clear-event>清除事件与日期筛选</button></div><p>${amountText ? `当日全部交易 · ${escapeHtml(amountText)}` : "当日无逐笔成交"}</p>${events.map((event) => {
+    if (event.replacement_trades) {
+      const replacement = event.replacement_trades;
+      const fees = replacement.reduce((total, trade) => total + Number(trade.fee || 0), 0);
+      return `<div class="event-detail-entry"><p><strong>自动换标</strong> · ${escapeHtml(replacementDescription(replacement))}</p><p>成交金额 ${escapeHtml(replacementTurnoverText(replacement))} · ${replacement.length} 笔 · 手续费 ￥${fmtMoney(fees)}</p></div>`;
+    }
     const weights = eventWeightRows(event);
-    return `<div class="event-detail-entry"><p><strong>${escapeHtml(rebalanceActionLabel(event.payload))}</strong> · 原因：${escapeHtml(rebalanceEventReason(event.payload))} · 决策日 ${escapeHtml(event.payload?.decision_date || date)}</p><p>成交金额 ￥${fmtMoney(event.turnover_cny)} · 手续费 ￥${fmtMoney(event.fee_cny)}</p>${weights ? `<details open><summary>成交前后权重</summary><div class="event-weight-grid"><span>标的</span><span>成交前</span><span>成交后</span>${weights.flatMap((row) => [assetName(row.symbol), fmtPct(row.before), fmtPct(row.after)]).map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div><small>现金与逆回购部分包含闲置现金、逆回购净值与应收股息，货币基金单独列出；按各时点组合总资产计算。</small></details>` : '<p class="field-help">旧记录未保存成交前后权重，重新运行该方案后可查看。此处不以收盘权重代替成交时点权重。</p>'}</div>`;
+    const weightStage = event.payload?.executed_trade_count === 0 ? "检查" : "成交";
+    return `<div class="event-detail-entry"><p><strong>${escapeHtml(rebalanceActionLabel(event.payload))}</strong> · 原因：${escapeHtml(rebalanceEventReason(event.payload))} · 决策日 ${escapeHtml(event.payload?.decision_date || date)}</p><p>本次再平衡 · 成交金额 ￥${fmtMoney(event.turnover_cny)} · 手续费 ￥${fmtMoney(event.fee_cny)}</p>${weights ? `<details open><summary>${weightStage}前后权重</summary><div class="event-weight-grid"><span>标的</span><span>${weightStage}前</span><span>${weightStage}后</span>${weights.flatMap((row) => [assetName(row.symbol), fmtPct(row.before), fmtPct(row.after)]).map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div><small>现金与逆回购部分包含闲置现金、逆回购净值与应收股息，货币基金单独列出；按各时点组合总资产计算。</small></details>` : '<p class="field-help">旧记录未保存前后权重，重新运行该方案后可查看。</p>'}</div>`;
   }).join("")}<button type="button" class="button button-secondary" data-show-event-trades>查看当天 ${trades.length} 笔交易</button><p id="eventChartPosition" class="field-help"></p>`;
   host.querySelector("[data-clear-event]")?.addEventListener("click", clearRebalanceEvent);
   host.querySelector("[data-show-event-trades]")?.addEventListener("click", () => { selectRecordPanel("tradesPanel"); $("tradesPanel")?.scrollIntoView({ block: "start", behavior: "smooth" }); });
@@ -4017,7 +4061,7 @@ function selectRebalanceEvent(date) {
 async function focusRebalanceChart(date, chartId) {
   const version = ++eventFocusVersion, runId = currentRunId, resultVersion = resultRequestVersion;
   const isCurrent = () => version === eventFocusVersion && runId === currentRunId && resultVersion === resultRequestVersion && selectedTradeDate === date;
-  if ($("eventChartPosition")) $("eventChartPosition").textContent = "正在定位调仓执行日…";
+  if ($("eventChartPosition")) $("eventChartPosition").textContent = "正在定位记录日期…";
   try {
     if (!currentChartSeries.some((row) => row.trade_date === date)) {
       const response = await api(`/api/backtest/${encodeURIComponent(runId)}/chart-series?focus_date=${encodeURIComponent(date)}`);

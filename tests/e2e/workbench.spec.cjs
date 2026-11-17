@@ -165,10 +165,13 @@ test('exact percentage input stays synchronized and rejects invalid values', asy
 
 test('rebalance date links chart, actual weights and same-day transactions', async ({ page }, testInfo) => {
   const chart = await (await page.request.get(`/api/backtest/${fixtures()[0].run_id}/chart-series`)).json();
-  const datesInTable = await page.locator('#rebalanceTable [data-rebalance-date]').evaluateAll(nodes => nodes.map(node => node.dataset.rebalanceDate));
+  const tradedRows = page.locator('#rebalanceTable tbody tr').filter({
+    has: page.locator('[data-label="检查结果"]').filter({ hasText: /^已调仓$/ }),
+  });
+  const datesInTable = await tradedRows.locator('[data-rebalance-date]').evaluateAll(nodes => nodes.map(node => node.dataset.rebalanceDate));
   const date = datesInTable.find(value => !chart.chart.dates.includes(value));
   expect(date, 'fixture must exercise a date omitted by chart sampling').toBeTruthy();
-  const dateButton = page.locator(`[data-rebalance-date="${date}"]`);
+  const dateButton = tradedRows.locator(`[data-rebalance-date="${date}"]`);
   await dateButton.click();
   await expect(page.locator('#rebalanceEventDetail')).toBeVisible();
   await expect(page.locator('#rebalanceEventDetail')).toContainText(date);
@@ -192,7 +195,50 @@ test('rebalance date links chart, actual weights and same-day transactions', asy
   const allDates = await page.locator('#tradesTable tbody tr td:first-child').allTextContents();
   expect(new Set(allDates).size).toBeGreaterThan(1);
   await page.locator('#recordTabRebalance').click();
-  await expect(page.locator('#rebalanceTable')).not.toContainText('带内，无需调仓');
+});
+
+test('within-band checks and automatic replacements share the rebalance table and link to the chart', async ({ page }) => {
+  const { run_id: runId } = fixtures()[1];
+  const [rebalanceResponse, tradesResponse] = await Promise.all([
+    page.request.get(`/api/backtest/${runId}/rebalance`),
+    page.request.get(`/api/backtest/${runId}/trades`),
+  ]);
+  const { rebalance } = await rebalanceResponse.json();
+  const { trades } = await tradesResponse.json();
+  const replacementDates = new Set(trades.filter((trade) => trade.reason === 'asset_replacement').map((trade) => trade.trade_date));
+  expect(replacementDates.size).toBeGreaterThan(0);
+  await loadRun(page, runId);
+  await page.locator('#recordTabRebalance').click();
+  const rows = page.locator('#rebalanceTable tbody tr');
+  const expectedCount = rebalance.length + replacementDates.size;
+  await expect(rows).toHaveCount(expectedCount);
+  await expect(page.locator('#recordTabRebalance')).toHaveText(`再平衡记录（${expectedCount}）`);
+  for (const date of replacementDates) {
+    const replacement = rows.filter({ has: page.locator(`[data-rebalance-date="${date}"]`) }).filter({ hasText: '自动换标' });
+    const replacementCount = trades.filter((trade) => trade.trade_date === date && trade.reason === 'asset_replacement').length;
+    await expect(replacement).toHaveCount(1);
+    await expect(replacement.locator('[data-label="成交笔数"]')).toHaveText(String(replacementCount));
+  }
+  const check = rows.filter({ hasText: '带内，无需调仓' }).first();
+  await expect(check).toBeVisible();
+  await expect(check.locator('[data-label="成交笔数"]')).toHaveText('0');
+  await expect(check.locator('[data-label="成交金额"]')).toHaveText('￥0');
+  const checkDate = check.locator('[data-rebalance-date]');
+  const date = await checkDate.getAttribute('data-rebalance-date');
+  await checkDate.click();
+  const detail = page.locator('#rebalanceEventDetail');
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText('权重处于容忍带内');
+  await expect(detail).toContainText('检查前后权重');
+  await expect(detail).toContainText('成交金额 ￥0');
+  await expect(page.locator('#eventChartPosition')).toContainText(`精确定位 ${date}`);
+  const marker = await page.evaluate(() => window.echarts.getInstanceByDom(document.getElementById('assetChart')).getOption().series[0].markLine.data[0].xAxis);
+  expect(marker).toBe(date);
+
+  const replacementDate = [...replacementDates][0];
+  await rows.getByRole('button', { name: `查看 ${replacementDate} 自动换标详情并定位图表` }).click();
+  await expect(detail).toContainText('自动换标');
+  await expect(page.locator('#eventChartPosition')).toContainText(`精确定位 ${replacementDate}`);
 });
 
 test('names, notes and favorites persist through reload with safe text rendering', async ({ page }, testInfo) => {
