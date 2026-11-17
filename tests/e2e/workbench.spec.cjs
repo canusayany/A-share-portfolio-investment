@@ -241,6 +241,135 @@ test('within-band checks and automatic replacements share the rebalance table an
   await expect(page.locator('#eventChartPosition')).toContainText(`精确定位 ${replacementDate}`);
 });
 
+test('record headers stay in view as the page scrolls through each table', async ({ page }) => {
+  const { run_id: runId } = fixtures()[0];
+  await page.route((url) => url.pathname.endsWith(`/api/backtest/${runId}`), async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.summary.rolling_periods = Array.from({ length: 32 }, (_, index) => ({
+      period: `窗口 ${String(index + 1).padStart(2, '0')}`,
+      start_date: '2020-01-02', end_date: '2022-12-30', window_years: 3,
+      annualized_return: 0.05 + index / 1000, max_drawdown: -0.12,
+    }));
+    body.summary.rebalance_month_scenarios = Array.from({ length: 12 }, (_, index) => ({
+      month: index + 1, annualized_return: 0.05 + index / 1000, max_drawdown: -0.12,
+    }));
+    await route.fulfill({ response, json: body });
+  });
+  await loadRun(page, runId);
+  // Make it possible to scroll past the final table, even when no other section follows it.
+  await page.locator('#recordsSection').evaluate((section) => {
+    const space = document.createElement('div');
+    space.style.height = '100vh';
+    section.after(space);
+  });
+
+  const recordTables = [
+    ['recordTabRebalance', 'rebalanceTable'],
+    ['recordTabTrades', 'tradesTable'],
+    ['recordTabRolling', 'rollingTable'],
+    ['recordTabMonths', 'monthsTable'],
+  ];
+  for (const [tabId, tableId] of recordTables) {
+    await page.locator(`#${tabId}`).click();
+    const table = page.locator(`#${tableId}`);
+    await expect(table.locator('tbody tr').last()).toBeVisible();
+    const mobile = page.viewportSize().width <= 1100;
+    const view = () => table.evaluate((element, mobile) => {
+      const workspace = element.closest('.workspace');
+      const bounds = workspace.getBoundingClientRect();
+      const viewportTop = mobile ? 0 : Math.max(0, bounds.top);
+      const toolbar = document.querySelector(mobile ? '.mobile-app-bar' : '.result-navigation');
+      const header = element.tHead.rows[0].cells[0].getBoundingClientRect();
+      const first = element.tBodies[0].firstElementChild.getBoundingClientRect();
+      const last = element.tBodies[0].lastElementChild.getBoundingClientRect();
+      return {
+        pageTop: mobile ? window.scrollY : workspace.scrollTop,
+        viewportTop,
+        viewportBottom: mobile ? window.innerHeight : Math.min(bounds.bottom, window.innerHeight),
+        stickyTop: Math.max(viewportTop, toolbar.getBoundingClientRect().bottom),
+        wrapperTop: element.parentElement.getBoundingClientRect().top,
+        headerTop: header.top,
+        headerBottom: header.bottom,
+        firstRowTop: first.top,
+        lastRowTop: last.top,
+        lastRowBottom: last.bottom,
+        nestedScroll: element.parentElement.scrollHeight - element.parentElement.clientHeight,
+        nestedScrollTop: element.parentElement.scrollTop,
+      };
+    }, mobile);
+    const scrollPage = (delta) => table.evaluate((element, { mobile, delta }) => {
+      const scroller = mobile ? window : element.closest('.workspace');
+      scroller.scrollBy(0, delta);
+    }, { mobile, delta });
+
+    const initial = await view();
+    await scrollPage(Math.round(initial.wrapperTop - initial.viewportTop + 70));
+    await expect.poll(async () => {
+      const { headerTop, stickyTop } = await view();
+      return Math.abs(headerTop - stickyTop);
+    }).toBeLessThanOrEqual(2);
+    const before = await view();
+    expect(before.nestedScroll, tableId).toBeLessThanOrEqual(1);
+    expect(before.nestedScrollTop, tableId).toBe(0);
+
+    await scrollPage(80);
+    await expect.poll(async () => {
+      const { pageTop, headerTop } = await view();
+      return pageTop - before.pageTop > 50 && Math.abs(headerTop - before.headerTop) <= 2;
+    }).toBe(true);
+    const after = await view();
+    expect(before.firstRowTop - after.firstRowTop, tableId).toBeGreaterThan(50);
+    expect(after.nestedScrollTop, tableId).toBe(0);
+    if (tableId === 'rebalanceTable') {
+      const positions = await table.evaluate((element) => {
+        const wrapper = element.parentElement;
+        wrapper.scrollLeft = (wrapper.scrollWidth - wrapper.clientWidth) / 2;
+        const left = (cell) => cell.getBoundingClientRect().left;
+        const header = element.tHead.rows[0].cells;
+        const row = element.tBodies[0].rows[0].cells;
+        const frozenHeader = header[0].getBoundingClientRect();
+        const hit = document.elementFromPoint(frozenHeader.left + 8, frozenHeader.top + 8);
+        return {
+          scrollLeft: wrapper.scrollLeft,
+          wrapperLeft: left(wrapper),
+          frozenHeaderLeft: frozenHeader.left,
+          frozenCellLeft: left(row[0]),
+          headerLeft: left(header[2]),
+          cellLeft: left(row[2]),
+          frozenHeaderOnTop: hit?.closest('th') === header[0],
+        };
+      });
+      const { scrollLeft, wrapperLeft, frozenHeaderLeft, frozenCellLeft, headerLeft, cellLeft, frozenHeaderOnTop } = positions;
+      expect(scrollLeft).toBeGreaterThan(0);
+      expect(Math.abs(frozenHeaderLeft - wrapperLeft)).toBeLessThanOrEqual(2);
+      expect(Math.abs(frozenHeaderLeft - frozenCellLeft)).toBeLessThanOrEqual(2);
+      expect(Math.abs(headerLeft - cellLeft)).toBeLessThanOrEqual(2);
+      expect(frozenHeaderOnTop).toBe(true);
+    }
+    if (tableId === 'rollingTable') {
+      const sort = table.locator('thead [data-table-sort="回测窗口"]');
+      await sort.click();
+      await sort.click();
+      await expect(table.locator('tbody tr').first().locator('td').first()).toHaveText('窗口 01');
+    }
+
+    const tail = await view();
+    await scrollPage(Math.max(0, Math.ceil(tail.lastRowBottom - tail.viewportBottom + 24)));
+    await expect.poll(async () => {
+      const { lastRowTop, lastRowBottom, headerTop, headerBottom, viewportBottom, stickyTop } = await view();
+      return Math.abs(headerTop - stickyTop) <= 2 && lastRowTop >= headerBottom - 2 && lastRowBottom <= viewportBottom;
+    }).toBe(true);
+
+    const end = await view();
+    await scrollPage(Math.ceil(end.lastRowBottom - end.viewportTop + 32));
+    await expect.poll(async () => {
+      const { headerBottom, viewportTop } = await view();
+      return headerBottom - viewportTop;
+    }).toBeLessThanOrEqual(0);
+  }
+});
+
 test('names, notes and favorites persist through reload with safe text rendering', async ({ page }, testInfo) => {
   await openHistory(page);
   const item = page.locator('.history-item').filter({ has: page.locator(`[data-history-replay="${fixtures()[0].run_id}"]`) });

@@ -69,6 +69,7 @@ let currentRebalanceRecords = [];
 let currentTradeRecords = [];
 let selectedTradeDate = null;
 let eventFocusVersion = 0;
+let recordHeaderFrame = null;
 let identityVersion = 0;
 let draftLoadVersion = 0;
 let favoritesOnly = false;
@@ -2625,6 +2626,35 @@ function selectRecordPanel(panelId) {
   document.querySelectorAll(".record-panel").forEach((panel) => {
     panel.hidden = panel.id !== panelId;
   });
+  queueRecordTableHeaderUpdate();
+}
+
+function queueRecordTableHeaderUpdate() {
+  if (recordHeaderFrame !== null) return;
+  recordHeaderFrame = window.requestAnimationFrame(() => {
+    recordHeaderFrame = null;
+    const table = document.querySelector(".record-panel:not([hidden]) .record-table-scroll > table");
+    if (!table?.tHead || !table.tBodies.length) return;
+    const workspace = document.querySelector(".workspace");
+    const navigation = document.querySelector(isMobileLayout() ? ".mobile-app-bar" : ".result-navigation");
+    const top = Math.max(0, workspace?.getBoundingClientRect().top ?? 0, navigation?.getBoundingClientRect().bottom ?? 0);
+    const tableTop = table.getBoundingClientRect().top;
+    const lastTop = table.tBodies[0].getBoundingClientRect().bottom - table.tHead.offsetHeight;
+    // Adjust the native sticky inset for the page scroll while keeping the
+    // header in the table's horizontal scroll container.
+    const offset = Math.max(0, Math.min(top, lastTop) - tableTop);
+    table.tHead.style.setProperty("--record-header-offset", `${offset}px`);
+  });
+}
+
+function setupRecordTableHeaders() {
+  window.addEventListener("scroll", queueRecordTableHeaderUpdate, { capture: true, passive: true });
+  window.addEventListener("resize", queueRecordTableHeaderUpdate);
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(queueRecordTableHeaderUpdate);
+    document.querySelectorAll(".workspace, .mobile-app-bar, .result-navigation, .record-table-scroll")
+      .forEach((element) => observer.observe(element));
+  }
 }
 
 function lineZoomOption() {
@@ -2958,6 +2988,7 @@ function renderTable(id, columns, rows, options = {}) {
   table.querySelector(".table-more")?.addEventListener("click", () => {
     renderTable(id, columns, rows, { ...options, visibleCount: visibleCount + pageSize });
   });
+  if (table.closest?.(".record-table-scroll")) queueRecordTableHeaderUpdate();
 }
 
 function formatCell(value) {
@@ -3860,6 +3891,7 @@ function setupTabs(selector, dataKey, selectPanel) {
 
 function setupUiInteractions() {
   setupResearchInteractions();
+  setupRecordTableHeaders();
   window.addEventListener("resize", syncDrawerAccessibility);
   setRunBusy(false);
   $("parameterPanel")?.addEventListener("input", () => { if (config) updateResultContext(); });
