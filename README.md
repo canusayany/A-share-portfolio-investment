@@ -2,20 +2,44 @@
 
 这是 `portfolio_backtest_implementation_plan.md` 的落地实现：Python + SQLite 后端、单页面 JavaScript + ECharts 前端。
 
-## 启动
+## 安装与启动
+
+在仓库根目录执行。需要 Python 3.11 或以上版本、`venv` 和 `curl`。Ubuntu 如缺少虚拟环境组件，先安装与 Python 版本对应的 `python3-venv` 包。
+
+Windows PowerShell
 
 ```powershell
-$py = 'C:\Users\yupeng.zhang\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-& $py scripts/init_db.py
-& $py scripts/sync_data.py --start 2012-01-01 --end 2026-06-23
-& $py -m app.main --port 51327
+py -3.11 scripts/install.py
+$AppPython = '.\.venv\Scripts\python.exe'
+& $AppPython -m app.main --port 51327
 ```
 
-打开：
+Linux
 
-```text
-http://127.0.0.1:51327
+```bash
+python3 scripts/install.py
+.venv/bin/python -m app.main --port 51327
 ```
+
+安装脚本创建或复用 `.venv`，安装运行依赖，首次复制 `.env.example` 为 `.env`，并初始化或升级 SQLite 数据库。在已有环境重复执行会沿用 `.env` 和数据库。可用 `--venv` 指定虚拟环境路径，脚本完成时会打印对应的启动命令。服务启动后打开 [本机回测页面](http://127.0.0.1:51327/)。
+
+## 数据库维护
+
+`.env` 中配置 `TUSHARE_TOKEN` 后可下载所需行情。`DATABASE_PATH` 默认指向仓库下的 `data/backtest.sqlite3`，环境变量中的相对路径也以仓库为基准。安装、初始化、同步和启动均可用 `--db-path` 指定同一个数据库，命令行相对路径以运行命令的目录为基准。
+
+以下以 PowerShell 为例。Linux 将 `& $AppPython` 换成 `.venv/bin/python`。
+
+```powershell
+# 任选需要的维护操作
+& $AppPython scripts/init_db.py --db-path data/backtest.sqlite3
+& $AppPython scripts/init_db.py --db-path data/backtest.sqlite3 --check
+& $AppPython scripts/init_db.py --db-path data/backtest.sqlite3 --backup ..\backtest-before-upgrade.sqlite3
+& $AppPython scripts/sync_data.py --db-path data/backtest.sqlite3 --start 2012-01-01 --end 2026-11-17
+```
+
+`--check` 只读检查现有数据库的结构和完整性。升级已有库时可加 `--backup`，先保存一致的 SQLite 副本，目标须是尚未存在的文件。数据库升级保留行情与历史回测。
+
+同步脚本输出 JSON，列出补录数量、数据状态和还缺的项目。数据补录与回测缓存失效在同一事务提交。补录后仍有缺口时，脚本保留已成功补录的数据并以非零状态退出。
 
 ## 数据源
 
@@ -90,7 +114,7 @@ CSV 从当前保存结果读取配置、时间范围和资产，修改尚未运�
 ## 回归验证
 
 ```powershell
-& $py scripts/run_tests.py
+& $AppPython scripts/run_tests.py
 npm ci
 npm run test:ui
 npx playwright install chromium webkit

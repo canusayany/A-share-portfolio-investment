@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
+from tempfile import NamedTemporaryFile
+import time
 from typing import Any, Iterable, Iterator
 
 from app.identity import DEFAULT_LEADERBOARD_KEY_ID
 
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
+DB_LOCK_TIMEOUT_SECONDS = 30
 
+SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets (
   symbol TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -169,10 +172,9 @@ def utc_now() -> str:
 def connect(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30.0)
+    conn = sqlite3.connect(path, timeout=DB_LOCK_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
@@ -190,10 +192,101 @@ def db_session(db_path: str | Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    deadline = time.monotonic() + DB_LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            return
+        except sqlite3.OperationalError as exc:
+            error_code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            if error_code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or time.monotonic() >= deadline:
+                raise
+            # WAL promotion can return SQLITE_BUSY before busy_timeout when
+            # several processes initialize a database in rollback journal mode.
+            time.sleep(0.05)
+
+
+def _initialize_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
+    ensure_schema_migrations(conn)
+
+
 def init_db(db_path: str | Path) -> None:
     with db_session(db_path) as conn:
-        conn.executescript(SCHEMA)
-        ensure_schema_migrations(conn)
+        _enable_wal(conn)
+        _initialize_schema(conn)
+
+
+def _open_database_read_only(db_path: str | Path) -> sqlite3.Connection:
+    path = Path(db_path).expanduser().resolve(strict=True)
+    return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=DB_LOCK_TIMEOUT_SECONDS)
+
+
+def _schema_objects(conn: sqlite3.Connection, kind: str) -> set[str]:
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type=? AND substr(name, 1, 7) <> 'sqlite_'",
+            (kind,),
+        )
+    }
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[0] for row in conn.execute("SELECT name FROM pragma_table_info(?)", (table,))}
+
+
+def check_db(db_path: str | Path) -> None:
+    with closing(_open_database_read_only(db_path)) as conn, closing(sqlite3.connect(":memory:")) as expected:
+        expected.row_factory = sqlite3.Row
+        with expected:
+            _initialize_schema(expected)
+        expected_tables = _schema_objects(expected, "table")
+        missing_tables = expected_tables - _schema_objects(conn, "table")
+        if missing_tables:
+            raise sqlite3.DatabaseError(f"Missing tables: {', '.join(sorted(missing_tables))}")
+        for table in sorted(expected_tables):
+            missing_columns = _table_columns(expected, table) - _table_columns(conn, table)
+            if missing_columns:
+                raise sqlite3.DatabaseError(f"Missing columns in {table}: {', '.join(sorted(missing_columns))}")
+        missing_indexes = _schema_objects(expected, "index") - _schema_objects(conn, "index")
+        if missing_indexes:
+            raise sqlite3.DatabaseError(f"Missing indexes: {', '.join(sorted(missing_indexes))}")
+        integrity = conn.execute("PRAGMA quick_check(1)").fetchone()[0]
+        if integrity != "ok":
+            raise sqlite3.DatabaseError(f"SQLite quick_check failed: {integrity}")
+
+
+def backup_db(db_path: str | Path, backup_path: str | Path) -> None:
+    destination = Path(backup_path).expanduser()
+    if os.path.lexists(destination):
+        raise FileExistsError(f"Backup destination already exists: {destination}")
+    with closing(_open_database_read_only(db_path)) as source:
+        with NamedTemporaryFile(dir=destination.parent, prefix=".portfolio-db-backup-", suffix=".sqlite3", delete=False) as temp:
+            staged = Path(temp.name)
+        try:
+            with closing(sqlite3.connect(staged, timeout=DB_LOCK_TIMEOUT_SECONDS)) as backup:
+                last_progress = time.monotonic()
+
+                def check_backup_progress(status: int, _remaining: int, _total: int) -> None:
+                    nonlocal last_progress
+                    now = time.monotonic()
+                    if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                        if now - last_progress >= DB_LOCK_TIMEOUT_SECONDS:
+                            raise sqlite3.OperationalError("Timed out waiting for SQLite backup locks")
+                    else:
+                        last_progress = now
+
+                source.backup(backup, pages=1024, progress=check_backup_progress, sleep=0.05)
+            # Publish only the complete snapshot and never replace an existing
+            # path, even if it was created while SQLite was copying the backup.
+            if os.name == "nt":
+                staged.rename(destination)
+            else:
+                os.link(staged, destination)
+        finally:
+            staged.unlink(missing_ok=True)
 
 
 def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
@@ -212,24 +305,6 @@ def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_run_metadata_favorites ON run_metadata(key_id, favorite, updated_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_run_metadata_run_id ON run_metadata(run_id)")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sync_coverage (
-          kind TEXT NOT NULL,
-          symbol TEXT NOT NULL,
-          start_date TEXT NOT NULL,
-          end_date TEXT NOT NULL,
-          source TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_sync_coverage_kind_symbol_dates
-        ON sync_coverage(kind, symbol, start_date, end_date)
-        """
-    )
     backtest_run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(backtest_runs)").fetchall()}
     if "config_hash" not in backtest_run_cols:
         conn.execute("ALTER TABLE backtest_runs ADD COLUMN config_hash TEXT")
@@ -237,18 +312,6 @@ def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_backtest_runs_config_hash_created
         ON backtest_runs(config_hash, created_at DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_trades_run_id_date
-        ON trades(run_id, trade_date)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_rebalance_events_run_id_date
-        ON rebalance_events(run_id, rebalance_date)
         """
     )
     leaderboard_memberships_existed = conn.execute(

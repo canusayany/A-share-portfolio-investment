@@ -457,7 +457,7 @@ def load_dotenv_if_present(path: Path | None = None) -> None:
     env_path = path or (BASE_DIR / ".env")
     if not env_path.exists():
         return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -469,8 +469,10 @@ def load_dotenv_if_present(path: Path | None = None) -> None:
 
 def get_settings(db_path: str | Path | None = None) -> Settings:
     load_dotenv_if_present()
+    if db_path is None:
+        db_path = BASE_DIR / Path(os.getenv("DATABASE_PATH") or DEFAULT_DB_PATH).expanduser()
     return Settings(
-        db_path=Path(db_path) if db_path else Path(os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)),
+        db_path=Path(db_path).expanduser().resolve(),
         tushare_token=os.getenv("TUSHARE_TOKEN", ""),
     )
 

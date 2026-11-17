@@ -1,13 +1,5 @@
-fastapi
-uvicorn
-pandas
-numpy
-requests
-tushare
-akshare
-yfinance
-pytest
-pytest-cov
-python-dotenv
-pydantic-settings
+numpy>=1.26.4,<3
+akshare>=1.18.60,<2
+psycopg[binary]>=3.3,<4
+tzdata>=2025.3
 
