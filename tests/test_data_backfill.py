@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from app.config import backtest_assets
 from app.db import db_session
-from app.services.data_sync import SyncWarning, fetch_tushare_repo_rates, required_data_missing, sync_all
+from app.services.data_sync import SyncWarning, fetch_au9999_proxy_prices, fetch_tushare_repo_rates, price_row, required_data_missing, sync_all
 from tests.helpers import build_synced_db
 
 
@@ -30,9 +30,37 @@ class DataBackfillTests(unittest.TestCase):
                 result = sync_all(conn, "test-token", config["start_date"], config["end_date"],
                                   backtest_assets(config), missing_items=["prices:518880.SH"])
             self.assertEqual(result["inserted"]["prices"], 7)
-            self.assertEqual(fallback.call_args.args[2], "2013-07-28")
+            self.assertEqual(fallback.call_args.args[2], "2013-07-26")
             self.assertNotIn("prices:518880.SH", required_data_missing(
                 conn, config["start_date"], config["end_date"], backtest_assets(config)))
+
+    def test_gold_prefers_tushare_when_it_has_the_historic_session(self):
+        original = price_row("518880.SH", "2007-08-06", 163.65, "CNY", "tushare:sge_daily:Au99.99")
+        with patch("app.services.data_sync.fetch_tushare_sge_au9999_prices", return_value=[original]):
+            rows = fetch_au9999_proxy_prices("518880.SH", "2007-08-03", "2007-08-07", "CNY", token="test-token")
+        self.assertEqual(rows, [original])
+
+    def test_gold_backfills_exact_archived_session_without_other_providers(self):
+        path, config = build_synced_db("2007-08-03", "2007-08-07")
+        with db_session(path) as conn:
+            conn.execute("DELETE FROM prices WHERE symbol='518880.SH' AND trade_date='2007-08-06'")
+            with patch("app.services.data_sync.fetch_tushare_sge_au9999_prices", side_effect=SyncWarning("missing")) as tushare, \
+                 patch("app.services.data_sync.fetch_cn_fund_prices", side_effect=AssertionError("ETF was not listed")), \
+                 patch("app.services.data_sync.fetch_sge_au9999_spot_prices", side_effect=AssertionError("known archived quote does not require further fetching")):
+                result = sync_all(conn, "test-token", config["start_date"], config["end_date"],
+                                  backtest_assets(config), missing_items=["prices:518880.SH"])
+            tushare.assert_called_once_with("test-token", "518880.SH", "2007-08-06", "2007-08-06", "CNY")
+            self.assertEqual(result["inserted"]["prices"], 1)
+            self.assertNotIn("prices:518880.SH", result["missing_data"])
+            self.assertNotIn("prices:518880.SH", required_data_missing(
+                conn, config["start_date"], config["end_date"], backtest_assets(config)))
+            row = conn.execute("SELECT open,high,low,close,volume,amount,source FROM prices WHERE symbol='518880.SH' AND trade_date='2007-08-06'").fetchone()
+            self.assertAlmostEqual(row["open"], 1.64)
+            self.assertAlmostEqual(row["high"], 1.64)
+            self.assertAlmostEqual(row["low"], 1.635)
+            self.assertAlmostEqual(row["close"], 1.6365)
+            self.assertEqual((row["volume"], row["amount"], row["source"]),
+                             (585.8, 96_188_638.0, "sge:monthly_archive:511163:Au99.99:fixed_scale_0.01"))
 
     def test_price_source_failure_does_not_skip_independent_fund_factors(self):
         path, config = build_synced_db("2020-01-02", "2020-01-10")
@@ -62,7 +90,7 @@ class DataBackfillTests(unittest.TestCase):
             with patch("app.services.data_sync.fetch_datasrc_repo_rates", side_effect=SyncWarning("unavailable")), \
                  patch("app.services.data_sync.fetch_sohu_repo_rates", side_effect=SyncWarning("empty")), \
                  patch("app.services.data_sync.tushare_call", return_value=[quote]) as fetch, \
-                 patch("app.services.data_sync.fetch_akshare_repo_rates") as unused:
+                 patch("app.services.data_sync.fetch_eastmoney_repo_rates") as unused:
                 result = sync_all(conn, "test-token", config["start_date"], config["end_date"],
                                   backtest_assets(config), missing_items=["repo_rates:204001"])
             self.assertEqual(fetch.call_args.args[1], "repo_daily")

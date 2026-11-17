@@ -56,17 +56,31 @@ def market_day_on_or_before(conn, market: str, day: date) -> date:
     return days[-1]
 
 
+def asset_business_days(conn, asset: dict, start: str | date, end: str | date) -> list[date]:
+    """Exclude only the instrument's explicitly verified full-session halts."""
+    closed = set(asset.get("non_trading_dates") or [])
+    return [day for day in market_business_days(conn, asset.get("market", "CN"), start, end)
+            if day.isoformat() not in closed]
+
+
 def calendar_missing_years(conn, market: str, start: str | date, end: str | date) -> list[int]:
     """Require an explicit open/closed entry for every natural day in range."""
     start_date, end_date = parse_date(start), parse_date(end)
     if start_date > end_date:
         return []
     rows = conn.execute(
-        "SELECT trade_date FROM trading_calendar WHERE market=? AND trade_date BETWEEN ? AND ? AND is_open IN (0,1)",
+        "SELECT trade_date, is_open FROM trading_calendar WHERE market=? AND trade_date BETWEEN ? AND ? AND is_open IN (0,1)",
         (market, start_date.isoformat(), end_date.isoformat()),
     ).fetchall()
     existing = {row["trade_date"] for row in rows}
-    return sorted({day.year for day in daterange(start_date, end_date) if day.isoformat() not in existing})
+    missing = {day.year for day in daterange(start_date, end_date) if day.isoformat() not in existing}
+    # Neither US nor HK equities have weekend make-up sessions. A cached open
+    # weekend is evidence of a corrupt year, which must be fetched again from
+    # the calendar provider instead of demanding non-existent price bars.
+    if market in {"US", "HK"}:
+        missing.update(parse_date(row["trade_date"]).year for row in rows
+                       if row["is_open"] and parse_date(row["trade_date"]).weekday() >= 5)
+    return sorted(missing)
 
 
 def first_business_day_by_month(days: list[date]) -> set[date]:

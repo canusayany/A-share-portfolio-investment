@@ -59,6 +59,7 @@ test("rebalance records prioritize annual profit and drawdown without inventing 
   assert.deepEqual(Array.from(output.columns).slice(0,6), ["执行日", "当年盈亏", "当年最大回撤", "当年收益（按上年度总资产）", "当年总资产", "当年收益（按原始资金）"]);
   assert.equal(output.rows.length, 3);
   h.context.__record = output.rows[0];
+  assert.match(h.evaluate('formatCell(__record["执行日"])'), /2024-01-02<\/button>.*收益年度 2023年/);
   assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /123.46万/);
   assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /2023年 · 截至12-29/);
   assert.match(h.evaluate('formatCell(__record["当年盈亏"])'), /\+￥1,234,567/);
@@ -119,6 +120,7 @@ test("automatic replacements appear as their own rebalance records with only rep
   assert.equal(goldSwitch["成交金额"], "￥170");
   assert.equal(bondSwitch["成交金额"], "￥750");
   assert.equal(goldSwitch["当年盈亏"], "—");
+  assert.equal(goldSwitch["执行日"].yearLabel, undefined);
   assert.equal(goldSwitch["当年总资产"], "—");
   const januaryCheck = output.rows.find((row) => /带内.*无需调仓/.test(row["检查结果"]));
   assert.equal(januaryCheck["成交笔数"].raw, 0);
@@ -609,6 +611,44 @@ test("reversed dates prevent a run from reaching the server", async () => {
   assert.match(h.el("message").textContent, /结束日期不能早于开始日期/);
 });
 
+test("same-day dates block submission and an earlier corrected start permits the request", async () => {
+  const h = harness();
+  const submitted = [];
+  let focused = 0;
+  h.el("startDate").focus = () => { focused += 1; };
+  h.replace("api", async (url, options) => {
+    submitted.push({ url, body: JSON.parse(options.body) });
+    return { job_id: "corrected-range" };
+  });
+  h.replace("waitForBacktestJob", async () => entry("corrected-range"));
+  h.el("startDate").value = "2026-10-21";
+  h.el("endDate").value = "2026-10-21";
+  await h.evaluate("runBacktest()");
+  assert.equal(submitted.length, 0);
+  assert.equal(h.evaluate("runInProgress"), false);
+  assert.equal(h.el("startDate").value, "2026-10-21");
+  assert.equal(h.el("endDate").value, "2026-10-21");
+  assert.equal(h.el("startDate").reports, 1);
+  assert.equal(focused, 1);
+  assert.match(h.el("message").textContent, /至少需要2个已发布交易日.*提前开始日期/);
+
+  h.el("startDate").value = "2026-10-19";
+  await h.evaluate("runBacktest()");
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].url, "/api/backtest/start");
+  assert.equal(submitted[0].body.config.start_date, "2026-10-19");
+  assert.equal(submitted[0].body.config.end_date, "2026-10-21");
+  assert.equal(h.evaluate("currentRunId"), "corrected-range");
+});
+
+test("insufficient sessions have date guidance while genuine missing rates retain their own message", () => {
+  const h = harness();
+  const rangeError = h.evaluate('humanizeError("backtest needs at least two reference-market trading days")');
+  assert.match(rangeError, /至少需要2个已发布交易日.*提前开始日期/);
+  assert.doesNotMatch(rangeError, /汇率|逆回购/);
+  assert.match(h.evaluate('humanizeError("missing fx_rates or repo_rates; run data sync first")'), /缺少汇率或逆回购利率/);
+});
+
 test("combined asset weights above one hundred percent prevent submission", async () => {
   const h = harness();
   const config = fixtureConfig();
@@ -909,12 +949,31 @@ test("common-period progress including network recovery stays in the comparison 
   assert.equal(h.el("workspaceMessage").textContent,"已回放保存的回测结果");
 });
 
-test("ordinary backtest polling still sends default progress to the workspace", async()=>{
-  const h=harness();let polls=0;h.replace("sleep",async()=>{});
-  h.replace("api",async()=>++polls===1?{status:"running",message:"普通回测计算中"}:{status:"completed",result:{run_id:"normal"}});
-  const result=await h.evaluate('waitForBacktestJob("normal")');
-  assert.equal(result.run_id,"normal");
-  assert.equal(h.el("workspaceMessage").textContent,"普通回测计算中");
+test("ordinary backtest polling shows server progress and elapsed time in the workspace", async () => {
+  const h = harness();
+  let elapsed = 0;
+  h.context.Date = { now: () => elapsed };
+  h.replace("sleep", async () => {});
+  h.replace("api", async () => {
+    if (elapsed) return { status: "completed", result: { run_id: "normal" } };
+    elapsed = 62000;
+    return { status: "running", message: "正在补齐历史行情" };
+  });
+  const result = await h.evaluate('waitForBacktestJob("normal")');
+  assert.equal(result.run_id, "normal");
+  assert.equal(h.el("workspaceMessage").textContent, "正在补齐历史行情 · 已等待 1 分 2 秒");
+});
+
+test("backtest polling rejects an unrecognized status without polling again", async () => {
+  const h = harness();
+  let polls = 0;
+  h.replace("sleep", async () => {});
+  h.replace("api", async () => {
+    assert.equal(++polls, 1);
+    return { status: "unexpected" };
+  });
+  await assert.rejects(h.evaluate('waitForBacktestJob("unknown")'), /无法识别回测状态/);
+  assert.equal(polls, 1);
 });
 
 test("stale common-period progress cannot overwrite another comparison state",async()=>{

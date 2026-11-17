@@ -1004,6 +1004,7 @@ class DbAndSyncTests(unittest.TestCase):
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         original_datasrc = data_sync_module.fetch_datasrc_fx_rates
         original_yahoo = data_sync_module.fetch_yahoo_fx_rates
+        original_safe = data_sync_module.fetch_safe_fx_rates
         original_frankfurter = data_sync_module.fetch_frankfurter_fx_rates
         original_stooq = data_sync_module.fetch_stooq_fx_rates
         original_currency_api = data_sync_module.fetch_currency_api_fx_rates
@@ -1017,6 +1018,7 @@ class DbAndSyncTests(unittest.TestCase):
         try:
             data_sync_module.fetch_datasrc_fx_rates = fail_fx_source
             data_sync_module.fetch_yahoo_fx_rates = fail_fx_source
+            data_sync_module.fetch_safe_fx_rates = fail_fx_source
             data_sync_module.fetch_frankfurter_fx_rates = fail_fx_source
             data_sync_module.fetch_stooq_fx_rates = fail_fx_source
             data_sync_module.fetch_currency_api_fx_rates = fake_currency_api
@@ -1027,6 +1029,7 @@ class DbAndSyncTests(unittest.TestCase):
         finally:
             data_sync_module.fetch_datasrc_fx_rates = original_datasrc
             data_sync_module.fetch_yahoo_fx_rates = original_yahoo
+            data_sync_module.fetch_safe_fx_rates = original_safe
             data_sync_module.fetch_frankfurter_fx_rates = original_frankfurter
             data_sync_module.fetch_stooq_fx_rates = original_stooq
             data_sync_module.fetch_currency_api_fx_rates = original_currency_api
@@ -1468,6 +1471,7 @@ class DbAndSyncTests(unittest.TestCase):
         db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
         enable_assets(cfg, "VOO")
         original_yahoo = data_sync_module.fetch_yahoo_prices
+        original_eastmoney = data_sync_module.fetch_eastmoney_us_prices
         original_nasdaq = data_sync_module.fetch_nasdaq_prices
         original_stooq = data_sync_module.fetch_stooq_prices
         original_spark = data_sync_module.fetch_yahoo_spark_prices
@@ -1488,30 +1492,32 @@ class DbAndSyncTests(unittest.TestCase):
             }
 
         try:
-            data_sync_module.fetch_yahoo_prices = lambda *_args, **_kwargs: [price_row("test:yahoo", "2020-01-08", 280.0)]
+            data_sync_module.fetch_yahoo_prices = lambda *_args, **_kwargs: [price_row("test:yahoo", "2020-01-07", 279.0)]
+            data_sync_module.fetch_eastmoney_us_prices = lambda *_args, **_kwargs: [price_row("test:eastmoney", "2020-01-08", 280.0)]
             data_sync_module.fetch_nasdaq_prices = lambda *_args, **_kwargs: [price_row("test:nasdaq", "2020-01-09", 281.0)]
             data_sync_module.fetch_stooq_prices = lambda *_args, **_kwargs: []
             data_sync_module.fetch_yahoo_spark_prices = lambda *_args, **_kwargs: [price_row("test:spark", "2020-01-10", 282.0)]
             with db_session(db_path) as conn:
-                conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date >= '2020-01-08'")
+                conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date >= '2020-01-07'")
                 result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["prices:VOO"])
                 rows = rows_to_dicts(
                     conn.execute(
-                        "SELECT trade_date, close, source FROM prices WHERE symbol='VOO' AND trade_date >= '2020-01-08' ORDER BY trade_date"
+                        "SELECT trade_date, close, source FROM prices WHERE symbol='VOO' AND trade_date >= '2020-01-07' ORDER BY trade_date"
                     )
                 )
         finally:
             data_sync_module.fetch_yahoo_prices = original_yahoo
+            data_sync_module.fetch_eastmoney_us_prices = original_eastmoney
             data_sync_module.fetch_nasdaq_prices = original_nasdaq
             data_sync_module.fetch_stooq_prices = original_stooq
             data_sync_module.fetch_yahoo_spark_prices = original_spark
 
-        self.assertEqual(result["inserted"]["prices"], 3)
+        self.assertEqual(result["inserted"]["prices"], 4)
         self.assertNotIn("prices:VOO", result["missing_data"])
-        self.assertEqual([row["source"] for row in rows], ["test:yahoo", "test:nasdaq", "test:spark"])
+        self.assertEqual([row["source"] for row in rows], ["test:yahoo", "test:eastmoney", "test:nasdaq", "test:spark"])
 
     def test_targeted_hk_price_sync_uses_multiple_public_fallbacks(self) -> None:
-        db_path, cfg = build_synced_db("2020-01-01", "2020-01-10")
+        db_path, cfg = build_synced_db("2024-07-02", "2024-07-10")
         hk_asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")
         hk_asset["enabled"] = True
         original_datasrc = data_sync_module.fetch_datasrc_market_prices
@@ -1537,18 +1543,18 @@ class DbAndSyncTests(unittest.TestCase):
             }
 
         try:
-            data_sync_module.fetch_datasrc_market_prices = lambda *_args, **_kwargs: [price_row("test:datasrc", "2020-01-08", 8.0)]
-            data_sync_module.fetch_eastmoney_prices = lambda *_args, **_kwargs: [price_row("test:eastmoney", "2020-01-09", 8.1)]
-            data_sync_module.fetch_tencent_hk_prices = lambda *_args, **_kwargs: [price_row("test:tencent", "2020-01-10", 8.2)]
-            data_sync_module.fetch_hk_yahoo_prices = lambda *_args, **_kwargs: [price_row("test:yahoo-bad", "2020-01-09", 1.1), price_row("test:yahoo-bad", "2020-01-10", 1.1)]
+            data_sync_module.fetch_datasrc_market_prices = lambda *_args, **_kwargs: [price_row("test:datasrc", "2024-07-08", 8.0)]
+            data_sync_module.fetch_eastmoney_prices = lambda *_args, **_kwargs: [price_row("test:eastmoney", "2024-07-09", 8.1)]
+            data_sync_module.fetch_tencent_hk_prices = lambda *_args, **_kwargs: [price_row("test:tencent", "2024-07-10", 8.2)]
+            data_sync_module.fetch_hk_yahoo_prices = lambda *_args, **_kwargs: [price_row("test:yahoo-bad", "2024-07-09", 1.1), price_row("test:yahoo-bad", "2024-07-10", 1.1)]
             data_sync_module.fetch_hk_stooq_prices = lambda *_args, **_kwargs: []
             data_sync_module.fetch_hk_yahoo_spark_prices = lambda *_args, **_kwargs: []
             with db_session(db_path) as conn:
-                conn.execute("DELETE FROM prices WHERE symbol='03195.HK' AND trade_date >= '2020-01-08'")
+                conn.execute("DELETE FROM prices WHERE symbol='03195.HK' AND trade_date >= '2024-07-08'")
                 result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["prices:03195.HK"])
                 rows = rows_to_dicts(
                     conn.execute(
-                        "SELECT trade_date, close, source FROM prices WHERE symbol='03195.HK' AND trade_date >= '2020-01-08' ORDER BY trade_date"
+                        "SELECT trade_date, close, source FROM prices WHERE symbol='03195.HK' AND trade_date >= '2024-07-08' ORDER BY trade_date"
                     )
                 )
         finally:

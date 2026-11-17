@@ -95,6 +95,7 @@ test('rebalance key metrics are immediately readable and keep date and horizonta
   expect(await profit.getAttribute('title')).toContain(fullAmount);
   await expect(profit.locator('.visually-hidden')).toHaveText(fullAmount);
   const decisionDate = source.payload.decision_date || date;
+  await expect(firstRow.locator('td:first-child .rebalance-year-context')).toHaveText(`收益年度 ${source.payload.year_label || decisionDate.slice(0, 4)}年`);
   await expect(profit.locator('.rebalance-year-context')).toContainText(`${source.payload.year_label || decisionDate.slice(0, 4)}年`);
   await expect(profit.locator('.rebalance-year-context')).toContainText(`截至${decisionDate.slice(5)}`);
   expect(await profit.getAttribute('title')).toContain(decisionDate);

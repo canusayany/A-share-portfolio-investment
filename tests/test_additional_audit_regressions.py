@@ -101,12 +101,12 @@ class AdditionalAuditRegressionTests(unittest.TestCase):
                 self.assertEqual(_portfolio_value(state, {symbol: 1}, rates)[0], 11 - 5)
 
     def test_zero_consumption_cannot_become_a_cash_injection_on_hk_holiday(self):
-        path, config = self.fixture("2020-01-31", "2020-02-04", "03195.HK")
+        path, config = self.fixture("2024-05-31", "2024-06-04", "03195.HK")
         next(asset for asset in config["assets"] if asset["enabled"])["target_weight"] = 1
         with db_session(path) as conn:
-            conn.execute("UPDATE trading_calendar SET is_open=0 WHERE market='HK' AND trade_date='2020-02-03'")
+            conn.execute("UPDATE trading_calendar SET is_open=0 WHERE market='HK' AND trade_date='2024-06-03'")
             result = self.run_backtest(conn, config)
-            row = conn.execute("SELECT flow_cny,total_asset_cny FROM portfolio_daily WHERE run_id=? AND trade_date='2020-02-03'", (result["run_id"],)).fetchone()
+            row = conn.execute("SELECT flow_cny,total_asset_cny FROM portfolio_daily WHERE run_id=? AND trade_date='2024-06-03'", (result["run_id"],)).fetchone()
         self.assertEqual(row["flow_cny"], 0)
         self.assertEqual(result["summary"]["total_spend_cny"], 0)
         self.assertAlmostEqual(row["total_asset_cny"], 1_000_000 - 1_000_000 * 0.00008 * 3 / 365, places=5)

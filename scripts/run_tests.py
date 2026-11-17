@@ -19,6 +19,7 @@ MEASURED_FILES = [
     ROOT / "app" / "services" / "backtest_engine.py",
     ROOT / "app" / "services" / "research.py",
     ROOT / "app" / "services" / "data_sync.py",
+    ROOT / "app" / "services" / "repo_history.py",
 ]
 
 EXCLUDED_FUNCTIONS = {
@@ -99,12 +100,13 @@ def exercise_measured_helpers() -> None:
     is_weekday(date(2020, 1, 4))
     next_business_day(date(2020, 1, 3))
     json_loads(None, {})
-    path = Path(tempfile.mkdtemp(prefix="coverage_helpers_")) / "db.sqlite3"
-    init_db(path)
-    with db_session(path) as conn:
-        insert_many(conn, "prices", [])
-    conn = connect(path)
-    conn.close()
+    with tempfile.TemporaryDirectory(prefix="coverage_helpers_") as temp:
+        path = Path(temp) / "db.sqlite3"
+        init_db(path)
+        with db_session(path) as conn:
+            insert_many(conn, "prices", [])
+        conn = connect(path)
+        conn.close()
 
 
 def main() -> int:

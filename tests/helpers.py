@@ -11,8 +11,14 @@ from app.services.calendar import business_days, daterange
 from app.services.data_sync import mark_sync_coverage
 
 
+_TEMP_DATABASES: list[tempfile.TemporaryDirectory] = []
+
+
 def temp_db_path() -> Path:
-    return Path(tempfile.mkdtemp(prefix="portfolio_backtest_")) / "test.sqlite3"
+    # Keep fixtures alive for the test process, then remove their directories.
+    directory = tempfile.TemporaryDirectory(prefix="portfolio_backtest_")
+    _TEMP_DATABASES.append(directory)
+    return Path(directory.name) / "test.sqlite3"
 
 
 def build_synced_db(start: str = "2020-01-01", end: str = "2020-03-31") -> tuple[Path, dict]:
@@ -134,6 +140,7 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
         "512890.SH": 1.0,
         "510300.SH": 3.0,
         "159631.SZ": 1.5,
+        "159593.SZ": 1.0,
         "510500.SH": 2.0,
         "512100.SH": 1.8,
         "518880.SH": 2.5,

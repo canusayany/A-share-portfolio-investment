@@ -7,7 +7,7 @@ import io
 import json
 import sqlite3
 import time
-from threading import Thread
+from threading import Event, Thread
 import unittest
 from urllib import error, request
 
@@ -821,7 +821,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn('src="static/app.js?v=20261117-record-page-scroll"', detail)
+        self.assertIn('src="static/app.js?v=20261117-rebalance-year"', detail)
         self.assertIn("策略诊断", detail)
         self.assertIn("导出CSV", detail)
         self.assertIn("时间窗口", detail)
@@ -1037,6 +1037,55 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(current["status"], "cancelled")
         self.assertIn("页面没有继续请求结果", current["message"])
+
+    def test_polled_backtest_times_out_in_reported_stage_and_releases_worker(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-02-28")
+        original_execute = main_module.execute_backtest_request
+        syncing = Event()
+        resume = Event()
+
+        def slow_execute(settings, write_lock, config, should_cancel=None, report_progress=None, **kwargs):
+            if syncing.is_set():
+                return original_execute(settings, write_lock, config, should_cancel, report_progress=report_progress, **kwargs)
+            report_progress("正在补齐行情数据")
+            syncing.set()
+            resume.wait(5)
+            if should_cancel():
+                raise main_module.BacktestCancelled(main_module.CANCELLED_JOB_MESSAGE)
+            self.fail("expired job did not receive cancellation")
+
+        server = create_server(port=0, db_path=db_path)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        try:
+            main_module.execute_backtest_request = slow_execute
+            thread.start()
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}/api/backtest"
+            job = http_json(f"{base_url}/start", {"config": cfg})
+            job_id = job["job_id"]
+            self.assertTrue(syncing.wait(2))
+            job_url = f"{base_url}/jobs/{job_id}"
+            self.assertEqual(http_json(job_url)["message"], "正在补齐行情数据")
+            with server.jobs_lock:
+                server.job_created_monotonic[job_id] -= server.backtest_job_timeout_seconds
+            timed_out = http_json(job_url)
+            self.assertEqual(timed_out["status"], "failed")
+            self.assertIn("回测超时（正在补齐行情数据）", timed_out["error"])
+            resume.set()
+            server.job_futures[job_id].result(timeout=2)
+            self.assertEqual(http_json(job_url)["error"], timed_out["error"])
+
+            retry = http_json(f"{base_url}/start", {"config": cfg})
+            server.job_futures[retry["job_id"]].result(timeout=5)
+            current = http_json(f"{base_url}/jobs/{retry['job_id']}")
+            self.assertEqual(current["status"], "completed")
+            self.assertTrue(current["result"]["chart"]["dates"])
+        finally:
+            resume.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            main_module.execute_backtest_request = original_execute
 
 
 if __name__ == "__main__":

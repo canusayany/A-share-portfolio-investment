@@ -101,6 +101,21 @@ class FeeTests(unittest.TestCase):
 
 
 class CalendarAndConfigTests(unittest.TestCase):
+    def test_sp500_corporate_action_rules_survive_stale_client_metadata(self) -> None:
+        cfg = normalize_config({"assets": [{
+            "symbol": "513500.SH", "enabled": True, "target_weight": 0.4,
+            "trade_start_date": "2013-12-05", "non_trading_dates": [], "share_splits": [],
+        }]})
+        asset = next(item for item in cfg["assets"] if item["symbol"] == "513500.SH")
+        self.assertTrue(asset["enabled"])
+        self.assertEqual(asset["target_weight"], 0.4)
+        self.assertEqual(asset["trade_start_date"], "2014-01-15")
+        self.assertEqual(asset["non_trading_dates"], ["2022-03-29"])
+        self.assertEqual(asset["share_splits"], [{
+            "effective_date": "2022-03-29", "price_multiplier": 2.0,
+            "source": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2022-03-18/513500_20220318_1_ZwC16pmA.pdf",
+        }])
+
     def test_business_rebalance_and_spend_days(self) -> None:
         days = business_days("2020-01-01", "2020-07-10")
         self.assertNotIn(date(2020, 1, 4), days)
@@ -130,6 +145,10 @@ class CalendarAndConfigTests(unittest.TestCase):
         cn_sp500 = next(asset for asset in cfg["assets"] if asset["symbol"] == "513500.SH")
         self.assertEqual(cn_sp500["exclusive_group"], "sp500")
         self.assertEqual(cn_sp500["inception_date"], "2013-12-05")
+        self.assertEqual(cn_sp500["trade_start_date"], "2014-01-15")
+        self.assertEqual(cn_sp500["non_trading_dates"], ["2022-03-29"])
+        self.assertEqual(cn_sp500["share_splits"][0]["effective_date"], "2022-03-29")
+        self.assertEqual(cn_sp500["share_splits"][0]["price_multiplier"], 2.0)
         self.assertEqual(cn_sp500["management_fee"], 0.006)
         self.assertEqual(cn_sp500["custodian_fee"], 0.002)
         dividend_low_vol = next(asset for asset in cfg["assets"] if asset["symbol"] == "512890.SH")
@@ -246,6 +265,37 @@ class CalendarAndConfigTests(unittest.TestCase):
         next(asset for asset in duplicate_broad["assets"] if asset["symbol"] == "159631.SZ")["enabled"] = True
         next(asset for asset in duplicate_broad["assets"] if asset["symbol"] == "510500.SH")["enabled"] = True
         self.assertTrue(any("exclusive asset group cn_broad_etf" in item for item in validate_config(duplicate_broad)))
+
+    def test_a50_selection_preserves_official_dates_and_broad_etf_exclusivity(self) -> None:
+        cfg = normalize_config({
+            "assets": [{"key": "cn_a50_etf", "enabled": True, "target_weight": 0.25}],
+        })
+        a50 = next(asset for asset in backtest_assets(cfg) if asset["key"] == "cn_a50_etf")
+
+        self.assertEqual(a50["symbol"], "159593.SZ")
+        self.assertTrue(a50["enabled"])
+        self.assertEqual(a50["target_weight"], 0.25)
+        self.assertEqual(a50["exclusive_group"], "cn_broad_etf")
+        self.assertEqual(a50["inception_date"], "2024-03-04")
+        self.assertEqual(a50["trade_start_date"], "2024-03-12")
+        self.assertTrue(a50["auto_switch_on_trade_start"])
+        self.assertEqual(a50["management_fee"], 0.0015)
+        self.assertEqual(a50["custodian_fee"], 0.0005)
+        self.assertEqual(a50["price_fallback"]["symbol"], "930050.CSI")
+        self.assertEqual(a50["price_fallback"]["start_date"], "2014-12-31")
+        self.assertEqual(a50["price_fallback"]["scale_mode"], "splice")
+        self.assertEqual(a50["price_fallback"]["annual_expense_drag_rate"], 0.002)
+        self.assertEqual(validate_config(cfg), [])
+
+        next(asset for asset in cfg["assets"] if asset["symbol"] == "510300.SH")["enabled"] = True
+        self.assertTrue(any("exclusive asset group cn_broad_etf" in error for error in validate_config(cfg)))
+
+        old_client_cfg = normalize_config({
+            "assets": [asset for asset in default_config()["assets"] if asset["key"] != "cn_a50_etf"],
+        })
+        old_client_a50 = next(asset for asset in old_client_cfg["assets"] if asset["key"] == "cn_a50_etf")
+        self.assertFalse(old_client_a50["enabled"])
+        self.assertEqual(old_client_a50["symbol"], "159593.SZ")
 
     def test_blank_date_inputs_keep_default_dates(self) -> None:
         defaults = default_config()

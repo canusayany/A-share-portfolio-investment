@@ -30,6 +30,7 @@ from app.config import (
 )
 from app.db import insert_many, json_dumps, utc_now
 from app.services.price_data import is_proxy_price_source
+from app.services.repo_history import verified_repo_absence_dates
 from app.services.calendar import add_business_days, business_days, first_business_day_by_month, market_business_days, parse_date, rebalance_days, repo_actual_days, repo_maturity_day, repo_year_basis
 from app.services.fees import (
     CnEtfFeeConfig,
@@ -53,7 +54,7 @@ from app.services.fees import (
 )
 
 logger = logging.getLogger(__name__)
-BACKTEST_ENGINE_VERSION = 52
+BACKTEST_ENGINE_VERSION = 56
 RANKING_VERSION = 4
 RANKING_MIN_EXCESS_ANNUALIZED_RETURN = 0.02
 RANKING_MIN_DRAWDOWN = 0.08
@@ -488,34 +489,48 @@ def attach_prior_published_close_execution_maps(
 ) -> None:
     """Use only the latest previously published close for index-proxy trades.
 
-    ChinaBond publishes a daily index level, not an exchange opening quote.
-    Mapping today's index close into today's ``open`` is a future-data leak.
-    For explicitly non-tradable routes, model an execution at the last close
-    that was already known before the current session opened.
+    ChinaBond and CSI's index history publish daily closes without exchange
+    opening quotes. A stored close copied to ``open`` is unavailable at that
+    session's open. Trade these proxies at the last known close. After the
+    first ETF opening, an alias still held until scheduled rebalancing follows
+    the real ETF's opening quotes, just as its valuation follows ETF closes.
     """
-    symbols: set[str] = set()
+    published_close_routes: dict[str, dict[str, float]] = {}
     for asset in assets:
-        if asset.get("tradable", True) is not False:
-            continue
-        symbols.add(str(asset["symbol"]))
         proxy = price_proxy_asset(asset)
-        if proxy:
-            symbols.add(str(proxy["symbol"]))
-    for symbol in symbols:
+        if asset.get("tradable", True) is False:
+            published_close_routes[str(asset["symbol"])] = {}
+            if proxy:
+                published_close_routes[proxy["symbol"]] = {}
+        elif (
+            proxy
+            and asset["price_fallback"].get("kind") == "index"
+            and proxy["symbol"].upper().endswith(".CSI")
+        ):
+            etf_start = asset_trade_start_date(asset, "")
+            published_close_routes[proxy["symbol"]] = {
+                trade_date: price
+                for trade_date, price in open_price_maps.get(asset["symbol"], {}).items()
+                if trade_date >= etf_start
+            }
+    for symbol, etf_opens in published_close_routes.items():
         closes = close_price_maps.get(symbol, {})
-        if not closes:
-            open_price_maps[symbol] = {}
-            continue
         ordered = sorted((parse_date(trade_date), float(value)) for trade_date, value in closes.items())
+        first_etf_open = min(etf_opens, default=None)
+        proxy_end = parse_date(first_etf_open) if first_etf_open is not None else None
         cursor = 0
         last_published: float | None = None
         safe_opens: dict[str, float] = {}
         for trading_day in trading_days:
+            if proxy_end is not None and trading_day > proxy_end:
+                break
             while cursor < len(ordered) and ordered[cursor][0] < trading_day:
                 last_published = ordered[cursor][1]
                 cursor += 1
             if last_published is not None:
                 safe_opens[trading_day.isoformat()] = last_published
+        if first_etf_open is not None:
+            safe_opens.update({trade_date: value for trade_date, value in etf_opens.items() if trade_date > first_etf_open})
         open_price_maps[symbol] = safe_opens
 
 
@@ -2750,6 +2765,7 @@ def _simulate_comparison_series(
     reb_days: set[date],
     should_cancel=None,
     repo_trading_days: list[date] | None = None,
+    verified_repo_absences: set[str] | None = None,
 ) -> dict[str, float]:
     assets = comparison_assets(config)
     comparison_config = {**config, "assets": assets, "repo_symbol": repo_rate_symbol(config)}
@@ -2789,10 +2805,13 @@ def _simulate_comparison_series(
         for pair in latest_fx_rates:
             latest_fx_rates[pair] = forward_value(valuation_fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
         repo_rate = repo_map.get(day_str)
+        verified_no_quote = repo_rate is None and day_str in (verified_repo_absences or set())
         if repo_rate is not None:
             latest_repo_rate = repo_rate
+        elif verified_no_quote:
+            latest_repo_rate = None
         one_day_repo_rate = one_day_repo_map.get(day_str)
-        if one_day_repo_rate is not None:
+        if one_day_repo_rate is not None or verified_no_quote:
             latest_one_day_repo_rate = one_day_repo_rate
         if any(value is None for value in latest_fx_rates.values()):
             continue
@@ -3031,13 +3050,14 @@ def run_backtest(
     }
     for asset in sim_assets + [{"symbol": benchmark_symbol, "market": "CN"}]:
         symbol = asset["symbol"]
-        valid_dates = sessions[asset.get("market", "CN")]
+        valid_dates = sessions[asset.get("market", "CN")] - set(asset.get("non_trading_dates") or [])
         for maps in (price_maps, open_price_maps):
             maps[symbol] = {day: value for day, value in maps.get(symbol, {}).items() if day in valid_dates}
     needed_fx_pairs = required_fx_pairs_for_assets(all_assets)
     fx_maps = load_fx_maps(conn, needed_fx_pairs, start, end)
     repo_map = load_repo_map(conn, repo_symbol, start, end)
     one_day_repo_map = load_repo_map(conn, "204001", start, end)
+    repo_absence_dates = verified_repo_absence_dates(conn, repo_symbol, start, end)
     # 511990's exchange price includes its daily holding-period income.  Old
     # databases may contain rows from the generic dividend synchronizer; never
     # add those to the already total-return market price.
@@ -3050,6 +3070,8 @@ def run_backtest(
         share_scale_maps,
     )
     days = reference_trading_days(start, end, price_maps.get(benchmark_symbol, {}), repo_map)
+    if len(days) < 2:
+        raise BacktestError("backtest needs at least two reference-market trading days")
     attach_prior_published_close_execution_maps(open_price_maps, price_maps, all_assets, days)
     # Keep valuation carry-forward separate from prices eligible for execution.
     valuation_price_maps = reference_value_maps(price_maps, days)
@@ -3078,8 +3100,6 @@ def run_backtest(
     # complete 204001 history for real runs.
     if any(not fx_maps.get(pair) for pair in needed_fx_pairs) or not (repo_map or one_day_repo_map):
         raise BacktestError("missing fx_rates or repo_rates; run data sync first")
-    if len(days) < 2:
-        raise BacktestError("backtest needs at least two reference-market trading days")
 
     initial_capital_cny = float(config["initial_capital_cny"])
     state = _initial_state(initial_capital_cny, sim_assets)
@@ -3182,10 +3202,15 @@ def run_backtest(
         for pair in latest_fx_rates:
             latest_fx_rates[pair] = forward_value(valuation_fx_maps.get(pair, {}), day, latest_fx_rates.get(pair))
         repo_rate = repo_map.get(day_str)
+        verified_no_quote = repo_rate is None and day_str in repo_absence_dates
         if repo_rate is not None:
             latest_repo_rate = repo_rate
+        elif verified_no_quote:
+            # A verified historical no-quote session cannot execute a fresh
+            # selected-tenor loan at yesterday's rate. Use today's real 204001.
+            latest_repo_rate = None
         one_day_repo_rate = one_day_repo_map.get(day_str)
-        if one_day_repo_rate is not None:
+        if one_day_repo_rate is not None or verified_no_quote:
             latest_one_day_repo_rate = one_day_repo_rate
         if any(value is None for value in latest_fx_rates.values()):
             continue
@@ -3770,6 +3795,11 @@ def run_backtest(
             period_max_drawdown = 0.0
             initial_rebalance_done = True
             if starts_dip_buy_cycle:
+                # A proxy can first become available at the initial close.
+                # Remember the route actually held for the next opening switch.
+                for logical_symbol, physical_symbol in active_route_symbols(day, close_execution_prices, prepared_routes).items():
+                    if after_values.get(physical_symbol, 0.0) > 0:
+                        previous_route_symbols[logical_symbol] = physical_symbol
                 # Keep the first allocation as the return denominator, while
                 # the virtual cash baseline retains opening transaction costs
                 # in annual P&L and excludes the allocated principal.
@@ -4319,6 +4349,7 @@ def run_backtest(
             set(reb_days),
             should_cancel,
             repo_trading_days=repo_trading_days,
+            verified_repo_absences=repo_absence_dates,
         )
     for row, payload in zip(daily_rows, daily_payloads):
         if include_comparison and persist:

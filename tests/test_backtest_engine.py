@@ -130,6 +130,76 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(proxy["2019-01-18"], 201.0)
         self.assertEqual(proxy["2020-01-02"], 210.0)
 
+    def test_csi_proxy_rebalances_at_previous_close_after_market_holidays(self) -> None:
+        db_path, config = build_synced_db("2007-12-27", "2008-01-04")
+        config.update(monthly_spend_cny=0, rebalance_band=0, rebalance_to_target=True)
+        for asset in config["assets"]:
+            asset["enabled"] = asset["symbol"] == "512890.SH"
+            asset["target_weight"] = 0.5 if asset["enabled"] else 0.0
+
+        with db_session(db_path) as conn:
+            conn.execute(
+                "UPDATE trading_calendar SET is_open=0 WHERE market='CN' AND trade_date IN ('2007-12-31', '2008-01-01')"
+            )
+            conn.executemany(
+                """
+                UPDATE prices SET open=?, close=?, source='csindex:index_perf:splice_scale_0.0001'
+                WHERE symbol='512890.SH' AND trade_date=?
+                """,
+                [
+                    (0.60, 0.60, "2007-12-27"),
+                    (0.72, 0.72, "2007-12-28"),
+                    (1.08, 1.08, "2008-01-02"),
+                    (1.05, 1.05, "2008-01-03"),
+                    (0.96, 0.96, "2008-01-04"),
+                ],
+            )
+            result = run_backtest(conn, config, include_comparison=False)
+            trades = rows_to_dicts(conn.execute(
+                "SELECT trade_date, side, price FROM trades WHERE run_id=? AND symbol='H20269.CSI' ORDER BY trade_date",
+                (result["run_id"],),
+            ))
+
+        self.assertEqual(
+            [(row["trade_date"], row["side"]) for row in trades],
+            [("2007-12-27", "BUY"), ("2008-01-02", "SELL")],
+        )
+        drag_end = date(2008, 1, 4)
+        self.assertAlmostEqual(trades[0]["price"], 0.60 / annual_expense_factor(date(2007, 12, 27), drag_end, 0.0063))
+        self.assertAlmostEqual(trades[1]["price"], 0.72 / annual_expense_factor(date(2007, 12, 28), drag_end, 0.0063))
+
+    def test_csi_alias_uses_real_etf_open_when_scheduled_rebalance_retires_it(self) -> None:
+        db_path, config = build_synced_db("2019-01-16", "2020-01-06")
+        config.update(monthly_spend_cny=0, rebalance_band=0, rebalance_to_target=True)
+        for asset in config["assets"]:
+            asset["enabled"] = asset["symbol"] == "512890.SH"
+            asset["target_weight"] = 0.5 if asset["enabled"] else 0.0
+
+        with db_session(db_path) as conn:
+            conn.execute("UPDATE trading_calendar SET is_open=0 WHERE market='CN' AND trade_date='2020-01-01'")
+            conn.execute(
+                """
+                UPDATE prices SET open=close, source='csindex:index_perf:splice_scale_0.0001'
+                WHERE symbol='512890.SH' AND trade_date < '2019-01-18'
+                """
+            )
+            conn.execute("UPDATE prices SET close=1.4 WHERE symbol='512890.SH' AND trade_date='2019-12-31'")
+            conn.execute("UPDATE prices SET open=1.5, close=1.6 WHERE symbol='512890.SH' AND trade_date='2020-01-02'")
+            result = run_backtest(conn, config, include_comparison=False)
+            trades = rows_to_dicts(conn.execute(
+                """
+                SELECT symbol, side, price FROM trades WHERE run_id=? AND trade_date='2020-01-02'
+                    AND symbol IN ('H20269.CSI', '512890.SH')
+                ORDER BY side DESC
+                """,
+                (result["run_id"],),
+            ))
+
+        self.assertEqual(
+            [(row["symbol"], row["side"], row["price"]) for row in trades],
+            [("H20269.CSI", "SELL", 1.5), ("512890.SH", "BUY", 1.5)],
+        )
+
     def test_verified_etf_share_consolidation_is_continuous_but_cash_dividend_is_not_adjusted(self) -> None:
         rows = [
             {"trade_date": "2022-09-01", "price": 0.982, "adj_factor": 1.0},
@@ -1026,7 +1096,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertAlmostEqual(state.total_fees_cny, trades[0]["fee"])
 
     def test_hk_connect_etf_uses_hkd_fx_and_board_lot_rules(self) -> None:
-        db_path, cfg = build_synced_db("2020-01-01", "2020-03-31")
+        db_path, cfg = build_synced_db("2025-01-02", "2025-03-31")
         hk_asset = next(asset for asset in cfg["assets"] if asset["symbol"] == "03195.HK")
         hk_asset["enabled"] = True
         hk_asset["target_weight"] = 0.10
@@ -1049,8 +1119,8 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertIn("03195.HK", final_payload["values"])
         self.assertGreater(result["summary"]["total_fees_cny"], 0)
 
-    def test_cn_sp500_waits_for_next_rebalance_after_inception(self) -> None:
-        db_path, cfg = build_synced_db("2013-01-01", "2014-02-28")
+    def test_cn_sp500_waits_for_next_rebalance_after_listing(self) -> None:
+        db_path, cfg = build_synced_db("2013-01-01", "2015-02-27")
         cfg["monthly_spend_cny"] = 0.0
         for asset in cfg["assets"]:
             is_cn_sp500 = asset["symbol"] == "513500.SH"
@@ -1074,7 +1144,9 @@ class BacktestEngineTests(unittest.TestCase):
         buys = [trade for trade in trades if trade["side"] == "BUY"]
         self.assertEqual(first_payload["targets"], {"REPO": 1.0})
         self.assertTrue(buys)
-        self.assertTrue(all(trade["trade_date"] >= "2014-01-01" for trade in buys))
+        # The January 2014 rebalance preceded the actual January 15 listing.
+        # With annual rebalancing, this route first becomes eligible in 2015.
+        self.assertTrue(all(trade["trade_date"] >= "2015-01-01" for trade in buys))
         self.assertTrue(all(trade["currency"] == "CNY" for trade in buys))
         self.assertTrue(all(trade["quantity"] % 100 == 0 for trade in buys))
         self.assertGreater(result["summary"]["total_fees_cny"], 0)
@@ -2129,6 +2201,7 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_new_broad_etfs_use_their_index_proxy_before_inception(self) -> None:
         for symbol, proxy_symbol, before_day, switch_day in (
+            ("159593.SZ", "930050.CSI", date(2024, 3, 11), date(2024, 3, 12)),
             ("510500.SH", "000905.SH", date(2013, 1, 4), date(2013, 3, 15)),
             ("512100.SH", "000852.SH", date(2016, 10, 31), date(2016, 11, 4)),
         ):
@@ -2148,6 +2221,47 @@ class BacktestEngineTests(unittest.TestCase):
             self.assertNotIn(symbol, before)
             self.assertAlmostEqual(after[symbol], 0.50)
             self.assertNotIn(proxy_symbol, after)
+
+    def test_a50_listing_switch_uses_prior_proxy_close_and_real_etf_open(self) -> None:
+        config = normalize_config({
+            "start_date": "2024-03-11",
+            "end_date": "2024-03-14",
+            "monthly_spend_cny": 0,
+            "annual_rebalance_month": 6,
+        })
+        for asset in config["assets"]:
+            asset["enabled"] = asset["symbol"] == "159593.SZ"
+            asset["target_weight"] = 0.5 if asset["enabled"] else 0.0
+        db_path = temp_db_path()
+        init_db(db_path)
+
+        with db_session(db_path) as conn:
+            seed_fixture_data(conn, config, config["start_date"], config["end_date"])
+            conn.executemany(
+                "UPDATE prices SET open=?, close=?, source=? WHERE symbol='159593.SZ' AND trade_date=?",
+                [
+                    (1.0, 1.0, "csindex:index_perf:splice_scale_0.001", "2024-03-11"),
+                    (1.04, 1.08, "tushare:fund_daily", "2024-03-12"),
+                ],
+            )
+            result = run_backtest(conn, config, include_comparison=False)
+            trades = rows_to_dicts(conn.execute(
+                """
+                SELECT trade_date, symbol, side, price FROM trades
+                WHERE run_id=? AND symbol IN ('930050.CSI', '159593.SZ')
+                ORDER BY trade_date, side DESC
+                """,
+                (result["run_id"],),
+            ))
+
+        self.assertEqual(
+            [(row["trade_date"], row["symbol"], row["side"], row["price"]) for row in trades],
+            [
+                ("2024-03-11", "930050.CSI", "BUY", 1.0),
+                ("2024-03-12", "930050.CSI", "SELL", 1.0),
+                ("2024-03-12", "159593.SZ", "BUY", 1.04),
+            ],
+        )
 
     def test_gold_switches_from_518880_to_518850_from_2021(self) -> None:
         cfg = normalize_config({})

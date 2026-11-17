@@ -23,7 +23,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
     {
         "key": "us_sp500",
         "symbol": "VOO",
-        "name": "标普500指数基金",
+        "name": "Vanguard标普500ETF（VOO）",
         "target_weight": 0.0,
         "enabled": False,
         "currency": "USD",
@@ -32,6 +32,8 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "exclusive_group": "sp500",
         "choice_label": "美股 VOO",
         "inception_date": "2010-09-07",
+        # NASDAQ's VOO trading circular is dated 2010-09-09.
+        "trade_start_date": "2010-09-09",
         "expense_ratio": 0.0003,
     },
     {
@@ -45,7 +47,8 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "asset_type": "hk_connect_etf",
         "exclusive_group": "sp500",
         "choice_label": "港股通 03195",
-        "inception_date": "2015-05-18",
+        "inception_date": "2024-04-19",
+        "trade_start_date": "2024-04-23",
         "expense_ratio": 0.0079,
     },
     {
@@ -60,6 +63,16 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "exclusive_group": "sp500",
         "choice_label": "A股 513500",
         "inception_date": "2013-12-05",
+        "trade_start_date": "2014-01-15",
+        # The verified split day was a full-day suspension, not a missing bar.
+        "non_trading_dates": ["2022-03-29"],
+        "share_splits": [
+            {
+                "effective_date": "2022-03-29",
+                "price_multiplier": 2.0,
+                "source": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2022-03-18/513500_20220318_1_ZwC16pmA.pdf",
+            }
+        ],
         "management_fee": 0.006,
         "custodian_fee": 0.002,
     },
@@ -74,6 +87,9 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "asset_type": "cn_etf",
         "inception_date": "2018-12-19",
         "trade_start_date": "2019-01-18",
+        # The fund was suspended for its share split and reopened on 2021-10-25.
+        # https://static.cninfo.com.cn/finalpage/2021-10-13/1211245550.PDF
+        "non_trading_dates": ["2021-10-22"],
         "management_fee": 0.005,
         "custodian_fee": 0.001,
         # Tushare can publish the latest fund adjustment factor later than the
@@ -125,6 +141,36 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
             "name": "嘉实沪深300ETF联接(LOF)A",
             "start_date": "2005-08-29",
             "scale_mode": "splice",
+        },
+    },
+    {
+        "key": "cn_a50_etf",
+        "symbol": "159593.SZ",
+        "name": "平安中证A50ETF",
+        "target_weight": 0.0,
+        "enabled": False,
+        "currency": "CNY",
+        "market": "CN",
+        "asset_type": "cn_etf",
+        "exclusive_group": "cn_broad_etf",
+        "choice_label": "中证A50 159593",
+        # Ping An's fund disclosure and listing announcement distinguish the
+        # contract effective date from the first exchange-trading session.
+        "inception_date": "2024-03-04",
+        "trade_start_date": "2024-03-12",
+        "auto_switch_on_trade_start": True,
+        "management_fee": 0.0015,
+        "custodian_fee": 0.0005,
+        "price_fallback": {
+            "kind": "index",
+            "symbol": "930050.CSI",
+            # CSI launched this price index on 2024-01-02 with a 2014-12-31
+            # base date. Earlier observations are retrospective index history,
+            # not historical ETF quotes or a dividend-reinvested return series.
+            "name": "中证A50价格指数（上市前历史代理）",
+            "start_date": "2014-12-31",
+            "scale_mode": "splice",
+            "annual_expense_drag_rate": 0.002,
         },
     },
     {

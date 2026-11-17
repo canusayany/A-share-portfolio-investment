@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -52,9 +53,11 @@ from app.services.research import run_research, validate_research_request
 logger = logging.getLogger(__name__)
 MAX_LOG_BYTES = 5 * 1024 * 1024
 DEFAULT_ABANDONED_JOB_SECONDS = 120.0
+DEFAULT_BACKTEST_JOB_TIMEOUT_SECONDS = 300.0
 DEFAULT_JOB_RETENTION_SECONDS = 600.0
 JOB_CLEANUP_INTERVAL_SECONDS = 5.0
 CANCELLED_JOB_MESSAGE = "任务已取消：页面没有继续请求结果"
+TERMINAL_BACKTEST_JOB_STATUSES = {"completed", "failed", "cancelled"}
 TIME_RANKING_VERSION = 1
 TIME_RANKING_MIN_OBSERVATIONS = 5
 MAX_RESEARCH_PENDING_JOBS = 8
@@ -989,6 +992,17 @@ def raise_if_cancelled(should_cancel=None) -> None:
         raise BacktestCancelled(CANCELLED_JOB_MESSAGE)
 
 
+@contextmanager
+def backtest_write_lock(write_lock: Lock, should_cancel):
+    while not write_lock.acquire(timeout=0.25):
+        raise_if_cancelled(should_cancel)
+    try:
+        raise_if_cancelled(should_cancel)
+        yield
+    finally:
+        write_lock.release()
+
+
 def execute_backtest_request(
     settings,
     write_lock: Lock,
@@ -997,6 +1011,7 @@ def execute_backtest_request(
     *,
     defer_extended_analysis: bool = False,
     leaderboard_key_id: str = DEFAULT_LEADERBOARD_KEY_ID,
+    report_progress=None,
 ) -> dict:
     request_id = str(uuid.uuid4())[:8]
     started_at = time.perf_counter()
@@ -1014,10 +1029,13 @@ def execute_backtest_request(
         config["repo_symbol"],
         [asset["symbol"] for asset in config["assets"] if asset.get("enabled", True)],
     )
-    with write_lock:
-        raise_if_cancelled(should_cancel)
+    if report_progress:
+        report_progress("正在等待数据写入锁")
+    with backtest_write_lock(write_lock, should_cancel):
         lock_acquired_at = time.perf_counter()
         logger.info("backtest lock acquired id=%s wait_seconds=%.3f", request_id, lock_acquired_at - started_at)
+        if report_progress:
+            report_progress("正在检查回测所需的行情")
         with db_session(settings.db_path) as conn:
             missing_started_at = time.perf_counter()
             missing_before = required_data_missing(conn, config["start_date"], config["end_date"], data_assets, rate_symbol)
@@ -1066,6 +1084,8 @@ def execute_backtest_request(
         sync_result = None
         if missing_before:
             raise_if_cancelled(should_cancel)
+            if report_progress:
+                report_progress("正在补齐行情数据")
             with db_session(settings.db_path) as conn:
                 sync_started_at = time.perf_counter()
                 sync_result = sync_all(
@@ -1084,8 +1104,10 @@ def execute_backtest_request(
                 if cache_invalidated:
                     # Commit invalidation with the changed source data, even if
                     # another source is still missing or the request is cancelled.
-                    conn.execute("UPDATE backtest_runs SET config_hash=NULL")
+                    conn.execute("UPDATE backtest_runs SET config_hash=NULL WHERE config_hash IS NOT NULL")
             raise_if_cancelled(should_cancel)
+            if report_progress:
+                report_progress("正在复核行情完整性")
             with db_session(settings.db_path) as conn:
                 missing_after_started_at = time.perf_counter()
                 missing_after = required_data_missing(conn, config["start_date"], config["end_date"], data_assets, rate_symbol)
@@ -1095,6 +1117,8 @@ def execute_backtest_request(
 
         with db_session(settings.db_path) as conn:
             raise_if_cancelled(should_cancel)
+            if report_progress:
+                report_progress("正在计算回测结果")
             run_started_at = time.perf_counter()
             needs_extended_analysis = defer_extended_analysis and extended_analysis_required(config)
             result = run_backtest(
@@ -1154,12 +1178,18 @@ class PortfolioServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def set_job(server, job_id: str, **updates) -> None:
+def set_job(server, job_id: str, **updates) -> bool:
     with server.jobs_lock:  # type: ignore[attr-defined]
-        job = dict(server.jobs.get(job_id, {}))  # type: ignore[attr-defined]
+        current = server.jobs.get(job_id)  # type: ignore[attr-defined]
+        if not current or current["status"] in TERMINAL_BACKTEST_JOB_STATUSES:
+            return False
+        job = dict(current)
         job.update(updates)
         job["updated_at"] = iso_now()
         server.jobs[job_id] = job  # type: ignore[attr-defined]
+        if job["status"] in TERMINAL_BACKTEST_JOB_STATUSES:
+            server.job_activity[job_id] = time.monotonic()  # type: ignore[attr-defined]
+        return True
 
 
 def record_job_request(server, job_id: str) -> None:
@@ -1174,28 +1204,31 @@ def job_cancel_requested(server, job_id: str) -> bool:
     return bool(event and event.is_set())
 
 
-def cancel_job(server, job_id: str, message: str = CANCELLED_JOB_MESSAGE) -> None:
-    event = server.job_cancel_events.get(job_id)  # type: ignore[attr-defined]
-    if event:
-        event.set()
-    future = server.job_futures.get(job_id)  # type: ignore[attr-defined]
-    if future:
-        future.cancel()
+def cancel_job(server, job_id: str, *, timed_out: bool = False) -> None:
     with server.jobs_lock:  # type: ignore[attr-defined]
         job = server.jobs.get(job_id)  # type: ignore[attr-defined]
-        if not job or job.get("status") in {"completed", "failed", "cancelled"}:
+        if not job or job["status"] in TERMINAL_BACKTEST_JOB_STATUSES:
             return
+        message = CANCELLED_JOB_MESSAGE
+        status = "cancelled"
+        if timed_out:
+            message = f"回测超时（{job['message']}）。请查看最近记录或重试。"
+            status = "failed"
+        server.job_cancel_events[job_id].set()  # type: ignore[attr-defined]
+        future = server.job_futures.get(job_id)  # type: ignore[attr-defined]
         job.update(
             {
-                "status": "cancelled",
+                "status": status,
                 "message": message,
                 "error": message,
                 "completed_at": iso_now(),
                 "updated_at": iso_now(),
             }
         )
-        server.jobs[job_id] = job  # type: ignore[attr-defined]
-    logger.info("backtest job cancelled id=%s reason=%s", job_id, message)
+        server.job_activity[job_id] = time.monotonic()  # type: ignore[attr-defined]
+    if future:
+        future.cancel()
+    logger.info("backtest job stopped id=%s reason=%s", job_id, message)
 
 
 def cleanup_jobs(server) -> None:
@@ -1203,24 +1236,33 @@ def cleanup_jobs(server) -> None:
     abandoned_seconds = float(getattr(server, "job_abandoned_seconds", DEFAULT_ABANDONED_JOB_SECONDS))
     retention_seconds = float(getattr(server, "job_retention_seconds", DEFAULT_JOB_RETENTION_SECONDS))
     to_cancel: list[str] = []
+    to_time_out: list[str] = []
     to_delete: list[str] = []
     with server.jobs_lock:  # type: ignore[attr-defined]
         for job_id, job in list(server.jobs.items()):  # type: ignore[attr-defined]
             activity = server.job_activity.get(job_id, now)  # type: ignore[attr-defined]
             status = job.get("status")
-            if status in {"queued", "running"} and now - activity > abandoned_seconds:
-                to_cancel.append(job_id)
-            elif status in {"completed", "failed", "cancelled"} and now - activity > retention_seconds:
-                to_delete.append(job_id)
+            if status in {"queued", "running"}:
+                if now - server.job_created_monotonic[job_id] >= server.backtest_job_timeout_seconds:
+                    to_time_out.append(job_id)
+                elif now - activity > abandoned_seconds:
+                    to_cancel.append(job_id)
+            elif status in TERMINAL_BACKTEST_JOB_STATUSES and now - activity > retention_seconds:
+                future = server.job_futures.get(job_id)
+                if not future or future.done():
+                    to_delete.append(job_id)
         for job_id in to_delete:
             job = server.jobs.get(job_id)  # type: ignore[attr-defined]
             server.jobs.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_activity.pop(job_id, None)  # type: ignore[attr-defined]
+            server.job_created_monotonic.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_cancel_events.pop(job_id, None)  # type: ignore[attr-defined]
             server.job_futures.pop(job_id, None)  # type: ignore[attr-defined]
             request_index_key = job.get("request_index_key") if job else None
             if request_index_key:
                 server.job_request_index.pop(request_index_key, None)  # type: ignore[attr-defined]
+    for job_id in to_time_out:
+        cancel_job(server, job_id, timed_out=True)
     for job_id in to_cancel:
         cancel_job(server, job_id)
     if to_delete:
@@ -1406,22 +1448,20 @@ def run_backtest_job(
     config: dict,
     leaderboard_key_id: str = DEFAULT_LEADERBOARD_KEY_ID,
 ) -> None:
-    set_job(server, job_id, status="running", message="正在检查数据并运行回测", started_at=iso_now())
+    if not set_job(server, job_id, status="running", message="正在检查数据并运行回测", started_at=iso_now()):
+        return
     try:
         execute_parameters = inspect.signature(execute_backtest_request).parameters
         execute_kwargs = {
             "should_cancel": lambda: job_cancel_requested(server, job_id),
         }
-        if "defer_extended_analysis" in execute_parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in execute_parameters.values()
-        ):
+        accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in execute_parameters.values())
+        if "defer_extended_analysis" in execute_parameters or accepts_kwargs:
             execute_kwargs["defer_extended_analysis"] = True
-        if "leaderboard_key_id" in execute_parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in execute_parameters.values()
-        ):
+        if "leaderboard_key_id" in execute_parameters or accepts_kwargs:
             execute_kwargs["leaderboard_key_id"] = leaderboard_key_id
+        if "report_progress" in execute_parameters or accepts_kwargs:
+            execute_kwargs["report_progress"] = lambda message: set_job(server, job_id, message=message)
         result = execute_backtest_request(
             server.settings,  # type: ignore[attr-defined]
             server.write_lock,  # type: ignore[attr-defined]
@@ -1441,6 +1481,8 @@ def run_backtest_job(
         if job_cancel_requested(server, job_id):
             set_job(server, job_id, status="cancelled", message=CANCELLED_JOB_MESSAGE, error=CANCELLED_JOB_MESSAGE, completed_at=iso_now())
         else:
+            if not set_job(server, job_id, message="正在整理图表和回测摘要"):
+                return
             try:
                 with db_session(server.settings.db_path) as conn:  # type: ignore[attr-defined]
                     chart_rows = rows_to_dicts(
@@ -1456,8 +1498,8 @@ def run_backtest_job(
                 result["chart"] = columnar_chart_payload(chart_rows, max_points=800)
             except Exception:
                 logger.exception("failed to attach initial chart payload job_id=%s", job_id)
-            set_job(server, job_id, status="completed", message="回测完成", result=result, completed_at=iso_now())
-            if result.get("analysis_pending"):
+            completed = set_job(server, job_id, status="completed", message="回测完成", result=result, completed_at=iso_now())
+            if completed and result.get("analysis_pending"):
                 schedule_deferred_backtest_analysis(server, result["run_id"], config)
 
 
@@ -1850,6 +1892,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         # section: network retries can arrive concurrently.
                         self.jobs[job_id] = job
                         self.server.job_activity[job_id] = now_mono  # type: ignore[attr-defined]
+                        self.server.job_created_monotonic[job_id] = now_mono  # type: ignore[attr-defined]
                         self.server.job_cancel_events[job_id] = Event()  # type: ignore[attr-defined]
                         if client_request_id:
                             self.server.job_request_index[request_index_key] = job_id  # type: ignore[attr-defined]
@@ -2216,6 +2259,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | Path
     server.jobs_lock = Lock()  # type: ignore[attr-defined]
     server.jobs = {}  # type: ignore[attr-defined]
     server.job_activity = {}  # type: ignore[attr-defined]
+    server.job_created_monotonic = {}  # type: ignore[attr-defined]
     server.job_cancel_events = {}  # type: ignore[attr-defined]
     server.job_futures = {}  # type: ignore[attr-defined]
     server.job_request_index = {}  # type: ignore[attr-defined]
@@ -2234,6 +2278,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, db_path: str | Path
     server.diagnostics_cache_lock = Lock()  # type: ignore[attr-defined]
     server.diagnostics_cache = {}  # type: ignore[attr-defined]
     server.job_abandoned_seconds = float(os.getenv("PORTFOLIO_JOB_ABANDONED_SECONDS", DEFAULT_ABANDONED_JOB_SECONDS))  # type: ignore[attr-defined]
+    server.backtest_job_timeout_seconds = float(os.getenv("PORTFOLIO_BACKTEST_JOB_TIMEOUT_SECONDS", DEFAULT_BACKTEST_JOB_TIMEOUT_SECONDS))  # type: ignore[attr-defined]
     server.job_retention_seconds = float(os.getenv("PORTFOLIO_JOB_RETENTION_SECONDS", DEFAULT_JOB_RETENTION_SECONDS))  # type: ignore[attr-defined]
     server.job_executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[attr-defined]
     server.analysis_executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[attr-defined]

@@ -147,11 +147,12 @@ function isMobileLayout() {
 }
 
 const STATIC_NAMES = {
-  VOO: "标普500指数基金",
+  VOO: "Vanguard标普500ETF（VOO）",
   "03195.HK": "港股通标普500ETF",
   "513500.SH": "标普500ETF博时",
   "512890.SH": "红利低波基金",
   "510300.SH": "沪深300基金",
+  "159593.SZ": "平安中证A50ETF",
   "159631.SZ": "招商中证A100ETF",
   "510500.SH": "南方中证500ETF",
   "512100.SH": "南方中证1000ETF",
@@ -180,11 +181,12 @@ const STATIC_NAMES = {
 };
 
 const SHORT_NAMES = {
-  VOO: "标普500",
+  VOO: "标普500 VOO",
   "03195.HK": "港股通标普",
   "513500.SH": "A股标普",
   "512890.SH": "红利",
   "510300.SH": "沪深300",
+  "159593.SZ": "中证A50",
   "159631.SZ": "中证A100",
   "510500.SH": "中证500",
   "512100.SH": "中证1000",
@@ -240,17 +242,20 @@ const SOURCE_NAMES = {
   "frankfurter:USD-CNY": "欧洲公开汇率",
   "tushare:fund_daily": "专业基金日线",
   "tushare:index_daily": "专业指数日线",
-  "csindex:index_perf": "中证指数官方全收益行情",
+  "csindex:index_perf": "中证指数官方历史行情",
   "sohu:index_kline": "搜狐指数历史行情",
   "eastmoney:index_kline": "东方财富指数行情",
   "tushare:fund_div": "专业基金分红",
   "tushare:fund_adj": "专业复权因子",
   "chinabond:index_total_return": "中债财富指数",
   "eastmoney:hk_kline": "东方财富港股行情",
+  "eastmoney:us_kline:split_only": "东方财富美股行情（仅统一拆股单位）",
+  "hangseng:official:dividend": "恒生投资官方分红记录",
   "stooq:hk": "Stooq 港股行情",
   "public:dividend_unavailable_empty": "公开分红源不可用，按无分红覆盖",
   "yahoo:3195.HK": "雅虎港股行情",
   "yahoo:HKDCNY=X": "雅虎港币汇率",
+  "safe:cfets_central_parity": "外汇管理局中间价（CFETS）",
 };
 
 const SP500_ROUTE_DETAILS = {
@@ -275,6 +280,11 @@ const BROAD_ETF_ROUTE_DETAILS = {
   cn_hs300_etf: [
     ["市场", "A股场内"],
     ["指数", "沪深300"],
+    ["费用", "场内ETF佣金/管理托管"],
+  ],
+  cn_a50_etf: [
+    ["市场", "A股场内"],
+    ["指数", "中证A50"],
     ["费用", "场内ETF佣金/管理托管"],
   ],
   cn_a100_etf: [
@@ -409,6 +419,7 @@ function humanizeError(text) {
     return `${autoMissingPrefix}${items.map(describeMissing).join("、")}`;
   }
   return raw
+    .replace("backtest needs at least two reference-market trading days", "回测至少需要2个已发布交易日，请提前开始日期；休市日和尚未发布行情的日期不计入")
     .replace("missing fx_rates or repo_rates; run data sync first", "缺少汇率或逆回购利率，请重新运行回测以自动补足")
     .replace("database contains generated/mock data in the requested range; purge and resync real/public data first", "所选区间仍有生成数据，请清理后重新同步真实或公开数据")
     .replaceAll("prices:", "行情：")
@@ -929,6 +940,7 @@ function validateControls() {
   }
   const next = readConfig();
   if (next.start_date > next.end_date) return focusInvalidControl($("endDate"), "结束日期不能早于开始日期");
+  if (next.start_date === next.end_date) return focusInvalidControl($("startDate"), "开始日期与结束日期相同。回测至少需要2个已发布交易日，请提前开始日期");
   const total = next.assets.reduce((sum, asset) => sum + (asset.enabled ? asset.target_weight : 0), 0);
   if (next.repo_target_mode === "residual_weight" && total > 1 + 1e-8) {
     return focusInvalidControl($("assetControls")?.querySelector('input[type="number"]'), `资产权重合计 ${fmtPct(total)}，不能超过 100%`);
@@ -2993,7 +3005,10 @@ function renderTable(id, columns, rows, options = {}) {
 
 function formatCell(value) {
   if (value && typeof value === "object" && value.kind === "rebalance-positive") return rebalancePositiveMarkup(value);
-  if (value && typeof value === "object" && value.kind === "event-date") return `<button type="button" class="event-date-button" data-rebalance-date="${escapeHtml(value.raw)}" aria-label="查看 ${escapeHtml(value.raw)} ${escapeHtml(value.label || "调仓")}详情并定位图表">${escapeHtml(value.raw)}</button>`;
+  if (value && typeof value === "object" && value.kind === "event-date") {
+    const year = value.yearLabel ? `<span class="rebalance-year-context">收益年度 ${escapeHtml(value.yearLabel)}年</span>` : "";
+    return `<button type="button" class="event-date-button" data-rebalance-date="${escapeHtml(value.raw)}" aria-label="查看 ${escapeHtml(value.raw)} ${escapeHtml(value.label || "调仓")}详情并定位图表">${escapeHtml(value.raw)}</button>${year}`;
+  }
   if (value && typeof value === "object" && value.kind === "money") return value.raw == null ? "—" : escapeHtml(`￥${fmtMoney(value.raw)}`);
   if (value && typeof value === "object" && value.kind === "number") {
     return escapeHtml(fmtNum(value.raw, value.decimals ?? 2));
@@ -3117,7 +3132,7 @@ function rebalanceDisplayRows(rows, trades = []) {
   for (const symbol of symbols) {
     if (!orderedSymbols.includes(symbol)) orderedSymbols.push(symbol);
   }
-  const baseColumns = ["执行日", "当年盈亏", "当年最大回撤", "当年收益（按上年度总资产）", "当年总资产", "当年收益（按原始资金）", "检查结果", "成交金额", "成交笔数", "当年手续费", "收益年度", "决策日"];
+  const baseColumns = ["执行日", "当年盈亏", "当年最大回撤", "当年收益（按上年度总资产）", "当年总资产", "当年收益（按原始资金）", "检查结果", "成交金额", "成交笔数", "当年手续费", "决策日"];
   const columns = [...baseColumns, ...orderedSymbols.map(rebalanceAssetColumnName)];
   const displayRows = events.map((row) => {
     if (row.replacement_trades) {
@@ -3131,13 +3146,14 @@ function rebalanceDisplayRows(rows, trades = []) {
       };
     }
     const annualTotal = row.payload?.decision_total_asset_cny ?? row.total_asset_before;
+    const decisionDate = row.payload?.decision_date || row.rebalance_date;
+    const yearLabel = row.payload?.year_label || String(decisionDate).slice(0, 4);
     const item = {
-      执行日: { kind: "event-date", raw: row.rebalance_date },
+      执行日: { kind: "event-date", raw: row.rebalance_date, yearLabel },
       检查结果: rebalanceActionLabel(row.payload),
       成交笔数: row.payload?.executed_trade_count == null ? "—" : { kind: "number", raw: row.payload.executed_trade_count, decimals: 0 },
       成交金额: row.turnover_cny == null ? "—" : `￥${fmtMoney(row.turnover_cny)}`,
-      决策日: row.payload?.decision_date || row.rebalance_date,
-      收益年度: row.payload?.year_label ? `${row.payload.year_label}年` : `${String(row.payload?.decision_date || row.rebalance_date).slice(0, 4)}年`,
+      决策日: decisionDate,
       当年总资产: annualTotal == null ? "—" : `￥${fmtMoney(annualTotal)}`,
       "当年收益（按上年度总资产）": { kind: "metric", raw: row.payload?.year_profit_on_year_start, format: "percent", tone: annualReturnTone(row.payload?.year_profit_on_year_start) },
       "当年收益（按原始资金）": { kind: "metric", raw: row.payload?.year_profit_on_original_capital, format: "percent", tone: annualReturnTone(row.payload?.year_profit_on_original_capital) },
@@ -3145,8 +3161,8 @@ function rebalanceDisplayRows(rows, trades = []) {
         kind: "year-profit",
         profit: row.payload?.year_profit_cny,
         raw: row.payload?.year_profit_cny,
-        yearLabel: row.payload?.year_label || String(row.payload?.decision_date || row.rebalance_date).slice(0, 4),
-        asOfDate: row.payload?.decision_date || row.rebalance_date,
+        yearLabel,
+        asOfDate: decisionDate,
         yearStartTotal: row.payload?.year_start_total_cny,
         externalFlow: row.payload?.year_external_flow_cny,
       },
@@ -3176,6 +3192,12 @@ async function loadStatus() {
 }
 
 async function waitForBacktestJob(jobId, onProgress = setMessage) {
+  const startedAt = Date.now();
+  const showProgress = (message) => {
+    const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    const minutes = Math.floor(elapsed / 60);
+    onProgress(`${message} · 已等待 ${minutes ? `${minutes} 分 ` : ""}${elapsed % 60} 秒`);
+  };
   let pollCount = 0;
   let transientFailures = 0;
   while (true) {
@@ -3186,14 +3208,15 @@ async function waitForBacktestJob(jobId, onProgress = setMessage) {
     } catch (error) {
       transientFailures += 1;
       if (!isNetworkError(error) || transientFailures > 4) throw error;
-      onProgress("网络短暂波动，正在继续等待回测结果...");
+      showProgress("网络短暂波动，正在继续等待回测结果");
       await sleep(Math.min(1500 * transientFailures, 6000));
       continue;
     }
     if (job.status === "completed") return job.result;
     if (job.status === "failed") throw new Error(job.error || job.message || "回测失败");
     if (job.status === "cancelled") throw new Error(job.error || job.message || "回测任务已取消");
-    onProgress(job.message || (job.status === "running" ? "正在运行回测..." : "回测任务排队中..."));
+    if (job.status !== "queued" && job.status !== "running") throw new Error("无法识别回测状态，请查看回测记录或重新运行");
+    showProgress(job.message || (job.status === "running" ? "正在运行回测" : "回测任务排队中"));
     pollCount += 1;
     await sleep(Math.min(650 + pollCount * 100, 1500));
   }
