@@ -59,7 +59,7 @@ class ResponsiveUiContractTests(unittest.TestCase):
         self.assertIn("@media (max-height: 600px) and (max-width: 1100px)", STYLES)
 
     def test_responsive_release_cache_busts_both_static_assets(self) -> None:
-        release = "20261118-market-audit"
+        release = "20261118-result-comparison"
         self.assertEqual(INDEX.count(release), 2)
 
     def test_export_error_toast_is_fixed_and_safe_area_aware(self) -> None:
@@ -106,8 +106,8 @@ class ResponsiveUiContractTests(unittest.TestCase):
     def test_results_distinguish_draft_run_state_and_rebalance_evidence(self) -> None:
         for field in ("resultState", "resultConfigSummary", "draftNotice", "workspaceMessage", "rebalanceExplanation"):
             self.assertEqual(INDEX.count(f'id="{field}"'), 1)
-        self.assertLess(INDEX.index('id="summaryGrid"'), INDEX.index('id="rebalanceExplanation"'))
-        self.assertLess(INDEX.index('id="rebalanceExplanation"'), INDEX.index('id="analysisSection"'))
+        self.assertLess(INDEX.index('id="rebalancePanel"'), INDEX.index('id="rebalanceExplanation"'))
+        self.assertLess(INDEX.index('id="rebalanceExplanation"'), INDEX.index('id="rebalanceTable"'))
         self.assertIn('id="resultStatusText" class="visually-hidden"', INDEX)
         self.assertLess(INDEX.index('id="analysisSection"'), INDEX.index('id="riskDetails"'))
 

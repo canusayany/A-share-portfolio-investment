@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a55'/%3E%3Cpath d='M7 23l6-8 5 3 7-10' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="static/styles.css?v=20261118-market-audit" />
+    <link rel="stylesheet" href="static/styles.css?v=20261118-result-comparison" />
   </head>
   <body class="history-collapsed">
     <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
@@ -305,7 +305,6 @@
         <header class="workspace-header">
           <div>
             <h2>回测结果</h2>
-            <p>查看组合表现，再核对走势和每一次调仓</p>
           </div>
           <div class="workspace-actions">
             <button id="workspaceRunBtn" class="button button-primary" type="button"><span>运行回测</span></button>
@@ -316,26 +315,25 @@
         </header>
 
         <section class="context-strip" aria-label="当前配置与数据状态">
-          <div class="result-state-row"><strong id="resultState" class="result-state">尚未运行</strong><span id="resultConfigSummary">运行后在这里查看本次结果所用的参数</span></div>
-          <div class="status-line">
-            <span id="dataStatusDot" class="status-dot is-loading" aria-hidden="true"></span><span id="dataStatusText">正在检查数据状态</span><span id="resultStatusText" class="visually-hidden">尚未运行回测</span>
-          </div>
+          <div class="result-state-row"><strong id="resultState" class="result-state">尚未运行</strong><span id="resultConfigSummary"></span></div>
           <div id="workspaceMessage" class="workspace-message" role="status" aria-live="polite">准备就绪。调整参数后，点击运行回测。</div>
-          <p id="draftNotice" class="draft-notice" role="status" hidden>参数已修改，点击运行回测更新结果。</p>
+          <p id="draftNotice" class="draft-notice" role="status" hidden>运行回测以应用修改。</p>
+          <details id="resultDataStatus" class="context-data">
+            <summary><span id="dataStatusDot" class="status-dot is-loading" aria-hidden="true"></span>数据状态<span id="dataCoverageNotice" class="data-coverage-notice" role="status" hidden></span></summary>
+            <div class="data-status-details"><div id="resultCoverage"></div><span id="dataStatusText">正在检查缓存</span></div>
+          </details>
+          <span id="resultStatusText" class="visually-hidden">尚未运行回测</span>
           <details class="context-config"><summary>查看当前编辑参数</summary><div id="controlSummary" class="control-summary"></div></details>
         </section>
         <nav class="result-navigation" aria-label="结果导航"><a href="#summaryGrid">结果概览</a><a href="#analysisSection">走势分析</a><a href="#recordsSection">数据记录</a><a id="openResearchSection" href="#researchSection">参数研究</a><button id="openCsvExport" type="button" class="csv-export-button result-export">导出CSV</button></nav>
 
         <section id="summaryGrid" class="summary-grid" aria-label="核心指标" aria-live="polite"></section>
 
-        <p id="rebalanceExplanation" class="rebalance-explanation result-explanation" hidden>运行后查看检查次数、实际调仓和未触发原因。</p>
-
         <section id="rebalanceEventDetail" class="event-detail" aria-live="polite" tabindex="-1" hidden></section>
         <section id="analysisSection" class="analysis-panel" aria-labelledby="analysisTitle">
           <div class="panel-heading">
             <div>
               <h2 id="analysisTitle">走势与风险</h2>
-              <p>切换指标，定位收益来源和风险阶段</p>
             </div>
           </div>
           <div class="tab-strip chart-tabs" role="tablist" aria-label="图表指标">
@@ -507,7 +505,6 @@
           <div class="panel-heading records-heading">
             <div>
               <h2 id="recordsTitle">回测记录</h2>
-              <p>追踪再平衡和每笔交易，查看滚动窗口与月份对比</p>
             </div>
           </div>
           <div class="analysis-status"><span id="analysisMessage" role="status">补充分析在主回测后生成</span><button id="retryAnalysisBtn" class="button button-secondary" type="button" hidden>重试补充分析</button></div>
@@ -526,14 +523,13 @@
             <div class="table-scroll record-table-scroll" role="region" aria-label="月份对比表格" tabindex="0"><table id="monthsTable"></table></div>
           </div>
           <div id="rebalancePanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabRebalance">
-            <div class="table-context rebalance-table-context"><span>显示全部周期检查和自动换标。点击日期查看明细与当日交易。</span><small>年度指标截至决策日，盈亏已剔除外部收支。成交金额与笔数按该条记录统计。手机可横向滑动查看完整字段。</small></div>
+            <div class="table-context rebalance-table-context"><div><p id="rebalanceExplanation" class="rebalance-explanation" hidden></p><small>点击日期查看明细与当日交易。表格可横向滚动。</small></div></div>
             <div class="table-scroll record-table-scroll" role="region" aria-label="再平衡记录表格" tabindex="0"><table id="rebalanceTable"></table></div>
           </div>
           <div id="tradesPanel" class="record-panel" role="tabpanel" aria-labelledby="recordTabTrades" hidden>
             <div id="tradeDateFilter" class="trade-date-filter" hidden><span id="tradeDateFilterLabel"></span><button id="clearTradeDateFilter" type="button" class="button button-secondary">清除日期筛选</button></div>
             <div class="table-scroll record-table-scroll" role="region" aria-label="交易流水表格" tabindex="0"><table id="tradesTable"></table></div>
           </div>
-          <div class="table-hint">随页面上下滚动查看记录，横向滚动查看完整字段</div>
         </section>
       </main>
 
@@ -610,6 +606,6 @@
         </div>
       </form>
     </dialog>
-    <script src="static/app.js?v=20261118-market-audit"></script>
+    <script src="static/app.js?v=20261118-result-comparison"></script>
   </body>
 </html>

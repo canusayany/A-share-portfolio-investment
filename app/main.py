@@ -94,14 +94,14 @@ def response_bytes(data: object) -> bytes:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _chart_sample_indices(rows: list[dict], payloads: list[dict], max_points: int) -> list[int]:
+def _chart_sample_indices(rows: list[dict], payloads: list[dict], max_points: int, coverage_edges: set[int]) -> list[int]:
     source_points = len(rows)
     if source_points <= max_points:
         return list(range(source_points))
     if max_points <= 2:
-        return [0, source_points - 1][:max_points]
+        return sorted(set([0, source_points - 1][:max_points]) | coverage_edges)
 
-    mandatory = {0, source_points - 1}
+    mandatory = {0, source_points - 1} | coverage_edges
     previous_symbols: frozenset[str] = frozenset()
     for index, payload in enumerate(payloads):
         symbols = frozenset(symbol for symbol, weight in payload.get("weights", {}).items() if abs(float(weight or 0.0)) > 1e-12)
@@ -110,7 +110,8 @@ def _chart_sample_indices(rows: list[dict], payloads: list[dict], max_points: in
         previous_symbols = symbols
     if len(mandatory) >= max_points:
         ordered = sorted(mandatory)
-        return sorted({ordered[round(index * (len(ordered) - 1) / (max_points - 1))] for index in range(max_points)})
+        sampled = {ordered[round(index * (len(ordered) - 1) / (max_points - 1))] for index in range(max_points)}
+        return sorted(sampled | coverage_edges)
 
     selected = set(mandatory)
     remaining = max_points - len(selected)
@@ -143,7 +144,18 @@ def columnar_chart_payload(rows: list[dict], max_points: int = 1000, required_da
     """Return compact chart arrays while retaining route changes and extrema."""
     source_points = len(rows)
     all_payloads = [json_loads(row.get("payload_json"), {}) for row in rows]
-    indices = _chart_sample_indices(rows, all_payloads, max_points)
+    comparison_columns = {}
+    coverage_edges: set[int] = set()
+    for key in ("comparison", "voo_comparison"):
+        amounts = [(payload.get(key) or {}).get("total_asset_cny") for payload in all_payloads]
+        amounts = [v if isinstance(v, (int, float)) and math.isfinite(v) else None for v in amounts]
+        if key == "comparison" or any(value is not None for value in amounts):
+            comparison_columns[f"{key}_total_assets"] = amounts
+            # Keep the last observation and the first missing date on either side of a gap.
+            for index in range(1, source_points):
+                if (amounts[index] is None) != (amounts[index - 1] is None):
+                    coverage_edges.update((index - 1, index))
+    indices = _chart_sample_indices(rows, all_payloads, max_points, coverage_edges)
     if required_dates:
         indices = sorted(set(indices) | {index for index, row in enumerate(rows) if row["trade_date"] in required_dates})
     sampled_rows = [rows[index] for index in indices]
@@ -161,7 +173,7 @@ def columnar_chart_payload(rows: list[dict], max_points: int = 1000, required_da
         "cumulative_returns": [],
         "drawdowns": [],
         "benchmark_returns": [],
-        "comparison_total_assets": [],
+        **{name: [amounts[index] for index in indices] for name, amounts in comparison_columns.items()},
         "values": {},
         "weights": {},
     }
@@ -179,7 +191,6 @@ def columnar_chart_payload(rows: list[dict], max_points: int = 1000, required_da
         chart["cumulative_returns"].append(row["cumulative_return"])
         chart["drawdowns"].append(row["drawdown"])
         chart["benchmark_returns"].append(row["benchmark_return"])
-        chart["comparison_total_assets"].append(payload.get("comparison", {}).get("total_asset_cny"))
         values = payload.get("values", {})
         weights = payload.get("weights", {})
         for symbol in symbols:

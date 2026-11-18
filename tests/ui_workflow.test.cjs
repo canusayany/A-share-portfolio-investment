@@ -7,6 +7,59 @@ const vm = require("node:vm");
 const appSource = fs.readFileSync(path.join(__dirname, "../app/static/app.js"), "utf8")
   .replace(/^init\(\)\.catch\([^\n]+\);\s*$/m, "");
 
+test("total assets chart displays the stored CNY VOO comparison only on observed dates", () => {
+  const h = harness();
+  const dates = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"];
+  const chart = { dates, total_assets: [100, 101, 102, 103], comparison_total_assets: [110, 111, 112, 113], voo_comparison_total_assets: [null, 0, null, null] };
+  h.context.__chart = chart;
+  h.assign("currentSummary", { comparison_label: "原对照", voo_comparison_label: "全仓 VOO（人民币）", data_coverage: { voo_comparison: {start_date: dates[1], end_date: dates[2]} } });
+  const option = () => h.evaluate('totalAssetComparisonOption(expandChartSeries({chart: __chart}), __chart.dates, currentSummary)');
+  const lines = option().series;
+  assert.deepEqual(Array.from(lines, (line) => line.name), ["当前策略", "原对照", "全仓 VOO（人民币）"]);
+  assert.deepEqual(Array.from(lines[1].data), chart.comparison_total_assets);
+  assert.deepEqual(Array.from(lines[2].data), chart.voo_comparison_total_assets);
+  assert.equal(lines[2].connectNulls, false);
+  assert.deepEqual(Array.from(lines[2].markPoint.data[0].coord), [dates[1], 0]);
+  const tip = (i) => option().tooltip.formatter([0, 1, 2].map((seriesIndex) => ({ dataIndex: i, seriesIndex })));
+  assert.match(tip(0), /始于 2024-01-03/);
+  assert.match(tip(1), /全仓 VOO（人民币）.*￥0/);
+  assert.match(tip(2), /无数据/);
+  assert.match(tip(3), /截至 2024-01-04/);
+  h.evaluate('renderFallbackCharts(expandChartSeries({chart: __chart}), {returns: []})');
+  assert.match(h.el('comparisonChart').innerHTML, /全仓 VOO（人民币）/);
+  assert.match(h.el('comparisonChart').innerHTML, /<circle/);
+  chart.voo_comparison_total_assets = dates.map(() => null);
+  assert.equal(option().series.length, 2);
+  delete chart.voo_comparison_total_assets;
+  assert.equal(option().series.length, 2);
+});
+
+test("data status shows only actionable coverage gaps in the collapsed row", () => {
+  const h = harness();
+  const complete = { end_date: "2026-11-17", gaps: [] };
+  h.context.__coverage = {
+    end_date: complete.end_date,
+    data_coverage: {
+      strategy: complete,
+      comparison: complete,
+      voo_comparison: { end_date: "2026-10-20", gaps: ["fx_rates:USD/CNY"] },
+    },
+    instrument_coverage: [
+      { logical_symbol: "CBA21801", covered_days: 3610, tradable_etf_days: 831, proxy_days: 2779 },
+    ],
+  };
+  h.evaluate("renderResultCoverage(__coverage)");
+  assert.match(h.el("resultCoverage").innerHTML, /真实 ETF 831 天.*代理 2779 天/);
+  assert.match(h.el("resultCoverage").innerHTML, /USD\/CNY/);
+  assert.equal(h.el("dataCoverageNotice").hidden, false);
+  assert.equal(h.el("dataCoverageNotice").textContent, "标普500 VOO行情仅至 2026-10-20");
+  h.context.__coverage.data_coverage.voo_comparison = complete;
+  h.evaluate("renderResultCoverage(__coverage)");
+  assert.equal(h.el("dataCoverageNotice").hidden, true);
+  h.evaluate("renderResultCoverage(null)");
+  assert.equal(h.el("resultCoverage").innerHTML, "");
+});
+
 test("capture scenarios explain opposite directions using actual monthly returns", () => {
   const h = harness();
   const summary = { up_market_months: 5, up_market_strategy_monthly_return: -0.0123, up_market_benchmark_monthly_return: 0.042, upside_capture_ratio: -0.2949,

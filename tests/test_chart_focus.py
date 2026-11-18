@@ -5,7 +5,7 @@ from threading import Thread
 import unittest
 from urllib import error
 
-from app.db import db_session, json_dumps
+from app.db import db_session, json_dumps, json_loads
 from app.main import columnar_chart_payload, create_server
 from app.services.backtest_engine import BACKTEST_ENGINE_VERSION
 from tests.helpers import temp_db_path
@@ -90,6 +90,30 @@ class ChartFocusTests(unittest.TestCase):
         day = self.omitted["trade_date"]
         focused = http_json(self.url + "?focus_date=" + day)["chart"]
         self.assertEqual(focused, columnar_chart_payload(self.rows, required_dates={day}))
+
+    def test_chart_api_keeps_voo_cny_values_and_gaps_on_the_sampled_date_axis(self):
+        rows = [dict(row) for row in self.rows]
+        missing_index = self.rows.index(self.omitted)
+        amounts = [None if i == missing_index or i > 500 else 10_000 + i for i in range(len(rows))]
+        amounts[-3] = 0.0  # a lone valid observation among missing dates
+        for row, amount in zip(rows, amounts):
+            payload = json_loads(row["payload_json"], {})
+            payload["voo_comparison"] = {"total_asset_cny": amount}
+            row["payload_json"] = json_dumps(payload)
+        with db_session(self.db_path) as conn:
+            conn.execute("INSERT INTO backtest_runs(run_id,created_at,config_json,summary_json) VALUES('voo-chart','2024-01-01','{}','{}')")
+            conn.executemany("""INSERT INTO portfolio_daily(run_id,trade_date,total_asset_cny,flow_cny,daily_return,cumulative_return,drawdown,benchmark_return,payload_json)
+                VALUES('voo-chart',:trade_date,:total_asset_cny,:flow_cny,:daily_return,:cumulative_return,:drawdown,:benchmark_return,:payload_json)""", rows)
+        url = self.url.replace('/focus-run/chart-series', '/voo-chart')
+        full = http_json(url + '/series')["series"]
+        stored = {row["trade_date"]: row["payload"] for row in full}
+        for suffix in ('', '?focus_date=' + rows[800]["trade_date"]):
+            chart = http_json(url + '/chart-series' + suffix)["chart"]
+            for key in ("voo_comparison", "comparison"):
+                self.assertEqual(chart[key + "_total_assets"], [stored[day][key]["total_asset_cny"] for day in chart["dates"]])
+            for index in (missing_index - 1, missing_index, missing_index + 1, 500, 501, -4, -3, -2):
+                self.assertIn(rows[index]["trade_date"], chart["dates"])
+        self.assertNotIn("voo_comparison_total_assets", http_json(self.url)["chart"])
 
     def test_invalid_dates_and_multiple_dates_are_client_errors(self):
         for query in ("focus_date=", "focus_date=2020-02-30", "focus_date=20200101", "focus_date=2020-1-01", "focus_date=2020-01-01T00:00:00", "focus_date=2020-01-01&focus_date=2020-01-02", "focus_date=2020-01-01&focus_date="):

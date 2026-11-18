@@ -821,7 +821,7 @@ class ApiTests(unittest.TestCase):
             detail = resp.read().decode("utf-8")
         self.assertEqual(resp.status, 200)
         self.assertIn("永久投资策略", detail)
-        self.assertIn('src="static/app.js?v=20261118-market-audit"', detail)
+        self.assertIn('src="static/app.js?v=20261118-result-comparison"', detail)
         self.assertIn("策略诊断", detail)
         self.assertIn("导出CSV", detail)
         self.assertIn("时间窗口", detail)

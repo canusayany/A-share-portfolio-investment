@@ -136,7 +136,7 @@ def raise_if_cancelled(should_cancel=None) -> None:
 
 def canonical_config_hash(config: dict[str, Any]) -> str:
     canonical = json.dumps(
-        {"engine_version": BACKTEST_ENGINE_VERSION, "config": config},
+        {"engine_version": BACKTEST_ENGINE_VERSION, "comparison_version": 1, "config": config},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1575,6 +1575,19 @@ def _execution_price(pos: Position, quote: float, fees: dict[str, Any], side: st
     return quote * (1 + (bps if side == "BUY" else -bps) / 10_000)
 
 
+def _us_sale_proceeds(shares: float, gross_usd: float, rate: float, fees: dict[str, Any]) -> tuple[float, float]:
+    """Net CNY and explicit fees for a USD equity sale at its effective fill price."""
+    commission = ibkr_us_etf_sell_fee(shares, gross_usd, dict_to_dataclass(IbkrFeeConfig, fees["ibkr_us_etf"]))
+    net = gross_usd - commission
+    fx = dict_to_dataclass(FxFeeConfig, fees["fx"])
+    if net >= 0:
+        cash, conversion_fee = usd_to_cny(net, rate, fx, include_wire=False)
+    else:
+        cost, conversion_fee = cny_cost_for_usd(-net, rate, fx)
+        cash = -cost
+    return cash, commission * rate + conversion_fee
+
+
 def _sell_position(
     state: PortfolioState,
     pos: Position,
@@ -1596,15 +1609,7 @@ def _sell_position(
     gross_native = qty * price
     if pos.currency == "USD":
         fx = currency_to_cny_rate("USD", fx_rates)
-        ibkr_fee = ibkr_us_etf_sell_fee(qty * pos.share_scale, gross_native, dict_to_dataclass(IbkrFeeConfig, fees["ibkr_us_etf"]))
-        net_usd = gross_native - ibkr_fee
-        fx_cfg = dict_to_dataclass(FxFeeConfig, fees["fx"])
-        if net_usd >= 0:
-            cash_cny, fx_fee = usd_to_cny(net_usd, fx, fx_cfg, include_wire=False)
-        else:
-            shortfall_cny, fx_fee = cny_cost_for_usd(-net_usd, fx, fx_cfg)
-            cash_cny = -shortfall_cny
-        fee_cny = ibkr_fee * fx + fx_fee
+        cash_cny, fee_cny = _us_sale_proceeds(qty * pos.share_scale, gross_native, fx, fees)
     elif pos.currency == "HKD" or pos.asset_type == "hk_connect_etf":
         fx = currency_to_cny_rate("HKD", fx_rates)
         hk_cfg = dict_to_dataclass(HkConnectEtfFeeConfig, fees["hk_connect_etf"])
@@ -4392,11 +4397,16 @@ def run_backtest(
     comparison_totals = {}
     comparison_label = None
     comparison_coverage = {"end_date": None, "gaps": []}
+    voo_points = {}
+    voo_coverage = {"end_date": None, "gaps": []}
+    voo_stats = {}
     actual_days = [row["trade_date"] for row in daily_rows]
     if include_comparison and persist:
+        from app.services.voo_comparison import run_voo_comparison
         comparison_totals, comparison_label, comparison_coverage = run_comparison(
             conn, config, actual_days, should_cancel,
         )
+        voo_points, voo_coverage, voo_stats = run_voo_comparison(conn, config, actual_days, spend_amounts, should_cancel)
     if _daily_totals is not None:
         _daily_totals.update((row["trade_date"], row["total_asset_cny"]) for row in daily_rows)
     for row, payload in zip(daily_rows, daily_payloads):
@@ -4405,6 +4415,7 @@ def run_backtest(
                 "name": comparison_label,
                 "total_asset_cny": comparison_totals.get(row["trade_date"]),
             }
+            payload["voo_comparison"] = voo_points.get(row["trade_date"], {"total_asset_cny": None})
         row["payload_json"] = json_dumps(payload)
     logger.info("run_backtest comparison complete rows=%d seconds=%.3f", len(comparison_totals), time.perf_counter() - comparison_started_at)
 
@@ -4524,9 +4535,13 @@ def run_backtest(
         "final_unrealized_pnl_cny": final_unrealized_pnl_cny,
         "comparison_final_asset_cny": final_payload.get("comparison", {}).get("total_asset_cny"),
         "comparison_label": comparison_label,
+        "voo_comparison_label": "标普500 VOO · 买入持有",
+        "voo_comparison_final_asset_cny": final_payload.get("voo_comparison", {}).get("total_asset_cny"),
+        "voo_comparison_spending": voo_stats,
         "data_coverage": {
             "strategy": {"end_date": daily_rows[-1]["trade_date"], "gaps": []},
             "comparison": comparison_coverage,
+            "voo_comparison": voo_coverage,
         },
         "rolling_window_years": int(config["rolling_window_years"]),
         "rolling_periods": [],

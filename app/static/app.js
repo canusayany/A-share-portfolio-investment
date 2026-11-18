@@ -413,6 +413,7 @@ function describeMissing(item) {
     prices: "行情",
     dividends: "分红",
     adj_factors: "复权因子",
+    money_fund_income: "每百份收益",
   }[kind] || "数据";
   return `${tradeAssetName(symbol)}${kindName}`;
 }
@@ -889,7 +890,7 @@ function updateResultContext() {
     const cfg = currentRunConfig;
     $("resultConfigSummary").textContent = cfg
       ? `${currentSummary?.start_date || cfg.start_date} 至 ${currentSummary?.end_date || cfg.end_date} · ${REBALANCE_FREQUENCY_NAMES[cfg.rebalance_frequency] || cfg.rebalance_frequency}检查 · 容忍带 ${fmtPct(cfg.rebalance_band)} · ${cfg.rebalance_to_target ? "超带后恢复目标" : "超带后调回带内"}`
-      : "设置资金与资产配置，运行后在这里查看结果。";
+      : "";
   }
   if ($("openCsvExport")) $("openCsvExport").disabled = !currentRunId;
   renderResearch();
@@ -901,8 +902,8 @@ function updateRebalanceExplanation() {
   const summary = currentSummary;
   host.hidden = !currentRunId;
   host.textContent = summary?.rebalance_check_count != null
-    ? `周期检查 ${summary.rebalance_check_count} 次 · 实际调仓 ${summary.rebalance_trade_count} 次 · 带内无需调仓 ${summary.rebalance_within_band_count ?? 0} 次 · 成交条件不足 ${summary.rebalance_constrained_count ?? 0} 次。首次建仓单独计算。`
-    : currentRunId ? "此历史版本未区分周期检查与实际成交，请重新运行以查看调仓原因。" : "运行后将分别显示周期检查与实际调仓次数。";
+    ? `检查 ${summary.rebalance_check_count} 次 · 调仓 ${summary.rebalance_trade_count} 次 · 带内 ${summary.rebalance_within_band_count ?? 0} 次 · 成交受限 ${summary.rebalance_constrained_count ?? 0} 次`
+    : "此历史结果未单列周期检查次数。";
 }
 
 function setRunBusy(busy) {
@@ -1109,12 +1110,9 @@ function renderControlSummary(plan) {
 function renderAllocationSummary(plan) {
   const host = $("allocationSummary");
   if (!host) return;
-  const actualAssetWeight = plan.mode === "fixed_bucket" && plan.enabledWeight > 0 ? plan.remainingWeight : plan.enabledWeight;
-  const rows = [
-    ["输入合计", fmtPct(plan.enabledWeight)],
-    ["实际资产", fmtPct(actualAssetWeight)],
-    ["现金池目标", plan.mode === "fixed_bucket" ? `￥${fmtMoney(plan.repoTargetValue)} / ${fmtPct(plan.repoWeight)}` : fmtPct(plan.repoWeight)],
-  ];
+  const rows = plan.mode === "fixed_bucket"
+    ? [["输入权重合计", fmtPct(plan.enabledWeight)], ["折算后资产占比", fmtPct(plan.remainingWeight)]]
+    : [[plan.warning ? "资产权重超过 100%" : "资产权重合计", fmtPct(plan.enabledWeight)]];
   host.innerHTML = rows.map(([label, value]) => `
     <div class="allocation-item ${plan.warning ? "warning" : ""}">
       <span>${label}</span>
@@ -1489,7 +1487,7 @@ function updateDataStatus(rows) {
   const mobileStatus = $("mobileDataStatus");
   const statusDot = $("dataStatusDot");
   const text = rows.length
-    ? `${rows.length} 项已缓存 · 运行时分别核验策略和对照所需行情`
+    ? `${rows.length} 项数据已缓存`
     : "暂无可用数据";
   if (statusText) statusText.textContent = text;
   if (mobileStatus) mobileStatus.textContent = rows.length ? `${rows.length} 项数据已缓存` : "暂无可用数据";
@@ -1509,32 +1507,48 @@ function metricMarkup(item) {
   return `<div class="metric ${item.tone ? `is-${item.tone}` : ""}"><span>${item.label}</span><strong>${item.value}</strong></div>`;
 }
 
-function resultCoverageMarkup(summary) {
-  if (!summary) return "";
+function renderResultCoverage(summary) {
+  const host = $("resultCoverage");
+  const notice = $("dataCoverageNotice");
+  if (!host || !notice) return;
+  if (!summary) {
+    host.innerHTML = "";
+    notice.hidden = true;
+    notice.textContent = "";
+    return;
+  }
   const groups = [["strategy", "主策略"], ["comparison", "对照组合"]];
+  if (summary.data_coverage?.voo_comparison) groups.push(["voo_comparison", "标普500 VOO"]);
+  const notices = [];
   const rows = groups.map(([key, label]) => {
     const coverage = summary.data_coverage?.[key];
-    if (!coverage) return `<li><strong>${label}</strong> 旧结果未记录行情覆盖</li>`;
+    if (!coverage) return `<li><strong>${label}</strong> 未记录覆盖范围</li>`;
     const gaps = Array.isArray(coverage.gaps) ? coverage.gaps : null;
     let details = coverage.end_date && gaps ? "已核验，无缺口" : "覆盖未核验";
     if (gaps?.length) {
-      const labels = gaps.map((gap) => /^(prices|dividends|adj_factors|repo_rates|fx_rates|calendar):/.test(gap) ? describeMissing(gap) : gap);
+      const labels = gaps.map((gap) => /^(prices|dividends|adj_factors|repo_rates|fx_rates|calendar|money_fund_income):/.test(gap) ? describeMissing(gap) : gap);
       details = `缺少 ${labels.map(escapeHtml).join("、")}`;
+    }
+    if (coverage.end_date && summary.end_date && coverage.end_date < summary.end_date) {
+      notices.push(`${label}行情仅至 ${coverage.end_date}`);
+    } else if (gaps?.length) {
+      notices.push(`${label}行情有缺口`);
     }
     return `<li><strong>${label}</strong> 行情截至 ${escapeHtml(coverage.end_date || "未知")} · ${details}</li>`;
   });
-  const routes = (summary.instrument_coverage || []).filter((row) => row.covered_days > 0).map((row) => {
+  const routes = (summary.instrument_coverage || []).filter((row) => row.proxy_days > 0 && row.covered_days > 0).map((row) => {
     const proxyDays = Number(row.proxy_days || 0), tradableDays = Number(row.tradable_etf_days || 0);
     return `<li><strong>${escapeHtml(assetName(row.logical_symbol))}</strong> 真实 ETF ${tradableDays} 天（${fmtPct(tradableDays / row.covered_days)}） · 代理 ${proxyDays} 天</li>`;
   });
-  return `<section class="result-data-coverage" aria-label="本次回测的行情覆盖"><h3>行情覆盖</h3><ul>${rows.join("")}${routes.join("")}</ul></section>`;
+  host.innerHTML = `<ul class="result-data-coverage" aria-label="本次回测的行情覆盖">${rows.join("")}${routes.join("")}</ul>`;
+  notice.textContent = notices.join(" · ");
+  notice.hidden = notices.length === 0;
 }
 
 function renderSummaryGroups(primary, secondary, notes = null) {
   const noteList = (Array.isArray(notes) ? notes : [notes]).filter(Boolean);
   $("summaryGrid").innerHTML = `
     <div class="metric-group metric-group-primary">${primary.map(metricMarkup).join("")}</div>
-    ${resultCoverageMarkup(currentSummary)}
     <details class="summary-more"><summary>费用、现金流与交易统计</summary><div class="metric-group metric-group-secondary">${secondary.map(metricMarkup).join("")}</div></details>
     ${currentSummary?.requires_recalculation ? '<p class="message error">历史结果使用旧版计算逻辑，请重新运行。</p>' : ""}
     ${noteList.length ? '<details class="summary-methodology"><summary>收益口径与数据来源</summary>' : ""}
@@ -1649,6 +1663,7 @@ function renderRiskInsights(summary = {}) {
 
 function renderInitialSummary() {
   currentSummary = null;
+  renderResultCoverage(null);
   renderSummaryGroups(
     ["期末总资产", "累计收益率", "年化收益率", "最大回撤"].map((label) => ({ label, value: "--" })),
     ["原始本金折算年化", "原始本金累计盈亏", "总手续费", "成交滑点（已计入净值）", "实际到账现金分红", "总消费", "浮盈浮亏", "对比期末资产", "实际调仓次数", "交易次数", "分红预扣税"]
@@ -1661,6 +1676,7 @@ function renderInitialSummary() {
 
 function renderSummary(summary) {
   currentSummary = summary;
+  renderResultCoverage(summary);
   const positiveTone = (value) => Number(value || 0) >= 0 ? "positive" : "negative";
   const optionalPct = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : fmtPct(value);
   const originalProfitValue = summary.net_profit_cny == null
@@ -1709,23 +1725,16 @@ function renderSummary(summary) {
   );
   let treasuryNote = null;
   if (treasuryCoverage) {
-    const actualRatio = fmtPct(treasuryCoverage.tradable_etf_coverage_ratio || 0);
-    const actualStart = treasuryCoverage.tradable_etf_start_date || treasuryCoverage.configured_etf_trade_start_date || "2023-06-13";
-    const prefix = treasuryCoverage.coverage_mode === "actual_etf_only"
-      ? `30年国债全区间均使用511090真实ETF行情（真实ETF覆盖 ${actualRatio}）。`
-      : treasuryCoverage.coverage_mode === "proxy_only"
-        ? "30年国债本区间尚无511090真实ETF阶段，全部为不可交易指数代理。"
-        : `30年国债在 ${actualStart} 前使用不可交易指数代理，自该日起自动切换511090真实ETF（真实ETF覆盖 ${actualRatio}）。`;
     treasuryNote = {
-      text: `${prefix}代理期按0.20%/年基金费率及境内ETF佣金估算；初始建仓使用首个可用收盘点位，后续交易只使用前一已公布收盘点位。真实ETF价格已含管理费和托管费，不重复扣除。历史结果只能用于情景与周期检验，不能保证未来趋势。`,
+      text: "30 年国债指数代理扣除每年 0.20% 基金费率及估算佣金，开盘调仓使用最近已公布的收盘点位。511090 阶段的管理费和托管费已反映在基金价格中。",
       href: "https://www.sse.com.cn/disclosure/announcement/listing/c/c_20230612_5722454.shtml",
       linkText: "查看511090上市依据",
     };
   }
-  const recalculationNote = summary.requires_recalculation ? {
-    text: "此历史结果使用旧版计算逻辑，尚未重算，已退出当前排行榜。请重新运行相同参数。",
+  const comparisonNote = summary.voo_comparison_label ? {
+    text: "总资产对比沿用同一月度消费计划。VOO 买入后持有，现金不足支付消费时卖出，按历史汇率折合人民币。",
   } : null;
-  renderSummaryGroups(primary, secondary, [recalculationNote, returnBasisNote, treasuryNote, dividendNote]);
+  renderSummaryGroups(primary, secondary, [returnBasisNote, comparisonNote, treasuryNote, dividendNote]);
   if (Number(summary.total_spend_shortfall_cny) > 0) {
     const warning = document.createElement("p");
     warning.className = "message error";
@@ -1863,6 +1872,7 @@ function expandChartSeries(data) {
     benchmark_return: chart.benchmark_returns?.[index] ?? 0,
     payload: {
       comparison: { total_asset_cny: chart.comparison_total_assets?.[index] ?? null },
+      voo_comparison: { total_asset_cny: chart.voo_comparison_total_assets?.[index] ?? null },
       values: Object.fromEntries(Object.entries(values).map(([symbol, amounts]) => [symbol, amounts[index] ?? 0])),
       weights: Object.fromEntries(Object.entries(weights).map(([symbol, values]) => [symbol, values[index] ?? 0])),
     },
@@ -2815,6 +2825,59 @@ function portfolioSnapshotTooltip(series, metrics) {
   };
 }
 
+function totalAssetComparisonLines(series, summary) {
+  const lines = [
+    { name: "当前策略", color: CHART_COLORS.accent, type: "solid", data: series.map((row) => row.total_asset_cny) },
+  ];
+  for (const [key, defaultName, color, type] of [
+    ["comparison", "对照组合（历史配置）", CHART_COLORS.blue, "dashed"],
+    ["voo_comparison", "VOO（人民币）", CHART_COLORS.violet, "dotted"],
+  ]) {
+    const data = series.map((row) => row.payload?.[key]?.total_asset_cny ?? null);
+    if (key === "voo_comparison" && !data.some(Number.isFinite)) continue;
+    lines.push({ name: summary?.[`${key}_label`] || defaultName, color, type, data, coverage: summary?.data_coverage?.[key] });
+  }
+  return lines;
+}
+
+function totalAssetComparisonOption(series, dates, summary) {
+  const lines = totalAssetComparisonLines(series, summary);
+  return {
+    ...lineZoomOption(),
+    title: { text: "总资产对比", left: 8, top: 4, textStyle: { fontSize: 14 } },
+    legend: { type: "scroll", top: 27, left: 8, right: 10 },
+    xAxis: { type: "category", data: dates },
+    yAxis: { type: "value", scale: true },
+    tooltip: {
+      trigger: "axis",
+      formatter(params) {
+        const index = params[0]?.dataIndex;
+        if (!Number.isInteger(index)) return "";
+        const date = dates[index];
+        const details = params.map((point) => {
+          const line = lines[point.seriesIndex];
+          const amount = line.data[index];
+          let value = "无数据";
+          if (Number.isFinite(amount)) value = `￥${fmtMoney(amount)}`;
+          else if (line.coverage?.end_date && date > line.coverage.end_date) value = `截至 ${line.coverage.end_date}`;
+          else if (line.coverage?.start_date && date < line.coverage.start_date) value = `始于 ${line.coverage.start_date}`;
+          return `<div style="display:flex;justify-content:space-between;gap:12px"><span style="white-space:normal"><i style="color:${line.color}">●</i> ${escapeHtml(line.name)}</span><strong>${escapeHtml(value)}</strong></div>`;
+        });
+        return `<strong>${escapeHtml(date)}</strong>${details.join("")}`;
+      },
+    },
+    series: lines.map((line) => ({
+      type: "line", name: line.name, data: line.data, connectNulls: false, symbol: "none",
+      lineStyle: { color: line.color, width: line.type === "solid" ? 2.3 : 2, type: line.type },
+      itemStyle: { color: line.color },
+      markPoint: { silent: true, symbol: "circle", symbolSize: 5, label: { show: false },
+        data: line.data.flatMap((value, index, data) => Number.isFinite(value) && !Number.isFinite(data[index - 1]) && !Number.isFinite(data[index + 1])
+          ? [{ coord: [dates[index], value] }] : []),
+      },
+    })),
+  };
+}
+
 function renderCharts(series, fullDailyReturns = null) {
   currentChartSeries = series;
   currentDailyReturns = fullDailyReturns || { dates: series.map((row) => row.trade_date), returns: series.map((row) => row.daily_return) };
@@ -2833,26 +2896,7 @@ function renderCharts(series, fullDailyReturns = null) {
     yAxis: { type: "value", scale: true },
     series: [{ type: "line", name: "总资产", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.accent, width: 2.4 }, itemStyle: { color: CHART_COLORS.accent } }],
   });
-  queueChartOption("comparisonChart", {
-    ...lineZoomOption(),
-    title: { text: "总资产对比", left: 8, top: 4, textStyle: { fontSize: 14 } },
-    tooltip: { trigger: "axis", valueFormatter: (v) => v == null ? "—" : `￥${fmtMoney(v)}` },
-    legend: { top: 4, right: 10 },
-    xAxis: { type: "category", data: dates },
-    yAxis: { type: "value", scale: true },
-    series: [
-      { type: "line", name: "当前策略", data: series.map((row) => row.total_asset_cny), smooth: true, symbol: "none", lineStyle: { color: CHART_COLORS.accent, width: 2.3 }, itemStyle: { color: CHART_COLORS.accent } },
-      {
-        type: "line",
-        name: currentSummary?.comparison_label || "对照组合（历史配置）",
-        data: series.map((row) => row.payload.comparison?.total_asset_cny ?? null),
-        smooth: true,
-        symbol: "none",
-        lineStyle: { color: CHART_COLORS.blue, width: 1.8, type: "dashed" },
-        itemStyle: { color: CHART_COLORS.blue },
-      },
-    ],
-  });
+  queueChartOption("comparisonChart", totalAssetComparisonOption(series, dates, currentSummary));
   queueChartOption("returnChart", {
     ...lineZoomOption(),
     title: { text: "收益率对比沪深300", left: 8, top: 4, textStyle: { fontSize: 14 } },
@@ -2918,10 +2962,9 @@ function renderCharts(series, fullDailyReturns = null) {
 function renderFallbackCharts(series, dailyReturns) {
   const makePointSeries = (values) => values.map((value, index) => ({ x: index, y: value == null ? null : Number(value) }));
   drawFallbackChart("assetChart", "总资产", [{ name: "总资产", color: "#1f7a5a", points: makePointSeries(series.map((row) => row.total_asset_cny)) }], false);
-  drawFallbackChart("comparisonChart", "总资产对比", [
-    { name: "当前策略", color: "#1f7a5a", points: makePointSeries(series.map((row) => row.total_asset_cny)) },
-    { name: currentSummary?.comparison_label || "对照组合（历史配置）", color: "#2f5aa8", points: makePointSeries(series.map((row) => row.payload.comparison?.total_asset_cny)) },
-  ], false);
+  drawFallbackChart("comparisonChart", "总资产对比", totalAssetComparisonLines(series, currentSummary).map((line) => ({
+    name: line.name, color: line.color, points: makePointSeries(line.data),
+  })), false);
   drawFallbackChart("returnChart", "收益率对比沪深300", [
     { name: "策略", color: "#1f7a5a", points: makePointSeries(series.map((row) => row.cumulative_return)) },
     { name: "沪深300价格指数", color: "#2f5aa8", points: makePointSeries(series.map((row) => row.benchmark_return)) },
@@ -2941,7 +2984,8 @@ function drawFallbackChart(id, title, lineSeries, percentAxis, forcedMin = null,
   const host = $(id);
   const width = Math.max(host.clientWidth || 520, 320);
   const height = Math.max(host.clientHeight || 300, 240);
-  const pad = { top: 34, right: 18, bottom: 30, left: 54 };
+  const stackedLegend = id === "comparisonChart";
+  const pad = { top: stackedLegend ? 40 + lineSeries.length * 16 : 34, right: 18, bottom: 30, left: 54 };
   const allY = lineSeries.flatMap((line) => line.points.map((point) => point.y)).filter(Number.isFinite);
   if (!allY.length) { host.textContent = "本区间缺少可用观测"; return; }
   let minY = forcedMin ?? Math.min(...allY);
@@ -2962,11 +3006,14 @@ function drawFallbackChart(id, title, lineSeries, percentAxis, forcedMin = null,
       const command = Number.isFinite(line.points[index - 1]?.y) ? "L" : "M";
       return `${command}${sx(point.x).toFixed(1)},${sy(point.y).toFixed(1)}`;
     }).join(" ");
-    return `<path d="${d}" fill="none" stroke="${line.color}" stroke-width="2" vector-effect="non-scaling-stroke" />`;
+    const isolatedPoints = line.points.filter((point, index, points) => Number.isFinite(point.y) && !Number.isFinite(points[index - 1]?.y) && !Number.isFinite(points[index + 1]?.y));
+    const markers = isolatedPoints.map((point) => `<circle cx="${sx(point.x)}" cy="${sy(point.y)}" r="2.5" fill="${line.color}"/>`).join("");
+    return `<path d="${d}" fill="none" stroke="${line.color}" stroke-width="2" vector-effect="non-scaling-stroke" />${markers}`;
   }).join("");
   const legend = lineSeries.map((line, index) => {
-    const x = pad.left + index * 94;
-    return `<g transform="translate(${x},18)"><rect width="10" height="10" fill="${line.color}"/><text x="15" y="10" font-size="11" fill="#667085">${escapeHtml(line.name)}</text></g>`;
+    const x = stackedLegend ? 8 : pad.left + index * 94;
+    const y = stackedLegend ? 25 + index * 16 : 18;
+    return `<g transform="translate(${x},${y})"><rect width="10" height="10" fill="${line.color}"/><text x="15" y="10" font-size="11" fill="#667085">${escapeHtml(line.name)}</text></g>`;
   }).join("");
   host.innerHTML = `
     <svg width="100%" height="100%" viewBox="0 0 ${width} ${height}" role="img" aria-label="${title}">

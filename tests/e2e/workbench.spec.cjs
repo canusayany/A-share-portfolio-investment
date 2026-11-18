@@ -125,22 +125,33 @@ test.afterEach(async ({ page }, testInfo) => {
   }
 });
 
-test('saved run shows its verified quote coverage and every daily return', async ({ page }) => {
+test('saved run folds coverage and shows both comparisons beside the daily returns', async ({ page }) => {
   const { run_id } = fixtures()[0];
   await loadRun(page, run_id);
   const { chart } = await (await page.request.get(`/api/backtest/${run_id}/chart-series`)).json();
   const { summary } = await (await page.request.get(`/api/backtest/${run_id}`)).json();
   expect(chart.source_points).toBeGreaterThan(chart.display_points);
+  const status = page.locator('#resultDataStatus');
   const coverage = page.locator('.result-data-coverage');
+  await expect(status).not.toHaveAttribute('open', '');
+  await expect(coverage).toBeHidden();
+  await expect(page.locator('#summaryGrid .result-data-coverage')).toHaveCount(0);
+  await expect(page.locator('#dataCoverageNotice')).toBeHidden();
+  await status.locator('summary').click();
   await expect(coverage).toBeVisible();
   await expect(coverage).toContainText(summary.data_coverage.strategy.end_date);
   await expect(coverage).toContainText('对照组合');
+  await expect(coverage).toContainText('标普500 VOO');
+  await expect(page.locator('#rebalancePanel #rebalanceExplanation')).toContainText('检查');
+  await status.locator('summary').click();
+  await expect(coverage).toBeHidden();
   await page.locator('#chartTabDaily').click();
   await expect.poll(() => page.evaluate(() => charts.dailyReturnChart?.getOption()?.series[0]?.data?.length)).toBe(chart.source_points);
   const shown = await page.evaluate(() => charts.dailyReturnChart.getOption().series[0].data);
   expect(shown).toEqual(chart.full_daily_returns.returns);
   await page.locator('#chartTabComparison').click();
   await expect.poll(() => page.evaluate(() => charts.comparisonChart?.getOption()?.series[1]?.name)).toBe(summary.comparison_label);
+  await expect.poll(() => page.evaluate(() => charts.comparisonChart?.getOption()?.series[2]?.name)).toBe(summary.voo_comparison_label);
   await noPageOverflow(page);
 });
 
