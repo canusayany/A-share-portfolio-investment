@@ -38,6 +38,7 @@ from app.services.backtest_engine import (
     BacktestCancelled,
     BacktestError,
     RANKING_VERSION,
+    cash_benchmark_annualized_return,
     ranking_metrics,
     canonical_config_hash,
     get_cached_backtest_run,
@@ -46,7 +47,6 @@ from app.services.backtest_engine import (
     run_backtest,
 )
 from app.services.data_sync import SyncCancelled, required_data_missing, sync_all
-from app.services.calendar import market_business_days, repo_actual_days, repo_year_basis
 from app.services.strategy_diagnostics import build_backtest_csv, strategy_diagnostics
 from app.services.research import run_research, validate_research_request
 
@@ -58,7 +58,7 @@ DEFAULT_JOB_RETENTION_SECONDS = 600.0
 JOB_CLEANUP_INTERVAL_SECONDS = 5.0
 CANCELLED_JOB_MESSAGE = "任务已取消：页面没有继续请求结果"
 TERMINAL_BACKTEST_JOB_STATUSES = {"completed", "failed", "cancelled"}
-TIME_RANKING_VERSION = 1
+TIME_RANKING_VERSION = 2
 TIME_RANKING_MIN_OBSERVATIONS = 5
 MAX_RESEARCH_PENDING_JOBS = 8
 
@@ -151,6 +151,10 @@ def columnar_chart_payload(rows: list[dict], max_points: int = 1000, required_da
     chart = {
         "source_points": source_points,
         "display_points": len(sampled_rows),
+        "full_daily_returns": {
+            "dates": [row["trade_date"] for row in rows],
+            "returns": [row["daily_return"] for row in rows],
+        },
         "dates": [],
         "total_assets": [],
         "daily_returns": [],
@@ -516,20 +520,7 @@ def repo_annualized_return_from_daily(conn, run_id: str) -> float:
         return 0.0
     config_row = conn.execute("SELECT config_json FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
     config = json_loads(config_row["config_json"], {}) if config_row else {}
-    repo_symbol = repo_rate_symbol(config)
-    rates = conn.execute(
-        "SELECT trade_date,close_rate FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
-        (repo_symbol, row["start_date"], row["end_date"]),
-    ).fetchall()
-    if len(rates) < 2:
-        return 0.0
-    benchmark_nav = 1.0
-    sessions = market_business_days(conn, "CN", row["start_date"], date.fromisoformat(row["end_date"]) + timedelta(days=33))
-    for rate in rates:
-        day = date.fromisoformat(rate["trade_date"])
-        benchmark_nav *= 1.0 + float(rate["close_rate"] or 0.0) / 100.0 * repo_actual_days(day, 1, sessions) / repo_year_basis(day)
-    years = max((datetime.fromisoformat(row["end_date"]) - datetime.fromisoformat(row["start_date"])).days / 365.25, 1 / 365.25)
-    return benchmark_nav ** (1.0 / years) - 1.0
+    return cash_benchmark_annualized_return(conn, row["start_date"], row["end_date"], config)
 
 
 def refresh_ranking_summary(conn, run_id: str, summary: dict) -> dict:
@@ -664,26 +655,7 @@ def leaderboard_available_years(conn, leaderboard_key_id: str | None = None) -> 
 
 def _period_repo_annualized_return(conn, start_date: str, end_date: str) -> float:
     """Use one common one-day repo cash benchmark for every strategy in a cohort."""
-    rows = conn.execute(
-        """
-        SELECT trade_date,close_rate
-        FROM repo_rates
-        WHERE symbol='204001' AND trade_date BETWEEN ? AND ?
-        ORDER BY trade_date
-        """,
-        (start_date, end_date),
-    ).fetchall()
-    if not rows:
-        return 0.0
-    period_end = date.fromisoformat(end_date)
-    benchmark_nav = 1.0
-    sessions = market_business_days(conn, "CN", start_date, period_end + timedelta(days=33))
-    for row in rows:
-        day = date.fromisoformat(row["trade_date"])
-        actual_days = repo_actual_days(day, 1, sessions)
-        benchmark_nav *= 1.0 + float(row["close_rate"] or 0.0) / 100.0 * actual_days / repo_year_basis(day)
-    years = max(((period_end - date.fromisoformat(start_date)).days + 1) / 365.25, 1 / 365.25)
-    return benchmark_nav ** (1.0 / years) - 1.0
+    return cash_benchmark_annualized_return(conn, start_date, end_date)
 
 
 def _period_performance_metrics(
@@ -2135,7 +2107,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 rows = rows_to_dicts(
                     conn.execute(
                         """
-                        SELECT trade_date,symbol,side,quantity,price,gross_amount,fee,currency,reason
+                        SELECT trade_date,symbol,side,quantity,price,gross_amount,fee,currency,reason,
+                               json_extract(payload_json, '$.slippage_cny') AS slippage_cny
                         FROM trades WHERE run_id=? ORDER BY trade_date
                         """,
                         (run_id,),

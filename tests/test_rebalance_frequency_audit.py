@@ -166,6 +166,7 @@ class RebalanceFrequencyAuditTests(unittest.TestCase):
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 config["fees"]["cn_etf"][field] = 0
         config["fees"]["repo"]["investor_commission_rate"] = 0
+        config["fees"]["slippage"]["cn_bps"] = 0
         with db_session(db_path) as conn:
             self.flat_prices(conn)
             conn.execute(

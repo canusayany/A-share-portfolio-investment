@@ -135,14 +135,20 @@ def usd_to_cny(usd_amount: float, usd_cny_rate: float, config: FxFeeConfig, incl
     return round(max(cny, 0.0), 6), round(max(fee_cny, 0.0), 6)
 
 
-def hk_connect_etf_trade_fee(gross_amount_hkd: float, config: HkConnectEtfFeeConfig) -> float:
+def hk_connect_etf_trade_fee(
+    gross_amount_hkd: float, config: HkConnectEtfFeeConfig, *, trade_day: date | None = None,
+) -> float:
     if gross_amount_hkd <= 0:
         return 0.0
     # HKEX levies are rounded to the nearest cent item by item.  Rounding only
     # the final sum understates small Southbound ETF trades.
     commission = round(max(gross_amount_hkd * config.broker_commission_rate, config.min_broker_commission_hkd), 2)
-    settlement = gross_amount_hkd * config.stock_settlement_fee_rate
-    settlement = round(min(max(settlement, config.min_stock_settlement_fee_hkd), config.max_stock_settlement_fee_hkd), 2)
+    if trade_day is not None and trade_day < date(2025, 6, 30):
+        # HKEX's previous Exchange Trade fee had HK$2 and HK$100 bounds.
+        settlement = round(min(max(gross_amount_hkd * 0.00002, 2.0), 100.0), 2)
+    else:
+        settlement = gross_amount_hkd * config.stock_settlement_fee_rate
+        settlement = round(min(max(settlement, config.min_stock_settlement_fee_hkd), config.max_stock_settlement_fee_hkd), 2)
     pass_through = sum(
         round(gross_amount_hkd * rate, 2)
         for rate in (

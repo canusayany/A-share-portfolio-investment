@@ -75,6 +75,15 @@ class ChartFocusTests(unittest.TestCase):
         self.assertEqual(columnar_chart_payload(self.rows, required_dates=set()), self.default_chart)
         self.assertEqual(columnar_chart_payload(self.rows, required_dates={self.rows[0]["trade_date"]}), self.default_chart)
 
+    def test_daily_return_chart_keeps_an_extreme_omitted_from_the_holdings_chart(self):
+        rows = [dict(row) for row in self.rows]
+        rows[self.rows.index(self.omitted)]["daily_return"] = -0.25
+        chart = columnar_chart_payload(rows)
+        self.assertNotIn(-0.25, chart["daily_returns"])
+        full = chart["full_daily_returns"]
+        self.assertEqual(full["dates"], [row["trade_date"] for row in rows])
+        self.assertEqual(full["returns"][full["dates"].index(self.omitted["trade_date"])], -0.25)
+
     def test_api_returns_exact_omitted_trading_day(self):
         default = http_json(self.url)["chart"]
         self.assertEqual(default, self.default_chart)

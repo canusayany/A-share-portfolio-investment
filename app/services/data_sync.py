@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from app.config import DEFAULT_ASSETS, asset_price_start_date, asset_trade_start_date, required_fx_pairs_for_assets
 from app.db import insert_many, upsert_assets, utc_now
 from app.services.price_data import INDEX_PROXY_PRICE_SOURCES
+from app.services.fund_income import missing_money_dates, parse_money_income, verified_voo_dividends
 from app.services.repo_history import fetch_verified_repo_absences, verified_repo_absence_dates
 from app.services.calendar import (
     asset_business_days, business_days, calendar_missing_years, daterange, market_business_days,
@@ -53,6 +54,8 @@ PRICE_CROSS_SOURCE_MAX_DEVIATION = 0.15
 PRICE_ISOLATED_JUMP_THRESHOLD = 0.70
 PRICE_NEIGHBOR_MAX_DEVIATION = 0.25
 DIVIDEND_SOURCE_PRIORITY = {
+    "vanguard:distribution": -2,
+    "digrin:paid_dividend:vanguard_checked": -1,
     "tushare:fund_div": 0,
     "eastmoney:fund_dividend": 1,
     "yahoo:chart:dividend": 1,
@@ -76,6 +79,32 @@ class SyncCancelled(RuntimeError):
 
 class RepoSyncTimedOut(RuntimeError):
     pass
+
+
+def valid_hk_ohlc(row: dict[str, Any]) -> bool:
+    prices = [finite_float(row.get(field)) for field in ("open", "high", "low", "close")]
+    if any(value is None or value <= 0 for value in prices):
+        return False
+    opening, high, low, close = prices
+    return low <= min(opening, close) <= max(opening, close) <= high
+
+
+def fetch_money_fund_income(start: str, end: str) -> list[dict[str, Any]]:
+    issuer = fetch_text("https://www.fsfund.com/fund/511990/fundDetail.shtml", timeout=25)
+    archive = fetch_text("https://fund.eastmoney.com/pingzhongdata/511990.js", timeout=25)
+    try:
+        return parse_money_income(issuer, archive, start, end)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise SyncWarning(f"511990 income verification failed: {exc}") from exc
+
+
+def fetch_verified_voo_dividends(start: str, end: str) -> list[dict[str, Any]]:
+    issuer = fetch_text("https://investor.vanguard.com/investment-products/etfs/profile/voo", timeout=30)
+    archive = fetch_digrin_dividends("VOO", "2010-09-07", "9999-12-31", "USD")
+    try:
+        return verified_voo_dividends(issuer, archive, start, end)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise SyncWarning(f"VOO distribution verification failed: {exc}") from exc
 
 
 repo_sync_context: ContextVar[tuple[float, Any] | None] = ContextVar("repo_sync_context", default=None)
@@ -518,6 +547,7 @@ def missing_coverage_ranges(conn, kind: str, symbol: str, start: str, end: str) 
         """
         SELECT start_date, end_date FROM sync_coverage
         WHERE kind=? AND symbol=? AND end_date>=? AND start_date<=?
+          AND NOT (kind='dividends' AND symbol='VOO' AND source IN ('yahoo:chart:dividend','digrin:html:dividend'))
         """,
         (kind, symbol, start, end),
     ).fetchall()
@@ -554,6 +584,11 @@ def mark_sync_coverage(conn, kind: str, symbol: str, start: str, end: str, sourc
         return
     overlap_start = (start_date - timedelta(days=1)).isoformat()
     overlap_end = (end_date + timedelta(days=1)).isoformat()
+    if symbol == "VOO" and kind == "dividends" and source == "vanguard:digrin_paid_history":
+        # Entire legacy ranges were certified on empty or partially paged replies.
+        # They must not extend a new verified interval through interval merging.
+        conn.execute("DELETE FROM sync_coverage WHERE kind=? AND symbol=? AND source IN (?,?)",
+                     (kind, symbol, "yahoo:chart:dividend", "digrin:html:dividend"))
     rows = conn.execute(
         """
         SELECT start_date, end_date FROM sync_coverage
@@ -762,6 +797,10 @@ def required_data_missing(
             conn, "dividends", asset["symbol"], dividend_fetch_start.isoformat(), dividend_end.isoformat()
         ):
             missing.add(f"dividends:{asset['symbol']}")
+        if asset["symbol"] == "511990.SH" and dividend_fetch_start <= dividend_end and missing_money_dates(
+            conn, dividend_fetch_start.isoformat(), dividend_end.isoformat()
+        ):
+            missing.add("money_fund_income:511990.SH")
         if asset["symbol"] in selected_asset_symbols and asset.get("market") == "CN" and asset.get("asset_type") not in {"cn_bond_index", "money_fund"}:
             adjustment_gaps = missing_adjustment_factor_ranges(
                 conn,
@@ -1136,7 +1175,21 @@ def price_anomaly_ranges(conn, symbol: str, start: str, end: str) -> list[tuple[
         for trade_date in detect_isolated_price_anomaly_dates([dict(row) for row in rows])
         if requested_start <= parse_date(trade_date) <= requested_end
     ]
-    return [(trade_date, trade_date) for trade_date in anomaly_dates]
+    if symbol == "510300.SH":
+        legacy = conn.execute(
+            """SELECT trade_date FROM prices WHERE symbol=? AND trade_date BETWEEN ? AND ?
+               AND (source LIKE 'eastmoney:fund_nav:160706%' OR source LIKE 'akshare:fund_open_fund_info_em:160706%')
+               ORDER BY trade_date""", (symbol, start, end)
+        ).fetchall()
+        if legacy:
+            return [(legacy[0][0], legacy[-1][0])] + [(d, d) for d in anomaly_dates]
+    if symbol == "03195.HK":
+        anomaly_dates.extend(r[0] for r in conn.execute(
+            """SELECT trade_date FROM prices WHERE symbol=? AND trade_date BETWEEN ? AND ?
+               AND (open < low OR open > high OR close < low OR close > high OR low > high)""",
+            (symbol, start, end),
+        ))
+    return [(d, d) for d in sorted(set(anomaly_dates))]
 
 
 def legacy_cn_yahoo_price_ranges(conn, symbol: str, start: str, end: str) -> list[tuple[str, str]]:
@@ -1688,16 +1741,25 @@ def parse_eastmoney_net_worth_trend(
     start_date = parse_date(start)
     end_date = parse_date(end)
     rows: list[dict[str, Any]] = []
+    previous_date = None
+    total_return = None
     for item in payload:
         timestamp_ms = item.get("x")
         nav = finite_float(item.get("y"))
-        if timestamp_ms is None or nav is None or nav <= 0:
-            continue
+        daily_pct = finite_float(item.get("equityReturn"))
+        if timestamp_ms is None or nav is None or nav <= 0 or daily_pct is None or daily_pct <= -100:
+            raise SyncWarning(f"missing published NAV or total return for {proxy_symbol}")
         trade_date = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=ZoneInfo("Asia/Shanghai")).date().isoformat()
+        if previous_date is not None and trade_date <= previous_date:
+            raise SyncWarning(f"nonchronological published NAV history for {proxy_symbol}")
+        previous_date = trade_date
+        total_return = nav if total_return is None else total_return * (1 + daily_pct / 100)
         day = parse_date(trade_date)
         if not (start_date <= day <= end_date):
             continue
-        rows.append(price_row(target_symbol, trade_date, nav, currency, f"eastmoney:fund_nav:{proxy_symbol}"))
+        row = price_row(target_symbol, trade_date, total_return, currency, f"eastmoney:fund_total_return:{proxy_symbol}")
+        row.update(open=None, high=None, low=None)
+        rows.append(row)
     if not rows:
         raise SyncWarning(f"Eastmoney returned no fund NAV rows for {proxy_symbol}")
     return rows
@@ -1709,6 +1771,8 @@ def fetch_eastmoney_fund_nav_proxy_prices(proxy_symbol: str, target_symbol: str,
         text = fetch_text(url, timeout=20, referer=f"https://fund.eastmoney.com/{proxy_symbol}.html")
     except SyncWarning as exc:
         raise SyncWarning(f"Eastmoney fund NAV fetch failed for {proxy_symbol}: {exc}") from exc
+    if not re.search(r'var\s+fS_code\s*=\s*"' + re.escape(proxy_symbol) + r'"', text):
+        raise SyncWarning(f"Eastmoney NAV fund identity mismatch for {proxy_symbol}")
     return parse_eastmoney_net_worth_trend(text, proxy_symbol, target_symbol, start, end, currency)
 
 
@@ -1742,13 +1806,7 @@ def fetch_akshare_fund_nav_proxy_prices(proxy_symbol: str, target_symbol: str, s
 
 
 def fetch_fund_nav_proxy_prices(proxy_symbol: str, target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
-    warnings: list[str] = []
-    for fetcher in (fetch_eastmoney_fund_nav_proxy_prices, fetch_akshare_fund_nav_proxy_prices):
-        try:
-            return fetcher(proxy_symbol, target_symbol, start, end, currency)
-        except SyncWarning as exc:
-            warnings.append(str(exc))
-    raise SyncWarning("; ".join(warnings))
+    return fetch_eastmoney_fund_nav_proxy_prices(proxy_symbol, target_symbol, start, end, currency)
 
 
 def fetch_sge_au9999_spot_prices(target_symbol: str, start: str, end: str, currency: str) -> list[dict[str, Any]]:
@@ -1989,6 +2047,11 @@ def fetch_price_fallback_rows(
     fetch_start = (parse_date(range_start) - timedelta(days=anchor_days)).isoformat()
     fetch_end = (parse_date(range_end) + timedelta(days=anchor_days)).isoformat()
     if kind == "open_fund_nav":
+        listing = asset_trade_start_date(asset, range_start)
+        fetch_end = max(fetch_end, listing)
+        if not any(row["trade_date"] == listing for row in target_rows):
+            target_rows = target_rows + fetch_sohu_prices(symbol, listing, listing, currency, "sohu:hisHq")
+        target_rows = [row for row in target_rows if row["trade_date"] == listing]
         fallback_rows = fetch_fund_nav_proxy_prices(str(fallback["symbol"]), symbol, fetch_start, fetch_end, currency)
     elif kind == "sge_au9999":
         fallback_rows = fetch_au9999_proxy_prices(symbol, fetch_start, fetch_end, currency, token=token)
@@ -3445,6 +3508,33 @@ def sync_all(
         conn.execute("DELETE FROM repo_rates WHERE symbol=? AND trade_date BETWEEN ? AND ? AND source LIKE 'generated:%'", ("204001", start, end))
 
     inserted = {"prices": 0, "dividends": 0, "adj_factors": 0, "repo_rates": 0, "repo_quote_absences": 0, "fx_rates": 0, "trading_calendar": calendar_count}
+    for asset in assets:
+        if asset.get("enabled", True) and asset.get("non_trading_dates"):
+            for holiday in asset["non_trading_dates"]:
+                if start <= holiday <= end:
+                    removed = conn.execute(
+                        "DELETE FROM prices WHERE symbol=? AND trade_date=? AND source LIKE '%:splice_scale_%'",
+                        (asset["symbol"], holiday),
+                    ).rowcount
+                    if removed:
+                        inserted["removed_halt_proxies"] = inserted.get("removed_halt_proxies", 0) + removed
+        if asset["symbol"] != "511990.SH" or not asset.get("enabled", True):
+            continue
+        first = max(start, asset_trade_start_date(asset, start))
+        last = effective_price_end_for_asset(asset, end, conn).isoformat()
+        if first > last or not missing_money_dates(conn, first, last):
+            continue
+        if missing_items is not None and "money_fund_income:511990.SH" not in missing_items:
+            continue
+        try:
+            if not allow_network:
+                raise SyncWarning("network disabled for money market income download")
+            rows = fetch_money_fund_income(first, last)
+            inserted["money_fund_income"] = insert_many(conn, "money_fund_income", rows)
+        except SyncWarning as exc:
+            warnings.append(str(exc))
+        if missing_money_dates(conn, first, last):
+            missing_data.append("money_fund_income:511990.SH")
     price_range_func = missing_date_ranges
     rate_range_func = missing_date_ranges
     cn_data_end = effective_price_end_for_market("CN", end, conn)
@@ -3541,7 +3631,7 @@ def sync_all(
               AND source NOT LIKE 'generated:%'
             ORDER BY trade_date
             """,
-            (asset["symbol"], price_anchor_start, price_anchor_end),
+            (asset["symbol"], price_anchor_start, max(price_anchor_end, asset_trade_start_date(asset, start))),
         ).fetchall()
         existing_price_rows[asset["symbol"]] = [dict(row) for row in rows]
 
@@ -3572,7 +3662,7 @@ def sync_all(
                     range_prices = fetch_chinabond_index_prices(asset, range_start, range_end)
                 except SyncWarning as exc:
                     asset_warnings.append(str(exc))
-            elif fallback_kind == "sge_au9999" and parse_date(range_end) < primary_start:
+            elif fallback_kind in {"sge_au9999", "open_fund_nav"} and parse_date(range_end) < primary_start:
                 # The ETF did not trade. Fetch only its gold-price proxy below.
                 expected_price_dates = expected_asset_dates(symbol, range_start, range_end)
             elif asset.get("market") == "CN":
@@ -3624,7 +3714,10 @@ def sync_all(
                         asset_warnings.append(str(exc))
                         continue
                     raise_if_cancelled(should_cancel)
-                    source_rows = [row for row in source_rows if row["trade_date"] in remaining_dates]
+                    source_rows = [
+                        row for row in source_rows if row["trade_date"] in remaining_dates
+                        and valid_hk_ohlc(row) and "spark" not in str(row.get("source", ""))
+                    ]
                     if source_rows:
                         range_prices = merge_rows_by_trade_date(range_prices, source_rows)
                         logger.info("sync price source complete symbol=%s source=%s range=%s..%s rows=%d", symbol, source_name, range_start, range_end, len(source_rows))
@@ -3732,11 +3825,9 @@ def sync_all(
                 if asset.get("asset_type") == "cn_bond_index":
                     dividend_source = "chinabond:index_total_return"
                     dividend_fetch_succeeded = True
-                elif asset.get("asset_type") == "money_fund":
-                    # 511990's daily holding-period income is embedded in its
-                    # exchange price.  Do not require an ordinary cash-dividend
-                    # feed, which would otherwise make every sync look incomplete.
-                    dividend_source = "market_price:money_fund_total_return"
+                elif symbol == "VOO":
+                    range_dividends = fetch_verified_voo_dividends(range_start, range_end)
+                    dividend_source = "vanguard:digrin_paid_history"
                     dividend_fetch_succeeded = True
                 elif asset.get("market") == "CN":
                     cn_dividend_sources = [

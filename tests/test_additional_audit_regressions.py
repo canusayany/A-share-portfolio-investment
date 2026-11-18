@@ -16,6 +16,7 @@ class AdditionalAuditRegressionTests(unittest.TestCase):
     def fixture(self, start="2020-01-02", end="2020-01-10", symbol="VOO"):
         path, config = build_synced_db(start, end)
         config.update(monthly_spend_cny=0, rebalance_frequency="weekly", rebalance_band=0, rebalance_to_target=True)
+        config["fees"]["slippage"] = dict.fromkeys(("cn_bps", "hk_bps", "us_bps"), 0)
         for asset in config["assets"]:
             asset["enabled"] = asset["symbol"] == symbol
             asset["target_weight"] = 0.5 if asset["enabled"] else 0
@@ -50,7 +51,7 @@ class AdditionalAuditRegressionTests(unittest.TestCase):
         self.assertEqual(budget, 100)
         state = PortfolioState(cash_cny=1000, positions={pos.symbol: pos})
         trades = []
-        _buy_position(state, pos, date(2020, 1, 2), budget, 2, {"HKD/CNY": 1}, config["fees"], trades, False, "rebalance")
+        _buy_position(state, pos, date(2025, 7, 2), budget, 2, {"HKD/CNY": 1}, config["fees"], trades, False, "rebalance")
         self.assertEqual(trades[0]["quantity"], 100)
         self.assertEqual(_portfolio_value(state, {pos.symbol: 2}, {"HKD/CNY": 1})[0], 1000)
 
@@ -95,7 +96,7 @@ class AdditionalAuditRegressionTests(unittest.TestCase):
                 state = PortfolioState(cash_cny=10, positions={symbol: pos})
                 rates = {"USD/CNY": 1, "HKD/CNY": 1}
                 trades = []
-                _sell_position(state, pos, date(2020, 1, 2), 1, 1, rates, config["fees"], trades, "rebalance")
+                _sell_position(state, pos, date(2025, 7, 2), 1, 1, rates, config["fees"], trades, "rebalance")
                 self.assertEqual(state.cash_cny, 6)
                 self.assertEqual(state.total_fees_cny, 5)
                 self.assertEqual(_portfolio_value(state, {symbol: 1}, rates)[0], 11 - 5)
@@ -109,7 +110,7 @@ class AdditionalAuditRegressionTests(unittest.TestCase):
             row = conn.execute("SELECT flow_cny,total_asset_cny FROM portfolio_daily WHERE run_id=? AND trade_date='2024-06-03'", (result["run_id"],)).fetchone()
         self.assertEqual(row["flow_cny"], 0)
         self.assertEqual(result["summary"]["total_spend_cny"], 0)
-        self.assertAlmostEqual(row["total_asset_cny"], 1_000_000 - 1_000_000 * 0.00008 * 3 / 365, places=5)
+        self.assertAlmostEqual(row["total_asset_cny"], 1_000_000 - 990_000 * 0.00002, places=5)
 
     def test_proxy_switch_retries_when_old_opening_quote_returns(self):
         path, config = self.fixture("2020-12-31", "2021-01-07", "518880.SH")

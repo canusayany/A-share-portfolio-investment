@@ -709,9 +709,10 @@ class DbAndSyncTests(unittest.TestCase):
     def test_dividend_sync_is_independent_from_price_gaps(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
         enable_assets(cfg, "VOO")
-        original_fetch = data_sync_module.fetch_yahoo_dividends
+        original_fetch = data_sync_module.fetch_verified_voo_dividends
 
-        def fake_fetch_yahoo_dividends(symbol, start, end, currency):
+        def fake_fetch_verified_voo_dividends(start, end):
+            symbol, currency = "VOO", "USD"
             self.assertEqual(symbol, "VOO")
             return [
                 {
@@ -727,7 +728,7 @@ class DbAndSyncTests(unittest.TestCase):
             ]
 
         try:
-            data_sync_module.fetch_yahoo_dividends = fake_fetch_yahoo_dividends
+            data_sync_module.fetch_verified_voo_dividends = fake_fetch_verified_voo_dividends
             with db_session(db_path) as conn:
                 conn.execute("DELETE FROM fund_dividends WHERE symbol='VOO'")
                 conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='VOO'")
@@ -737,7 +738,7 @@ class DbAndSyncTests(unittest.TestCase):
                 dividend_count = conn.execute("SELECT COUNT(*) AS count FROM fund_dividends WHERE symbol='VOO'").fetchone()["count"]
                 coverage_count = conn.execute("SELECT COUNT(*) AS count FROM sync_coverage WHERE kind='dividends' AND symbol='VOO'").fetchone()["count"]
         finally:
-            data_sync_module.fetch_yahoo_dividends = original_fetch
+            data_sync_module.fetch_verified_voo_dividends = original_fetch
 
         self.assertEqual(result["inserted"]["prices"], 0)
         self.assertEqual(result["inserted"]["dividends"], 1)
@@ -1042,12 +1043,13 @@ class DbAndSyncTests(unittest.TestCase):
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
         enable_assets(cfg, "VOO")
         original_fetch_prices = data_sync_module.fetch_yahoo_prices
-        original_fetch_dividends = data_sync_module.fetch_yahoo_dividends
+        original_fetch_dividends = data_sync_module.fetch_verified_voo_dividends
 
         def fail_fetch_prices(*_args, **_kwargs):
             raise AssertionError("price fetch should not run for dividend-only sync")
 
-        def fake_fetch_yahoo_dividends(symbol, start, end, currency):
+        def fake_fetch_verified_voo_dividends(start, end):
+            symbol, currency = "VOO", "USD"
             return [
                 {
                     "symbol": symbol,
@@ -1063,7 +1065,7 @@ class DbAndSyncTests(unittest.TestCase):
 
         try:
             data_sync_module.fetch_yahoo_prices = fail_fetch_prices
-            data_sync_module.fetch_yahoo_dividends = fake_fetch_yahoo_dividends
+            data_sync_module.fetch_verified_voo_dividends = fake_fetch_verified_voo_dividends
             with db_session(db_path) as conn:
                 conn.execute("DELETE FROM prices WHERE symbol='VOO' AND trade_date >= '2020-06-01'")
                 conn.execute("DELETE FROM fund_dividends WHERE symbol='VOO'")
@@ -1071,7 +1073,7 @@ class DbAndSyncTests(unittest.TestCase):
                 result = sync_all(conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["dividends:VOO"])
         finally:
             data_sync_module.fetch_yahoo_prices = original_fetch_prices
-            data_sync_module.fetch_yahoo_dividends = original_fetch_dividends
+            data_sync_module.fetch_verified_voo_dividends = original_fetch_dividends
 
         self.assertEqual(result["inserted"]["prices"], 0)
         self.assertEqual(result["inserted"]["dividends"], 1)
@@ -1204,7 +1206,7 @@ class DbAndSyncTests(unittest.TestCase):
             return [
                 {
                     "symbol": target_symbol,
-                    "trade_date": "2020-01-09",
+                    "trade_date": "2012-05-28",
                     "open": 2.0,
                     "high": 2.0,
                     "low": 2.0,
@@ -1217,7 +1219,7 @@ class DbAndSyncTests(unittest.TestCase):
                 },
                 {
                     "symbol": target_symbol,
-                    "trade_date": "2020-01-10",
+                    "trade_date": "2012-05-25",
                     "open": 3.0,
                     "high": 3.0,
                     "low": 3.0,
@@ -1234,9 +1236,9 @@ class DbAndSyncTests(unittest.TestCase):
             data_sync_module.fetch_fund_nav_proxy_prices = fake_fetch_nav
             rows = data_sync_module.fetch_price_fallback_rows(
                 asset,
-                "2020-01-10",
-                "2020-01-10",
-                [{"trade_date": "2020-01-09", "close": 6.0, "source": "fixture:price"}],
+                "2012-05-25",
+                "2012-05-25",
+                [{"trade_date": "2012-05-28", "close": 6.0, "source": "fixture:price"}],
             )
         finally:
             data_sync_module.fetch_fund_nav_proxy_prices = original_fetch_nav
@@ -2122,7 +2124,7 @@ class DbAndSyncTests(unittest.TestCase):
         )
         self.assertEqual(nav_rows[0]["trade_date"], "2020-01-02")
         self.assertEqual(nav_rows[0]["close"], 1.23)
-        self.assertEqual(nav_rows[0]["source"], "eastmoney:fund_nav:160706")
+        self.assertEqual(nav_rows[0]["source"], "eastmoney:fund_total_return:160706")
         self.assertEqual(data_sync_module.fetch_price_fallback_rows({"symbol": "X", "currency": "CNY"}, "2020-01-02", "2020-01-02", []), [])
         with self.assertRaises(data_sync_module.SyncWarning):
             data_sync_module.fetch_price_fallback_rows(

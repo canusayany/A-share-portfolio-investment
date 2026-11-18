@@ -8,7 +8,6 @@ from unittest.mock import patch
 from app.config import normalize_config
 from app.db import SCHEMA, insert_many
 from app.services import backtest_engine as engine
-from app.services.calendar import repo_actual_days, repo_year_basis
 from app.services.data_sync import mark_sync_coverage, required_data_missing
 from tests.helpers import fixture_repo_rates, seed_fixture_data
 
@@ -73,10 +72,8 @@ class VerifiedRepoNoQuoteExecutionTests(unittest.TestCase):
         self.assertEqual(observed.count(("2010-01-11", 13, 4)), 2)
         self.assertEqual(result["summary"]["engine_version"], engine.BACKTEST_ENGINE_VERSION)
 
-        benchmark_nav = 1.0
-        for day, annual_rate in (("2010-01-06", 10), ("2010-01-07", 2), ("2010-01-08", 12), ("2010-01-11", 13)):
-            trade_day = date.fromisoformat(day)
-            benchmark_nav *= 1 + annual_rate / 100 * repo_actual_days(trade_day, 1) / repo_year_basis(trade_day)
+        # GC001 quotes 1%, 2%, 3% matured. The last loan is still outstanding.
+        benchmark_nav = 1 + (2.78 + 5.56 + 8.33) / 100_000
         years = 5 / 365.25
         self.assertAlmostEqual(result["summary"]["repo_annualized_return"], benchmark_nav ** (1 / years) - 1)
 
@@ -84,21 +81,23 @@ class VerifiedRepoNoQuoteExecutionTests(unittest.TestCase):
         self.mark_absence()
         _result, observed = self.run_observed()
         _, selected, overnight = next(row for row in observed if row[0] == "2010-01-07")
-        state = engine.PortfolioState(cash_cny=10_000)
+        state = engine.PortfolioState(cash_cny=100_000)
         day = date(2010, 1, 7)
         engine._invest_repo_cash(state, day, selected, overnight, self.config["fees"], 14, set(), 0)
         self.assertEqual(len(state.repo_lots), 1)
         self.assertEqual(state.repo_lots[0].actual_days, 1)
-        self.assertEqual(state.repo_lots[0].interest, round(10_000 * 0.02 / 360, 2))
+        self.assertEqual(state.repo_lots[0].interest, round(100_000 * 0.02 / 360, 2))
 
     def test_an_unmarked_gap_still_fails_preflight_and_is_not_classified_as_verified_absence(self):
         self.assertIn("repo_rates:204014", required_data_missing(
             self.conn, self.config["start_date"], self.config["end_date"], self.config["assets"], "204014",
         ))
-        _result, observed = self.run_observed()
-        self.assertEqual(observed.count(("2010-01-07", 10, 2)), 2)
+        result, observed = self.run_observed()
+        self.assertEqual(sum(day == "2010-01-07" for day, _, _ in observed), 1)
+        self.assertIn("repo_rates:204014", result["summary"]["data_coverage"]["comparison"]["gaps"])
 
     def test_actual_selected_quote_overrides_a_stale_absence_marker(self):
+        self.mark_absence()
         self.mark_absence("2010-01-08")
         _result, observed = self.run_observed()
         self.assertEqual(observed.count(("2010-01-08", 12, 3)), 2)
@@ -108,7 +107,7 @@ class VerifiedRepoNoQuoteExecutionTests(unittest.TestCase):
         result, observed = self.run_observed()
         self.assertTrue(observed)
         self.assertTrue(all(selected is None for _day, selected, _overnight in observed))
-        self.assertEqual(observed.count(("2010-01-07", None, 2)), 2)
+        self.assertEqual(observed.count(("2010-01-07", None, 2)), 1)
         self.assertGreater(result["summary"]["final_asset_cny"], self.config["initial_capital_cny"])
 
 

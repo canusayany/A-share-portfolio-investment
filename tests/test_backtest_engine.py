@@ -210,12 +210,14 @@ class BacktestEngineTests(unittest.TestCase):
             {"trade_date": "2023-06-02", "price": 2.540, "adj_factor": 0.3580},
         ]
 
-        prices = adjusted_price_series(rows)
-
-        self.assertAlmostEqual(prices["2022-09-05"], 0.98265, places=4)
-        self.assertAlmostEqual(prices["2022-09-02"], 2.686 * 0.3622, places=6)
-        self.assertAlmostEqual(prices["2022-09-06"], 0.98518, places=4)
-        self.assertAlmostEqual(prices["2023-06-02"], 2.540 * 0.3622, places=6)
+        # The vendor factor arrives later and differs from the announced ratio.
+        # It must not rewrite the suspended session or determine held units.
+        self.assertEqual(adjusted_price_series(rows)["2022-09-02"], 2.686)
+        prices = adjusted_price_series(rows, {"2022-09-05": 0.36555})
+        self.assertEqual(prices["2022-09-02"], 2.686)
+        self.assertAlmostEqual(prices["2022-09-05"], 2.713 * 0.36555)
+        self.assertAlmostEqual(prices["2022-09-06"], 2.720 * 0.36555)
+        self.assertAlmostEqual(prices["2023-06-02"], 2.540 * 0.36555)
 
     def test_configured_512890_share_split_is_continuous_without_adjustment_factors(self) -> None:
         rows = [
@@ -580,6 +582,7 @@ class BacktestEngineTests(unittest.TestCase):
                 "monthly_spend_cny": 10_000.0,
             }
         )
+        cfg["fees"]["slippage"]["cn_bps"] = 0
         for asset in cfg["assets"]:
             asset["enabled"] = asset["symbol"] == "510500.SH"
             asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
@@ -612,13 +615,14 @@ class BacktestEngineTests(unittest.TestCase):
     def test_multi_day_repo_rechecks_at_maturity_then_trades_following_open(self) -> None:
         cfg = normalize_config(
             {
-                "start_date": "2020-01-01",
-                "end_date": "2020-01-15",
+                "start_date": "2025-01-01",
+                "end_date": "2025-01-15",
                 "repo_symbol": "204007",
                 "dip_buy_enabled": True,
                 "monthly_spend_cny": 10_000.0,
             }
         )
+        cfg["fees"]["slippage"]["cn_bps"] = 0
         for asset in cfg["assets"]:
             asset["enabled"] = asset["symbol"] == "510500.SH"
             asset["target_weight"] = 0.50 if asset["enabled"] else 0.0
@@ -627,8 +631,8 @@ class BacktestEngineTests(unittest.TestCase):
         with db_session(db_path) as conn:
             seed_fixture_data(conn, cfg, cfg["start_date"], cfg["end_date"])
             conn.execute("UPDATE prices SET open=9.4, high=9.4, low=9.4, close=9.4 WHERE symbol='510500.SH'")
-            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH' AND trade_date='2020-01-01'")
-            conn.execute("UPDATE prices SET open=8.25 WHERE symbol='510500.SH' AND trade_date='2020-01-09'")
+            conn.execute("UPDATE prices SET open=10.0, high=10.0, low=10.0, close=10.0 WHERE symbol='510500.SH' AND trade_date='2025-01-01'")
+            conn.execute("UPDATE prices SET open=8.25 WHERE symbol='510500.SH' AND trade_date='2025-01-09'")
             result = run_backtest(conn, cfg)
             dip_trades = rows_to_dicts(
                 conn.execute(
@@ -637,20 +641,20 @@ class BacktestEngineTests(unittest.TestCase):
                 )
             )
             jan_07 = conn.execute(
-                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-07'",
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2025-01-07'",
                 (result["run_id"],),
             ).fetchone()
             maturity_day = conn.execute(
-                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2020-01-08'",
+                "SELECT payload_json FROM portfolio_daily WHERE run_id=? AND trade_date='2025-01-08'",
                 (result["run_id"],),
             ).fetchone()
 
         jan_07_dip = json.loads(jan_07["payload_json"])["dip_buy"]
         maturity_dip = json.loads(maturity_day["payload_json"])["dip_buy"]
-        self.assertEqual(jan_07_dip["deferred_recheck_dates"]["510500.SH"], "2020-01-08")
+        self.assertEqual(jan_07_dip["deferred_recheck_dates"]["510500.SH"], "2025-01-08")
         self.assertEqual(maturity_dip["deferred_count"], 0)
         self.assertEqual(maturity_dip["pending_count"], 1)
-        self.assertEqual(dip_trades, [{"trade_date": "2020-01-09", "price": 8.25}])
+        self.assertEqual(dip_trades, [{"trade_date": "2025-01-09", "price": 8.25}])
 
     def test_dip_buy_asset_scope_and_fixed_24_month_cash_buffer(self) -> None:
         cfg = normalize_config({})
@@ -660,7 +664,7 @@ class BacktestEngineTests(unittest.TestCase):
 
         symbols = {asset["symbol"] for asset in dip_buy_assets(cfg, date(2020, 1, 15), prices)}
 
-        self.assertEqual(symbols, {"512890.SH", "510300.SH", "518880.SH", "CBA03101"})
+        self.assertEqual(symbols, {"512890.SH", "510300.SH", "518880.SH"})
         self.assertEqual(dip_buy_cash_buffer_cny(10_000), 240_000)
         self.assertEqual(dip_buy_cash_buffer_cny(0), 0)
         self.assertEqual(dip_buy_annual_budget(400_000, 10_000, 10), (240_000, 160_000, 16_000, 10))
@@ -980,6 +984,7 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_proxy_to_etf_switch_uses_new_asset_price_and_new_cost_basis(self) -> None:
         cfg = normalize_config({})
+        cfg["fees"]["slippage"]["cn_bps"] = 0
         state = PortfolioState(
             cash_cny=0.0,
             positions={
@@ -1406,18 +1411,22 @@ class BacktestEngineTests(unittest.TestCase):
                 )
             ]
 
-        nav = 1.0
-        for trade_day in dates:
-            nav *= 1.0 + 0.0365 * repo_actual_days(trade_day, 1) / 365.0
-        years = max((dates[-1] - dates[0]).days / 365.25, 1 / 365.25)
-        expected_annualized = nav ** (1.0 / years) - 1.0
-        self.assertAlmostEqual(result["summary"]["repo_annualized_return"], expected_annualized)
+        cash = cfg["initial_capital_cny"]
+        for day in dates[:-1]:
+            principal = int(cash // 100_000) * 100_000
+            interest = round(principal * 0.0365 * repo_actual_days(day, 1) / 365, 2)
+            cash += interest - round(principal * 0.00001, 2)
+        # Last day's new loan is marked net of commission with no future interest.
+        cash -= round(int(cash // 100_000) * 100_000 * 0.00001, 2)
+        years = (dates[-1] - dates[0]).days / 365.25
+        expected = (cash / cfg["initial_capital_cny"]) ** (1 / years) - 1
+        self.assertAlmostEqual(result["summary"]["repo_annualized_return"], expected)
 
     def test_long_tenor_repo_stays_liquid_for_upcoming_rebalance(self) -> None:
         cfg = normalize_config({})
         trade_day = date(2020, 1, 3)
         rebalance_day = date(2020, 1, 6)
-        state = PortfolioState(cash_cny=10000.0)
+        state = PortfolioState(cash_cny=100_000.0)
 
         _invest_repo_cash(
             state,
@@ -1435,7 +1444,7 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertTrue(all(lot.maturity_date <= rebalance_day for lot in state.repo_lots))
 
     def test_reserved_cash_can_use_one_day_repo(self) -> None:
-        db_path, cfg = build_synced_db("2020-01-20", "2020-02-10")
+        db_path, cfg = build_synced_db("2023-01-20", "2023-02-10")
         cfg["repo_symbol"] = "204028"
         cfg["monthly_spend_cny"] = 5000
         with db_session(db_path) as conn:
@@ -1781,13 +1790,13 @@ class BacktestEngineTests(unittest.TestCase):
         with db_session(db_path) as conn:
             conn.execute("DELETE FROM fund_dividends")
             conn.execute(
-                "UPDATE prices SET open=100,high=100,low=100,close=100,adj_close=100 WHERE symbol IN ('CBA03101','CBA06501') AND trade_date<'2021-01-01'"
+                "UPDATE prices SET open=100,high=100,low=100,close=100,adj_close=100 WHERE symbol IN ('CBA03101','CBA06501') AND trade_date<'2020-12-31'"
             )
             conn.execute(
-                "UPDATE prices SET open=200,high=200,low=200,close=200,adj_close=200 WHERE symbol='CBA03101' AND trade_date>='2021-01-01'"
+                "UPDATE prices SET open=200,high=200,low=200,close=200,adj_close=200 WHERE symbol='CBA03101' AND trade_date>='2020-12-31'"
             )
             conn.execute(
-                "UPDATE prices SET open=50,high=50,low=50,close=50,adj_close=50 WHERE symbol='CBA06501' AND trade_date>='2021-01-01'"
+                "UPDATE prices SET open=50,high=50,low=50,close=50,adj_close=50 WHERE symbol='CBA06501' AND trade_date>='2020-12-31'"
             )
             result = run_backtest(conn, cfg)
             annual = conn.execute(
@@ -1829,13 +1838,13 @@ class BacktestEngineTests(unittest.TestCase):
         with db_session(db_path) as conn:
             conn.execute("DELETE FROM fund_dividends")
             conn.execute(
-                "UPDATE prices SET open=100,high=100,low=100,close=100,adj_close=100 WHERE symbol IN ('CBA03101','CBA06501') AND trade_date<'2021-01-01'"
+                "UPDATE prices SET open=100,high=100,low=100,close=100,adj_close=100 WHERE symbol IN ('CBA03101','CBA06501') AND trade_date<'2020-12-31'"
             )
             conn.execute(
-                "UPDATE prices SET open=200,high=200,low=200,close=200,adj_close=200 WHERE symbol='CBA03101' AND trade_date>='2021-01-01'"
+                "UPDATE prices SET open=200,high=200,low=200,close=200,adj_close=200 WHERE symbol='CBA03101' AND trade_date>='2020-12-31'"
             )
             conn.execute(
-                "UPDATE prices SET open=50,high=50,low=50,close=50,adj_close=50 WHERE symbol='CBA06501' AND trade_date>='2021-01-01'"
+                "UPDATE prices SET open=50,high=50,low=50,close=50,adj_close=50 WHERE symbol='CBA06501' AND trade_date>='2020-12-31'"
             )
             result = run_backtest(conn, cfg)
             annual = conn.execute(
@@ -2121,6 +2130,7 @@ class BacktestEngineTests(unittest.TestCase):
                 "monthly_spend_cny": 0,
             }
         )
+        cfg["fees"]["slippage"]["cn_bps"] = 0
         for asset in cfg["assets"]:
             selected = asset["symbol"] == "CBA21801"
             asset["enabled"] = selected
@@ -2229,6 +2239,7 @@ class BacktestEngineTests(unittest.TestCase):
             "monthly_spend_cny": 0,
             "annual_rebalance_month": 6,
         })
+        config["fees"]["slippage"]["cn_bps"] = 0
         for asset in config["assets"]:
             asset["enabled"] = asset["symbol"] == "159593.SZ"
             asset["target_weight"] = 0.5 if asset["enabled"] else 0.0

@@ -39,14 +39,14 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
     {
         "key": "hk_sp500_connect",
         "symbol": "03195.HK",
-        "name": "港股通标普500ETF",
+        "name": "恒生标普500ETF（香港券商）",
         "target_weight": 0.0,
         "enabled": False,
         "currency": "HKD",
         "market": "HK",
-        "asset_type": "hk_connect_etf",
+        "asset_type": "hk_etf",
         "exclusive_group": "sp500",
-        "choice_label": "港股通 03195",
+        "choice_label": "香港券商 03195",
         "inception_date": "2024-04-19",
         "trade_start_date": "2024-04-23",
         "expense_ratio": 0.0079,
@@ -232,6 +232,13 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "choice_label": "中证1000 512100",
         "inception_date": "2016-09-29",
         "trade_start_date": "2016-11-04",
+        "non_trading_dates": ["2022-09-02"],
+        "share_splits": [{
+            "effective_date": "2022-09-05",
+            "price_multiplier": 0.36555,
+            "round_up_fraction": True,
+            "source": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2022-09-05/512100_20220905_1_UJdHwEYe.pdf",
+        }],
         "management_fee": 0.0015,
         "custodian_fee": 0.0005,
         "price_fallback": {
@@ -251,6 +258,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "currency": "CNY",
         "market": "CN",
         "asset_type": "cn_bond_index",
+        "tradable": False,
         # ChinaBond's public total-return series starts on this date.  Do not
         # pretend that pre-history is investable and silently route it to cash.
         "inception_date": "2008-01-02",
@@ -265,6 +273,7 @@ DEFAULT_ASSETS: list[dict[str, Any]] = [
         "currency": "CNY",
         "market": "CN",
         "asset_type": "cn_bond_index",
+        "tradable": False,
         "inception_date": "2007-01-04",
         "index_id": "8a8b2c8f5a492a01015a4ac986480043",
     },
@@ -390,7 +399,7 @@ REPO_OPTIONS: list[dict[str, Any]] = [
         "currency": "CNY",
         "market": "CN",
         # Its exchange-traded shares first have a public market price on
-        # 2013-01-28.  Market prices include the current holding-period income.
+        # 2013-01-28. Daily income is distributed separately from its price.
         "asset_type": "money_fund",
         "inception_date": "2012-12-27",
         "trade_start_date": "2013-01-28",
@@ -434,6 +443,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "liquidity_policy": "sell_overweight",
     "assets": DEFAULT_ASSETS,
     "fees": {
+        "slippage": {"cn_bps": 5.0, "hk_bps": 10.0, "us_bps": 3.0},
         "cn_etf": {
             "commission_rate": 0.00025,
             "min_commission_cny": 0.0,
@@ -479,7 +489,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "min_stock_settlement_fee_hkd": 0.0,
             "max_stock_settlement_fee_hkd": 1_000_000_000.0,
             "stamp_duty_rate": 0.0,
-            "portfolio_fee_annual_rate": 0.00008,
+            "portfolio_fee_annual_rate": 0.0,
             "fx_spread_bps": 20.0,
             "lot_size": 100.0,
         },
@@ -860,6 +870,8 @@ def validate_config(config: dict[str, Any]) -> list[str]:
                 errors.append(f"{path} cannot exceed 1")
             if field.endswith("_bps") and numeric > 10_000:
                 errors.append(f"{path} cannot exceed 10000")
+            if group == "slippage" and (field not in {"cn_bps", "hk_bps", "us_bps"} or numeric > 100):
+                errors.append(f"{path} must be a supported market slippage between 0 and 100 bps")
             if (field == "lot_size" or field.endswith("lot_size_cny")) and numeric <= 0:
                 errors.append(f"{path} must be positive")
     return errors

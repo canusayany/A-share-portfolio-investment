@@ -221,8 +221,9 @@ function fixtureConfig() {
     fees: {
       cn_etf: { commission_rate: 0.001 }, ibkr_us_etf: { plan: "pro_fixed" },
       fx: { bank_out_spread_bps: 10, bank_in_spread_bps: 10 },
-      hk_connect_etf: { broker_commission_rate: 0.001, fx_spread_bps: 10, portfolio_fee_annual_rate: 0.01 },
+      hk_connect_etf: { broker_commission_rate: 0.001, fx_spread_bps: 10, portfolio_fee_annual_rate: 0 },
       tax: { us_dividend_withholding_rate: 0.1 },
+      slippage: { cn_bps: 5, hk_bps: 10, us_bps: 3 },
     },
   };
 }
@@ -311,7 +312,7 @@ function harness({ stubBacktestRecords = true } = {}) {
     el("weight_gold").value = "0.25";
     const fees = {
       cnCommission: config.fees.cn_etf.commission_rate, ibkrPlan: config.fees.ibkr_us_etf.plan,
-      fxOutBps: 10, fxInBps: 10, hkCommission: 0.001, hkFxBps: 10, hkPortfolioFee: 0.01, usDividendTax: 0.1,
+      fxOutBps: 10, fxInBps: 10, hkCommission: 0.001, hkFxBps: 10, cnSlippage: 5, hkSlippage: 10, usSlippage: 3, usDividendTax: 0.1,
     };
     for (const [id, value] of Object.entries(fees)) el(id).value = String(value);
   }
@@ -321,6 +322,16 @@ function harness({ stubBacktestRecords = true } = {}) {
 
 const entry = (id) => ({ run_id: id, config: fixtureConfig(), summary: { marker: id, analysis_status: "completed" } });
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test("cached HTML without slippage controls preserves saved values and server defaults", () => {
+  const h = harness();
+  const lookup = h.context.document.getElementById;
+  h.context.document.getElementById = (id) => id.endsWith("Slippage") ? null : lookup(id);
+  h.evaluate("config.fees.slippage = { hk_bps: 0, us_bps: 1.5 }");
+  assert.deepEqual(JSON.parse(h.evaluate("JSON.stringify(readConfig().fees.slippage)")), {
+    cn_bps: 5, hk_bps: 0, us_bps: 1.5,
+  });
+});
 
 test("history replay uses the latest selection when detail responses finish out of order", async () => {
   const h = harness();
@@ -456,7 +467,7 @@ test("deleting the displayed run clears charts, summary, records, export, and di
   assert.equal(h.evaluate("strategyDiagnosticsCache.size"), 0);
   assert.equal(h.evaluate("Object.keys(pendingChartOptions).length"), 0);
   assert.ok(["assetChart", "dailyPnlChart", "strategyDiagnosticsChart"].every((id) => clears.includes(id)));
-  assert.equal(summaryGroups.length, 14);
+  assert.equal(summaryGroups.length, 15);
   assert.ok(summaryGroups.every((metric) => metric.value === "--"));
   for (const id of ["rollingTable", "monthsTable", "rebalanceTable", "tradesTable", "rebalanceResearchTable", "withdrawalResearchTable"]) assert.ok(tables.some((table) => table.id === id && table.count === 0), `${id} cleared`);
   assert.ok(tables.every((table) => table.count === 0));
@@ -1006,8 +1017,8 @@ test("parameter fee differences show only changed leaves with precise readable u
   assert.deepEqual(byName["美股固定佣金（每股）"],["0.005 美元 / 股","0.0065 美元 / 股"]);
   assert.deepEqual(byName["美国券商费率类型"],["固定费率","阶梯费率"]);
   assert.deepEqual(byName["出金购汇点差"],["10 基点","25 基点"]);
-  assert.deepEqual(byName["港股通组合费年率"],["0.008% / 年","0.01% / 年"]);
-  assert.deepEqual(byName["港股通会财局征费率"],["0.00015% / 边","0.0002% / 边"]);
+  assert.deepEqual(byName["旧模型组合费年率"],["0.008% / 年","0.01% / 年"]);
+  assert.deepEqual(byName["香港券商会财局征费率"],["0.00015% / 边","0.0002% / 边"]);
   assert.deepEqual(byName["美国分红预扣税率"],["10%","30%"]);
   const html=h.evaluate('configDifferenceMarkup(__a,__b)');
   assert.ok(!html.includes("bank_in_spread_bps"));assert.ok(!html.includes("入金结汇点差"));

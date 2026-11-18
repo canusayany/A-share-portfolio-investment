@@ -125,6 +125,25 @@ test.afterEach(async ({ page }, testInfo) => {
   }
 });
 
+test('saved run shows its verified quote coverage and every daily return', async ({ page }) => {
+  const { run_id } = fixtures()[0];
+  await loadRun(page, run_id);
+  const { chart } = await (await page.request.get(`/api/backtest/${run_id}/chart-series`)).json();
+  const { summary } = await (await page.request.get(`/api/backtest/${run_id}`)).json();
+  expect(chart.source_points).toBeGreaterThan(chart.display_points);
+  const coverage = page.locator('.result-data-coverage');
+  await expect(coverage).toBeVisible();
+  await expect(coverage).toContainText(summary.data_coverage.strategy.end_date);
+  await expect(coverage).toContainText('对照组合');
+  await page.locator('#chartTabDaily').click();
+  await expect.poll(() => page.evaluate(() => charts.dailyReturnChart?.getOption()?.series[0]?.data?.length)).toBe(chart.source_points);
+  const shown = await page.evaluate(() => charts.dailyReturnChart.getOption().series[0].data);
+  expect(shown).toEqual(chart.full_daily_returns.returns);
+  await page.locator('#chartTabComparison').click();
+  await expect.poll(() => page.evaluate(() => charts.comparisonChart?.getOption()?.series[1]?.name)).toBe(summary.comparison_label);
+  await noPageOverflow(page);
+});
+
 test('exact percentage input stays synchronized and rejects invalid values', async ({ page }, testInfo) => {
   await openParameters(page);
   await page.locator('#rebalanceFrequency').selectOption('yearly');

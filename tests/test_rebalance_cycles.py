@@ -57,6 +57,7 @@ class RealRebalanceCycleTests(unittest.TestCase):
         for asset in config["assets"]:
             asset.update(enabled=asset["symbol"] == "510300.SH", target_weight=.5 if asset["symbol"] == "510300.SH" else 0)
         config["fees"]["cn_etf"].update(commission_rate=0, min_commission_cny=0, exchange_handling_rate=0)
+        config["fees"]["slippage"]["cn_bps"] = 0
         config["fees"]["repo"]["investor_commission_rate"] = 0
         config.update(updates)
         return config

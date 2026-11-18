@@ -8,7 +8,7 @@ test('A50 and foreign ETF choices preserve the selected asset and exclusive grou
   await page.locator('#identitySubmit').click();
   await expect(page.locator('#identityGate')).toBeHidden();
   await expect(page.locator('#workspaceMessage')).toContainText('准备就绪');
-  if (testInfo.project.name === 'phone') await page.locator('#mobileParameterToggle').click();
+  if (page.viewportSize().width <= 1100) await page.locator('#mobileParameterToggle').click();
   await expect(page.locator('#parameterPanel')).not.toHaveAttribute('inert', '');
 
   const defaults = await (await page.request.get('/api/default-config')).json();
@@ -42,6 +42,10 @@ test('A50 and foreign ETF choices preserve the selected asset and exclusive grou
   expect(broad.filter(asset => asset.symbol !== '159593.SZ').every(asset => asset.target_weight === 0)).toBe(true);
 
   let submitted;
+  await page.getByText('可调整费用假设', { exact: true }).click();
+  await page.locator('#cnSlippage').fill('0');
+  await page.locator('#hkSlippage').fill('12.5');
+  await page.locator('#usSlippage').fill('1');
   await page.route('**/api/backtest/start', async route => {
     submitted = route.request().postDataJSON().config;
     await route.fulfill({ status: 422, json: { error: 'UI payload verified' } });
@@ -49,16 +53,17 @@ test('A50 and foreign ETF choices preserve the selected asset and exclusive grou
   const request = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/backtest/start'));
   await page.locator('#runBtn').click();
   await request;
+  expect(submitted.fees.slippage).toEqual({ cn_bps: 0, hk_bps: 12.5, us_bps: 1 });
   await expect(page.locator('#workspaceMessage')).toContainText('UI payload verified');
   const broadKeys = new Set(broad.map(asset => asset.key));
   expect(submitted.assets.filter(asset => broadKeys.has(asset.key) && asset.enabled).map(asset => asset.key)).toEqual(['cn_a50_etf']);
   expect(submitted.assets.find(asset => asset.key === 'cn_a50_etf').target_weight).toBe(0.12);
   expect(submitted.assets.filter(asset => ['us_sp500', 'hk_sp500_connect', 'cn_sp500_etf'].includes(asset.key) && asset.enabled).map(asset => asset.key)).toEqual(['us_sp500']);
 
-  if (testInfo.project.name === 'phone') await page.locator('#mobileParameterToggle').click();
+  if (page.viewportSize().width <= 1100) await page.locator('#mobileParameterToggle').click();
   await page.locator('#sp500Type').selectOption('hk_sp500_connect');
   await expect(page.locator('#sp500Type option:checked')).toContainText('03195');
-  await expect(page.locator('#sp500Route')).toContainText('港股通');
+  await expect(page.locator('#sp500Route')).toContainText('香港券商直投');
   await expect(page.locator('#sp500Route')).toContainText('HKD/CNY');
   const hkConfig = await page.evaluate(() => readConfig());
   expect(hkConfig.assets.filter(asset => asset.exclusive_group === 'sp500' && asset.enabled).map(asset => asset.symbol)).toEqual(['03195.HK']);

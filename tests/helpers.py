@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import date
+from datetime import date, timedelta
 import math
 import tempfile
 
@@ -25,6 +25,9 @@ def build_synced_db(start: str = "2020-01-01", end: str = "2020-03-31") -> tuple
     db_path = temp_db_path()
     init_db(db_path)
     config = normalize_config({"start_date": start, "end_date": end})
+    # Exact fixture quotes isolate the rule under test. Slippage has dedicated
+    # execution tests that explicitly configure each market's adverse fill.
+    config["fees"]["slippage"] = dict.fromkeys(("cn_bps", "hk_bps", "us_bps"), 0.0)
     with db_session(db_path) as conn:
         seed_fixture_data(conn, config, start, end)
     return db_path, config
@@ -159,6 +162,11 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
             dividend_start = max(start, asset.get("inception_date") or start)
             insert_many(conn, "fund_dividends", fixture_dividends(asset["symbol"], dividend_start, end, asset["currency"]))
             mark_sync_coverage(conn, "dividends", asset["symbol"], dividend_start, end, "fixture:dividend")
+        else:
+            insert_many(conn, "money_fund_income", [
+                {"symbol": asset["symbol"], "income_date": day.isoformat(), "income_per_100": 0.0, "source": "fixture:income"}
+                for day in daterange(date.fromisoformat(fetch_start), date.fromisoformat(end))
+            ])
         if asset["market"] == "CN":
             insert_many(
                 conn,
@@ -172,3 +180,9 @@ def seed_fixture_data(conn, config: dict, start: str, end: str) -> None:
     insert_many(conn, "repo_rates", fixture_repo_rates(start, end, repo_rate_symbol(config)))
     insert_many(conn, "fx_rates", fixture_fx_rates(start, end))
     insert_many(conn, "fx_rates", fixture_hkd_fx_rates(start, end))
+    # Opening orders must have a fixing already published before the first session.
+    prior = date.fromisoformat(start) - timedelta(days=1)
+    while prior.weekday() >= 5:
+        prior -= timedelta(days=1)
+    insert_many(conn, "fx_rates", fixture_fx_rates(prior.isoformat(), prior.isoformat()))
+    insert_many(conn, "fx_rates", fixture_hkd_fx_rates(prior.isoformat(), prior.isoformat()))

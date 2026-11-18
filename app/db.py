@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS adj_factors (
   PRIMARY KEY (symbol, trade_date)
 );
 
+CREATE TABLE IF NOT EXISTS money_fund_income (
+  symbol TEXT NOT NULL,
+  income_date TEXT NOT NULL,
+  income_per_100 REAL NOT NULL,
+  source TEXT NOT NULL,
+  PRIMARY KEY (symbol, income_date)
+);
+
 CREATE TABLE IF NOT EXISTS fx_rates (
   pair TEXT NOT NULL,
   trade_date TEXT NOT NULL,
@@ -441,6 +449,7 @@ def insert_many(conn: sqlite3.Connection, table: str, rows: list[dict[str, Any]]
     conflict_target = {
         "prices": "(symbol, trade_date)",
         "fund_dividends": "(symbol, ex_date, pay_date, div_cash)",
+        "money_fund_income": "(symbol, income_date)",
         "adj_factors": "(symbol, trade_date)",
         "fx_rates": "(pair, trade_date)",
         "repo_rates": "(symbol, trade_date)",
@@ -462,6 +471,7 @@ def data_status(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     queries = [
         ("price", "prices", "symbol", "trade_date", "source"),
         ("dividend", "fund_dividends", "symbol", "ex_date", "source"),
+        ("money_fund_income", "money_fund_income", "symbol", "income_date", "source"),
         ("adj_factor", "adj_factors", "symbol", "trade_date", "source"),
         ("fx", "fx_rates", "pair", "trade_date", "source"),
         ("repo", "repo_rates", "symbol", "trade_date", "source"),

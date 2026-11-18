@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>永久投资策略</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a55'/%3E%3Cpath d='M7 23l6-8 5 3 7-10' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="static/styles.css?v=20261117-rebalance-year" />
+    <link rel="stylesheet" href="static/styles.css?v=20261118-market-audit" />
   </head>
   <body class="history-collapsed">
     <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
@@ -261,7 +261,7 @@
           <details class="control-details">
             <summary>
               <span>可调整费用假设</span>
-              <small>佣金、汇兑与税率</small>
+              <small>滑点、佣金、汇兑与税率</small>
             </summary>
             <div class="details-content">
               <label>境内基金佣金率 <input id="cnCommission" type="number" min="0" step="0.00001" /></label>
@@ -274,9 +274,12 @@
               </label>
               <label>出金和购汇点差（基点） <input id="fxOutBps" type="number" min="0" step="1" /></label>
               <label>入金和结汇点差（基点） <input id="fxInBps" type="number" min="0" step="1" /></label>
-              <label>港股通佣金率 <input id="hkCommission" type="number" min="0" step="0.00001" /></label>
-              <label>港股通汇兑点差（基点） <input id="hkFxBps" type="number" min="0" step="1" /></label>
-              <label>港股通组合费年率 <input id="hkPortfolioFee" type="number" min="0" step="0.00001" /></label>
+              <label>香港券商佣金率 <input id="hkCommission" type="number" min="0" step="0.00001" /></label>
+              <label>香港券商汇兑点差（基点） <input id="hkFxBps" type="number" min="0" step="1" /></label>
+              <label>境内单边滑点（基点） <input id="cnSlippage" type="number" min="0" max="100" step="any" /></label>
+              <label>香港单边滑点（基点） <input id="hkSlippage" type="number" min="0" max="100" step="any" /></label>
+              <label>美国单边滑点（基点） <input id="usSlippage" type="number" min="0" max="100" step="any" /></label>
+              <p class="field-help">每基点等于 0.01%。买入时调高成交价，卖出时调低成交价。滑点已反映在净值中。</p>
               <label>美国分红税率 <input id="usDividendTax" type="number" min="0" max="0.3" step="0.01" /></label>
             </div>
           </details>
@@ -607,6 +610,6 @@
         </div>
       </form>
     </dialog>
-    <script src="static/app.js?v=20261117-rebalance-year"></script>
+    <script src="static/app.js?v=20261118-market-audit"></script>
   </body>
 </html>

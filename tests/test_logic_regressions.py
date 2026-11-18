@@ -24,6 +24,7 @@ class LogicRegressionTests(unittest.TestCase):
             "monthly_spend_cny": 0, "rebalance_frequency": "weekly",
             "rebalance_band": 0, "rebalance_to_target": True,
             "fees": {
+                "slippage": {"cn_bps": 0, "hk_bps": 0, "us_bps": 0},
                 "cn_etf": {"commission_rate": 0},
                 "repo": {"investor_commission_rate": 0},
                 "fx": {"bank_in_spread_bps": 0, "bank_out_spread_bps": 0, "ibkr_auto_fx_markup": 0},
@@ -79,10 +80,14 @@ class LogicRegressionTests(unittest.TestCase):
             result = self.run_backtest(conn, config)
             persisted = repo_annualized_return_from_daily(conn, result["run_id"])
             period = _period_repo_annualized_return(conn, config["start_date"], config["end_date"])
-        growth = (1 + 0.10 * 3 / 365) * (1 + 0.01 / 365)
+        # Only the first repo matured within the valuation interval.
+        interest = repo_interest(100000, 10, 3, trade_day=date(2020, 1, 2))
+        growth = (100000 + interest) / 100000
         self.assertAlmostEqual(result["summary"]["repo_annualized_return"], growth ** 365.25 - 1)
         self.assertAlmostEqual(persisted, growth ** 365.25 - 1)
-        self.assertAlmostEqual(period, growth ** (365.25 / 2) - 1)
+        # Cohort comparison uses 100万 principal and its default commission.
+        cohort_interest = repo_interest(1000000, 10, 3, trade_day=date(2020, 1, 2))
+        self.assertAlmostEqual(period, ((1000000 + cohort_interest - 20) / 1000000) ** 365.25 - 1)
 
     def test_repo_interest_uses_calendar_beyond_requested_backtest_end(self):
         path, config = self.fixture("2020-01-02", "2020-01-03")
@@ -91,8 +96,8 @@ class LogicRegressionTests(unittest.TestCase):
             conn.execute("UPDATE repo_rates SET close_rate=3.65")
             result = self.run_backtest(conn, config)
         # Thursday's first settlement is Friday; its final settlement is Tuesday.
-        # Friday's one-day trade settles Tuesday -> Wednesday (one interest day).
-        growth = (1 + 0.0365 * 4 / 365) * (1 + 0.0365 / 365)
+        # Friday's one-day trade has not accrued by Friday's valuation.
+        growth = 1 + 0.0365 * 4 / 365
         self.assertAlmostEqual(result["summary"]["repo_annualized_return"], growth ** 365.25 - 1)
 
     def test_interior_price_rate_and_fx_gaps_are_detected(self):

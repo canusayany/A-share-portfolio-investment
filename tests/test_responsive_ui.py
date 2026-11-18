@@ -59,7 +59,7 @@ class ResponsiveUiContractTests(unittest.TestCase):
         self.assertIn("@media (max-height: 600px) and (max-width: 1100px)", STYLES)
 
     def test_responsive_release_cache_busts_both_static_assets(self) -> None:
-        release = "20261117-rebalance-year"
+        release = "20261118-market-audit"
         self.assertEqual(INDEX.count(release), 2)
 
     def test_export_error_toast_is_fixed_and_safe_area_aware(self) -> None:
@@ -93,7 +93,7 @@ class ResponsiveUiContractTests(unittest.TestCase):
                 self.assertEqual(INDEX.count(f'id="{field}"'), 1, field)
         for field in (
             "cnCommission", "ibkrPlan", "fxOutBps", "fxInBps", "hkCommission",
-            "hkFxBps", "hkPortfolioFee", "usDividendTax", "feeSummary",
+            "hkFxBps", "cnSlippage", "usSlippage", "hkSlippage", "usDividendTax", "feeSummary",
         ):
             self.assertEqual(content.count(f'id="{field}"'), 1, field)
             self.assertGreater(content.index(f'id="{field}"'), content.index('id="assetControls"'))
