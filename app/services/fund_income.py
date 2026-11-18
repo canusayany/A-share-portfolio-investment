@@ -67,7 +67,65 @@ def parse_money_income(issuer, history, start, end):
     ]
 
 
-def verified_voo_dividends(issuer_page, archive, start, end):
+def verify_voo_uk_coverage(page, events, end):
+    """Confirm the entire split-adjusted archive against Vanguard's US fund on its UK site."""
+    script = re.search(r'<script\b[^>]*\bid=["\']serverApp-state["\'][^>]*>(.*?)</script>', page, re.S)
+    if not script:
+        raise ValueError("Vanguard UK fund state missing")
+    state = json.loads(script[1])
+    facts = state["gpx.fund-facts"]["facts"]
+    if (facts["isin"]["value"] != "US9229083632" or facts["currency"]["value"] != "USD"
+            or state["gpx.fund-page-heading"]["portId"] != "0968"):
+        raise ValueError("Vanguard UK VOO identity mismatch")
+
+    histories = []
+    quote_dates = []
+    for response in state.values():
+        if not isinstance(response, dict) or not isinstance(response.get("b"), dict):
+            continue
+        data = response["b"].get("data")
+        if not isinstance(data, dict):
+            continue
+        for fund in data.get("funds", []):
+            profile = fund.get("profile", {})
+            if profile.get("portId") != "0968" or profile.get("fundCurrency") != "USD":
+                continue
+            # The page also embeds a one-row summary without a top-level portfolio ID.
+            if fund.get("portId") == "0968" and "distributionDetails" in fund:
+                histories.append(fund["distributionDetails"]["periodicDistributions"]["items"])
+            for group in fund.get("pricingDetails", {}).get("marketPrices", {}).get("items", []):
+                if group.get("portId") == "0968":
+                    for quote in group["items"]:
+                        price = float(quote["price"])
+                        if quote["currencyCode"] == "USD" and math.isfinite(price) and price > 0:
+                            quote_dates.append(date.fromisoformat(quote["asOfDate"]))
+    if not quote_dates or max(quote_dates) < date.fromisoformat(end):
+        raise ValueError("Vanguard UK VOO data has not reached the requested end date")
+    if len(histories) != 1:
+        raise ValueError("Vanguard UK VOO complete distribution history missing or ambiguous")
+
+    confirmed = set()
+    for row in histories[0]:
+        ex = date.fromisoformat(row["exDividendDate"]).isoformat()
+        record = date.fromisoformat(row["recordDate"]).isoformat()
+        paid = date.fromisoformat(row["payableDate"]).isoformat()
+        taxes = row["taxDetails"]
+        if (not ex <= record <= paid or len(taxes) != 1 or taxes[0]["currencyCode"] != "USD"
+                or taxes[0]["distributionLevelCode"] != "ACTL" or taxes[0]["distributionType"]["distCode"] != "INC"):
+            raise ValueError(f"Vanguard UK has an unrecognized VOO distribution on {ex}")
+        # OCC 33411: each current share represents two shares before the 2013 reverse split.
+        amount = float(taxes[0]["distributionAmount"]) * (2 if ex < "2013-10-24" else 1)
+        event = events.get(ex)
+        if (not event or ex in confirmed or not math.isfinite(amount) or amount <= 0
+                or event["pay_date"] != paid or event["record_date"] not in (None, record)
+                or not math.isclose(event["div_cash"], amount, rel_tol=0, abs_tol=0.00005)):
+            raise ValueError(f"Vanguard UK and the VOO archive disagree on {ex}")
+        confirmed.add(ex)
+    if confirmed != events.keys():
+        raise ValueError("Vanguard UK and the VOO archive have different distribution dates")
+
+
+def verified_voo_dividends(issuer_page, archive, start, end, *, verify_stale_coverage=None):
     body = html.unescape(issuer_page)
     if '"ticker":"VOO"' not in body or '"fundId":"0968"' not in body:
         raise ValueError("Vanguard VOO identity mismatch")
@@ -112,6 +170,11 @@ def verified_voo_dividends(issuer_page, archive, start, end):
         year, quarter = next_quarter.year, (next_quarter.month - 1) // 3
     asof_dates = [datetime.strptime(d, "%m/%d/%Y").date() for d in
                   re.findall(r'"asOfDate"\s*:\s*"(\d\d/\d\d/\d{4})"', body)]
-    if not asof_dates or date.fromisoformat(end) > max(asof_dates):
-        raise ValueError("Vanguard data has not reached the requested end date")
+    if not asof_dates:
+        raise ValueError("Vanguard data has no as-of date")
+    if date.fromisoformat(end) > max(asof_dates):
+        if verify_stale_coverage:
+            verify_stale_coverage(events, end)
+        else:
+            raise ValueError("Vanguard data has not reached the requested end date")
     return [event for day, event in sorted(events.items()) if start <= day <= end]

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from app.config import normalize_config
 from app.db import connect, data_status, db_session, init_db, insert_many, json_dumps, json_loads, rows_to_dicts
@@ -1077,6 +1078,37 @@ class DbAndSyncTests(unittest.TestCase):
 
         self.assertEqual(result["inserted"]["prices"], 0)
         self.assertEqual(result["inserted"]["dividends"], 1)
+
+    def test_verified_voo_coverage_refreshes_only_affected_cached_comparison(self) -> None:
+        db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")
+        enable_assets(cfg, "VOO")
+        missing_day = "2020-12-31"
+        cached_gaps = [
+            ("voo-dividend-gap", missing_day, "dividends:VOO"),
+            ("voo-price-gap", missing_day, "prices:VOO"),
+            ("outside-repair", "2021-01-04", "dividends:VOO"),
+        ]
+        with db_session(db_path) as conn:
+            conn.execute("DELETE FROM sync_coverage WHERE kind='dividends' AND symbol='VOO'")
+            mark_sync_coverage(conn, "dividends", "VOO", "2020-01-01", "2020-12-30", "test")
+            for run_id, gap_date, gap in cached_gaps:
+                coverage = {"first_gap_date": gap_date, "gaps": [gap]}
+                conn.execute(
+                    "INSERT INTO backtest_runs VALUES (?,?,?,?,?)",
+                    (run_id, missing_day, run_id, "{}", json.dumps({"data_coverage": {"voo_comparison": coverage}})),
+                )
+            with patch.object(data_sync_module, "fetch_verified_voo_dividends", return_value=[]):
+                result = sync_all(
+                    conn, "", cfg["start_date"], cfg["end_date"], cfg["assets"], missing_items=["dividends:VOO"],
+                )
+            remaining = missing_coverage_ranges(conn, "dividends", "VOO", missing_day, missing_day)
+            hashes = dict(conn.execute("SELECT run_id, config_hash FROM backtest_runs"))
+
+        self.assertEqual(result["inserted"]["dividends"], 0)
+        self.assertEqual(remaining, [])
+        self.assertIsNone(hashes["voo-dividend-gap"])
+        self.assertEqual(hashes["voo-price-gap"], "voo-price-gap")
+        self.assertEqual(hashes["outside-repair"], "outside-repair")
 
     def test_cn_dividend_sync_marks_public_empty_coverage(self) -> None:
         db_path, cfg = build_synced_db("2020-01-01", "2020-12-31")

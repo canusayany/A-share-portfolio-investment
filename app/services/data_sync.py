@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from app.config import DEFAULT_ASSETS, asset_price_start_date, asset_trade_start_date, required_fx_pairs_for_assets
 from app.db import insert_many, upsert_assets, utc_now
 from app.services.price_data import INDEX_PROXY_PRICE_SOURCES
-from app.services.fund_income import missing_money_dates, parse_money_income, verified_voo_dividends
+from app.services.fund_income import missing_money_dates, parse_money_income, verified_voo_dividends, verify_voo_uk_coverage
 from app.services.repo_history import fetch_verified_repo_absences, verified_repo_absence_dates
 from app.services.calendar import (
     asset_business_days, business_days, calendar_missing_years, daterange, market_business_days,
@@ -101,8 +101,14 @@ def fetch_money_fund_income(start: str, end: str) -> list[dict[str, Any]]:
 def fetch_verified_voo_dividends(start: str, end: str) -> list[dict[str, Any]]:
     issuer = fetch_text("https://investor.vanguard.com/investment-products/etfs/profile/voo", timeout=30)
     archive = fetch_digrin_dividends("VOO", "2010-09-07", "9999-12-31", "USD")
+
+    def verify_uk(events, through):
+        url = "https://www.vanguard.co.uk/uk-fund-directory/product/etf/equity/0968/sp-500-etf"
+        verify_voo_uk_coverage(fetch_text(url, timeout=30), events, through)
+        logger.info("VOO dividend coverage through %s confirmed against Vanguard UK complete distribution history", through)
+
     try:
-        return verified_voo_dividends(issuer, archive, start, end)
+        return verified_voo_dividends(issuer, archive, start, end, verify_stale_coverage=verify_uk)
     except (TypeError, ValueError, KeyError) as exc:
         raise SyncWarning(f"VOO distribution verification failed: {exc}") from exc
 
@@ -3932,6 +3938,20 @@ def sync_all(
             inserted["dividends"] += upsert_dividend_rows(conn, bundle["dividends"])
             for coverage_symbol, coverage_start, coverage_end, coverage_source in bundle["dividend_coverage"]:
                 mark_sync_coverage(conn, "dividends", coverage_symbol, coverage_start, coverage_end, coverage_source)
+                if coverage_symbol == "VOO":
+                    # A verified day without a distribution can unblock a cached comparison.
+                    conn.execute(
+                        """
+                        UPDATE backtest_runs SET config_hash=NULL
+                        WHERE config_hash IS NOT NULL
+                          AND json_extract(summary_json, '$.data_coverage.voo_comparison.first_gap_date') BETWEEN ? AND ?
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(summary_json, '$.data_coverage.voo_comparison.gaps')
+                              WHERE value='dividends:VOO'
+                          )
+                        """,
+                        (coverage_start, coverage_end),
+                    )
             inserted["adj_factors"] += insert_many(conn, "adj_factors", bundle["adj"])
 
     for asset in chinabond_assets:
